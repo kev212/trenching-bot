@@ -15,11 +15,13 @@ class GMGNClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.host = BASE_URL
-        self.proxy = os.environ.get("GMGN_PROXY") or ""
-        if self.proxy:
-            logger.warning(f"GMGN using proxy: {self.proxy[:30]}...")
+        self.proxy = os.environ.get("GMGN_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
+        if self.proxy and self.proxy.startswith("socks"):
+            logger.warning(f"GMGN using SOCKS proxy: {self.proxy[:40]}...")
+        elif self.proxy:
+            logger.warning(f"GMGN using proxy: {self.proxy[:40]}...")
         else:
-            logger.warning("GMGN: NO proxy configured")
+            logger.warning("GMGN: no proxy configured, using direct connection")
 
     def _auth_params(self) -> dict:
         return {
@@ -36,11 +38,14 @@ class GMGNClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.proxy:
-            connector = ProxyConnector.from_url(self.proxy)
-            return aiohttp.ClientSession(
-                connector=connector,
-                headers=self._headers(),
-            )
+            try:
+                connector = ProxyConnector.from_url(self.proxy)
+                return aiohttp.ClientSession(
+                    connector=connector,
+                    headers=self._headers(),
+                )
+            except Exception as e:
+                logger.error(f"Proxy connector error: {e}, falling back to direct")
         return aiohttp.ClientSession(headers=self._headers())
 
     async def _get(self, path: str, params: dict = None) -> dict:
