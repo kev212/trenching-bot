@@ -60,6 +60,7 @@ class TrenchingBot:
         self.queue = asyncio.Queue(maxsize=settings.max_queue_size)
         self.state.queue = self.queue
         self.gmgn = GMGNClient(settings.gmgn_api_key, settings.http_proxy)
+        logger.warning(f"GMGN init: proxy=[{self.gmgn.proxy[:50] if self.gmgn.proxy else 'NONE'}]")
         self.mimo = MiMoClient()
         self.rate_limiter = RateLimiter(15, 60)  # 15 req/min (3 calls per token = ~5 tokens/min)
         self.tasks = {}

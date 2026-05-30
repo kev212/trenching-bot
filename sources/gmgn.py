@@ -15,7 +15,6 @@ class GMGNClient:
         self.api_key = api_key
         self.host = BASE_URL
         self.proxy = proxy or os.environ.get("GMGN_PROXY") or ""
-        print(f"GMGN PROXY DEBUG: [{self.proxy[:50]}] env={os.environ.get('GMGN_PROXY','NONE')[:50]}")
 
     def _auth_params(self) -> dict:
         return {
