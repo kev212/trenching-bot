@@ -1,9 +1,8 @@
-import asyncio
 import logging
 import os
 import time
 import uuid
-import aiohttp
+import httpx
 
 logger = logging.getLogger("main")
 
@@ -14,8 +13,11 @@ class GMGNClient:
     def __init__(self, api_key: str, proxy: str = ""):
         self.api_key = api_key
         self.host = BASE_URL
-        self.proxy = proxy or os.environ.get("GMGN_PROXY") or "http://tVE69e331ce8edc1:BHk84K9w3PMzJjgGCP@202.155.131.74:44001"
-        logger.warning(f"GMGN proxy: {self.proxy[:30]}...")
+        self.proxy = proxy or os.environ.get("GMGN_PROXY") or ""
+        if self.proxy:
+            logger.warning(f"GMGN proxy: {self.proxy[:40]}...")
+        else:
+            logger.warning("GMGN: NO proxy")
 
     def _auth_params(self) -> dict:
         return {
@@ -30,33 +32,28 @@ class GMGNClient:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         }
 
-    def _proxy_kwargs(self) -> dict:
+    def _client_kwargs(self) -> dict:
+        kwargs = {"headers": self._headers(), "timeout": 15.0, "verify": False}
         if self.proxy:
-            return {"proxy": self.proxy}
-        return {}
+            kwargs["proxy"] = self.proxy
+        return kwargs
 
     async def _get(self, path: str, params: dict = None) -> dict:
         try:
             query = {**(params or {}), **self._auth_params()}
-            async with aiohttp.ClientSession(headers=self._headers()) as session:
-                async with session.get(
-                    f"{self.host}{path}",
-                    params=query,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                    **self._proxy_kwargs(),
-                ) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        logger.warning(f"GMGN {path}: HTTP {resp.status} - {text[:200]}")
-                        return {}
-                    data = await resp.json()
-                    if data.get("code") != 0:
-                        logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
-                        return {}
-                    result = data.get("data", data)
-                    if isinstance(result, dict) and "data" in result:
-                        result = result["data"]
-                    return result
+            async with httpx.AsyncClient(**self._client_kwargs()) as client:
+                resp = await client.get(f"{self.host}{path}", params=query)
+                if resp.status_code != 200:
+                    logger.warning(f"GMGN {path}: HTTP {resp.status_code} - {resp.text[:200]}")
+                    return {}
+                data = resp.json()
+                if data.get("code") != 0:
+                    logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
+                    return {}
+                result = data.get("data", data)
+                if isinstance(result, dict) and "data" in result:
+                    result = result["data"]
+                return result
         except Exception as e:
             logger.error(f"GMGN {path} error: {e}")
             return {}
@@ -64,23 +61,16 @@ class GMGNClient:
     async def _post(self, path: str, body: dict = None) -> dict:
         try:
             query = self._auth_params()
-            async with aiohttp.ClientSession(headers=self._headers()) as session:
-                async with session.post(
-                    f"{self.host}{path}",
-                    params=query,
-                    json=body or {},
-                    timeout=aiohttp.ClientTimeout(total=15),
-                    **self._proxy_kwargs(),
-                ) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        logger.warning(f"GMGN {path}: HTTP {resp.status} - {text[:200]}")
-                        return {}
-                    data = await resp.json()
-                    if data.get("code") != 0:
-                        logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
-                        return {}
-                    return data.get("data", data)
+            async with httpx.AsyncClient(**self._client_kwargs()) as client:
+                resp = await client.post(f"{self.host}{path}", params=query, json=body or {})
+                if resp.status_code != 200:
+                    logger.warning(f"GMGN {path}: HTTP {resp.status_code} - {resp.text[:200]}")
+                    return {}
+                data = resp.json()
+                if data.get("code") != 0:
+                    logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
+                    return {}
+                return data.get("data", data)
         except Exception as e:
             logger.error(f"GMGN {path} error: {e}")
             return {}
