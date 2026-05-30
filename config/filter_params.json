@@ -1,0 +1,69 @@
+{
+  "version": 4,
+  "updated_at": "2026-05-31T00:00:00Z",
+  "filters": {
+    "token_age": {
+      "enabled": true,
+      "max_token_age_minutes": 30,
+      "weight": 0.10
+    },
+    "min_market_cap": {
+      "enabled": true,
+      "min_mc_usd": 7000,
+      "weight": 0.10
+    },
+    "max_market_cap": {
+      "enabled": true,
+      "max_mc_usd": 200000,
+      "weight": 0.10
+    },
+    "min_total_fee": {
+      "enabled": true,
+      "min_fee_sol": 0.5,
+      "weight": 0.10
+    },
+    "mc_fee_ratio": {
+      "enabled": true,
+      "min_fee_sol_per_10k_mc": 1.0,
+      "weight": 0.10
+    },
+    "bundle_detection": {
+      "enabled": true,
+      "max_insider_ratio": 0.50,
+      "weight": 0.10
+    },
+    "wash_trading": {
+      "enabled": true,
+      "weight": 0.10
+    },
+    "min_holders": {
+      "enabled": true,
+      "min_holders": 100,
+      "weight": 0.05
+    },
+    "top_holder_balance": {
+      "enabled": true,
+      "min_balance_sol": 0.2,
+      "weight": 0.05
+    },
+    "funded_wallet_age": {
+      "enabled": true,
+      "max_new_wallet_pct": 30,
+      "weight": 0.10
+    },
+    "rug_probability": {
+      "enabled": true,
+      "max_rug_prob": 0.40,
+      "weight": 0.10
+    },
+    "holder_distribution": {
+      "enabled": true,
+      "max_top10_pct": 50,
+      "weight": 0.05
+    },
+    "social_narrative": {
+      "enabled": true,
+      "weight": 0.05
+    }
+  }
+}

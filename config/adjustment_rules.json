@@ -1,0 +1,10 @@
+{
+  "max_change_pct": 0.20,
+  "min_confidence": 0.70,
+  "min_samples": 10,
+  "cooldown_hours": 24,
+  "auto_revert_threshold": 0.10,
+  "max_adjustments_per_cycle": 3,
+  "never_disable_filters": true,
+  "revert_check_after_hours": 24
+}

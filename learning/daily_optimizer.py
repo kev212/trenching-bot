@@ -1,0 +1,182 @@
+import asyncio
+import json
+import logging
+from datetime import datetime, timedelta
+
+from config import settings, load_filter_params, save_filter_params, load_adjustment_rules
+from llm.mimo_client import MiMoClient
+from llm.prompts import OPTIMIZER_SYSTEM, OPTIMIZER_USER
+from llm.parser import parse_optimizer_suggestions
+
+logger = logging.getLogger(__name__)
+
+
+async def daily_optimizer(state, db):
+    logger.info("Daily optimizer started")
+    mimo = MiMoClient()
+
+    while True:
+        try:
+            now = datetime.utcnow()
+            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            wait_seconds = (tomorrow - now).total_seconds()
+            logger.info(f"Next optimization at {tomorrow.isoformat()} (in {wait_seconds:.0f}s)")
+            await asyncio.sleep(wait_seconds)
+
+            await _run_optimization(state, db, mimo)
+
+        except Exception as e:
+            logger.error(f"Daily optimizer error: {e}")
+            await asyncio.sleep(60)
+
+
+async def _run_optimization(state, db, mimo: MiMoClient):
+    try:
+        rules = load_adjustment_rules()
+
+        recent_adjustments = await db.get_adjustments_since(
+            datetime.utcnow() - timedelta(hours=rules["cooldown_hours"])
+        )
+        if recent_adjustments:
+            logger.info("Skipping optimization: cooldown period active")
+            return
+
+        yesterday = datetime.utcnow() - timedelta(hours=24)
+        calls = await db.get_calls_in_range(yesterday, datetime.utcnow())
+
+        if len(calls) < rules["min_samples"]:
+            logger.info(f"Not enough samples ({len(calls)} < {rules['min_samples']}), skipping")
+            return
+
+        wins = [c for c in calls if c.status.value == "WIN"]
+        losses = [c for c in calls if c.status.value == "LOSS"]
+        total = len(wins) + len(losses)
+
+        if total == 0:
+            return
+
+        win_rate = len(wins) / total * 100
+
+        current_params = load_filter_params()
+
+        loss_data = []
+        for call in losses:
+            loss_data.append({
+                "token": call.token_symbol,
+                "score": call.llm_score,
+                "verdict": call.llm_verdict,
+                "max_gain": call.max_gain,
+                "reasoning": call.llm_reasoning,
+            })
+
+        win_data = []
+        for call in wins:
+            win_data.append({
+                "token": call.token_symbol,
+                "score": call.llm_score,
+                "max_gain": call.max_gain,
+            })
+
+        filter_perf = _calculate_filter_performance(calls, current_params.get("filters", {}))
+
+        prompt = OPTIMIZER_USER.format(
+            total_calls=len(calls),
+            wins=len(wins),
+            win_rate=win_rate,
+            losses=len(losses),
+            pending=len([c for c in calls if c.status.value == "PENDING"]),
+            current_params_json=json.dumps(current_params.get("filters", {}), indent=2),
+            loss_analysis_json=json.dumps(loss_data[:10], indent=2),
+            win_patterns_json=json.dumps(win_data[:10], indent=2),
+            filter_performance_json=json.dumps(filter_perf, indent=2),
+        )
+
+        result = await mimo.analyze_token(OPTIMIZER_SYSTEM, prompt, temperature=0.3)
+        suggestions = parse_optimizer_suggestions(result)
+
+        if not suggestions:
+            logger.info("No optimization suggestions from MiMo")
+            return
+
+        valid_suggestions = _validate_adjustments(suggestions, rules, current_params.get("filters", {}))
+
+        if not valid_suggestions:
+            logger.info("No valid adjustments after validation")
+            return
+
+        filters = current_params.get("filters", {})
+        for adj in valid_suggestions:
+            filter_name = adj["filter"]
+            param_name = adj["param"]
+            new_value = adj["new_value"]
+
+            if filter_name in filters and param_name in filters[filter_name]:
+                old_value = filters[filter_name][param_name]
+                filters[filter_name][param_name] = new_value
+
+                await db.save_adjustment(
+                    filter_name, param_name, old_value, new_value,
+                    adj["reason"], adj["confidence"], win_rate,
+                )
+
+                logger.info(f"Adjusted {filter_name}.{param_name}: {old_value} -> {new_value}")
+
+        current_params["filters"] = filters
+        current_params["version"] = current_params.get("version", 0) + 1
+        current_params["updated_at"] = datetime.utcnow().isoformat()
+
+        save_filter_params(current_params)
+        await state.set_filter_params(filters, current_params["version"])
+
+        logger.info(f"Optimization complete. Applied {len(valid_suggestions)} adjustments. New version: {current_params['version']}")
+
+    except Exception as e:
+        logger.error(f"Optimization run error: {e}")
+
+
+def _calculate_filter_performance(calls: list, filters: dict) -> dict:
+    perf = {}
+    for name in filters:
+        perf[name] = {"enabled": filters[name].get("enabled", True)}
+    return perf
+
+
+def _validate_adjustments(suggestions: list, rules: dict, current_filters: dict) -> list:
+    valid = []
+    max_change = rules.get("max_change_pct", 0.20)
+    min_confidence = rules.get("min_confidence", 0.70)
+    max_per_cycle = rules.get("max_adjustments_per_cycle", 3)
+
+    for adj in suggestions:
+        if len(valid) >= max_per_cycle:
+            break
+
+        confidence = adj.get("confidence", 0)
+        if confidence < min_confidence:
+            logger.info(f"Skipping {adj['filter']}.{adj['param']}: confidence {confidence} < {min_confidence}")
+            continue
+
+        filter_name = adj["filter"]
+        param_name = adj["param"]
+        old_value = adj.get("old_value")
+        new_value = adj.get("new_value")
+
+        if filter_name not in current_filters:
+            continue
+        if param_name not in current_filters[filter_name]:
+            continue
+
+        current_value = current_filters[filter_name][param_name]
+        if isinstance(current_value, bool):
+            continue
+
+        if current_value != 0:
+            change_pct = abs(new_value - current_value) / abs(current_value)
+            if change_pct > max_change:
+                direction = 1 if new_value > current_value else -1
+                new_value = current_value * (1 + direction * max_change)
+                adj["new_value"] = new_value
+
+        valid.append(adj)
+
+    return valid
