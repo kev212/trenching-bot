@@ -1,8 +1,16 @@
 import asyncio
 import json
 import logging
+import os
 import signal
 from datetime import datetime
+
+logger = logging.getLogger("main")
+
+# DEBUG: print all proxy env vars
+for k, v in sorted(os.environ.items()):
+    if "proxy" in k.lower() or "PROXY" in k:
+        logger.warning(f"ENV: {k}={v[:60]}")
 
 from config import settings
 from storage.database import Database
