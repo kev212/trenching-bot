@@ -15,7 +15,7 @@ class GMGNClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.host = BASE_URL
-        self.proxy = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+        self.proxy = os.environ.get("GMGN_PROXY")
         if self.proxy:
             logger.info(f"GMGN using proxy: {self.proxy}")
 
