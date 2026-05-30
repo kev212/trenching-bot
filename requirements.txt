@@ -7,3 +7,4 @@ pydantic>=2.5.0
 pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
 structlog>=23.2.0
+curl_cffi>=0.13.0

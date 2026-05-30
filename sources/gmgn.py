@@ -2,7 +2,7 @@ import logging
 import os
 import time
 import uuid
-import httpx
+from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger("main")
 
@@ -13,9 +13,9 @@ class GMGNClient:
     def __init__(self, api_key: str, proxy: str = ""):
         self.api_key = api_key
         self.host = BASE_URL
-        self.proxy = proxy or os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or ""
+        self.proxy = proxy or os.environ.get("GMGN_PROXY") or os.environ.get("HTTP_PROXY") or ""
         if self.proxy:
-            logger.warning(f"GMGN proxy: {self.proxy[:40]}...")
+            logger.warning(f"GMGN proxy: {self.proxy[:50]}...")
         else:
             logger.warning("GMGN: NO proxy")
 
@@ -29,22 +29,26 @@ class GMGNClient:
         return {
             "X-APIKEY": self.api_key,
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         }
 
-    def _client_kwargs(self) -> dict:
-        kwargs = {"headers": self._headers(), "timeout": 15.0, "verify": False}
+    def _proxy_dict(self) -> dict:
         if self.proxy:
-            kwargs["proxy"] = self.proxy
-        return kwargs
+            return {"https": self.proxy, "http": self.proxy}
+        return {}
 
     async def _get(self, path: str, params: dict = None) -> dict:
         try:
             query = {**(params or {}), **self._auth_params()}
-            async with httpx.AsyncClient(**self._client_kwargs()) as client:
-                resp = await client.get(f"{self.host}{path}", params=query)
+            async with AsyncSession(impersonate="chrome") as session:
+                resp = await session.get(
+                    f"{self.host}{path}",
+                    params=query,
+                    headers=self._headers(),
+                    proxies=self._proxy_dict(),
+                    timeout=15,
+                )
                 if resp.status_code != 200:
-                    logger.warning(f"GMGN {path}: HTTP {resp.status_code} - {resp.text[:200]}")
+                    logger.warning(f"GMGN {path}: HTTP {resp.status_code}")
                     return {}
                 data = resp.json()
                 if data.get("code") != 0:
@@ -61,10 +65,17 @@ class GMGNClient:
     async def _post(self, path: str, body: dict = None) -> dict:
         try:
             query = self._auth_params()
-            async with httpx.AsyncClient(**self._client_kwargs()) as client:
-                resp = await client.post(f"{self.host}{path}", params=query, json=body or {})
+            async with AsyncSession(impersonate="chrome") as session:
+                resp = await session.post(
+                    f"{self.host}{path}",
+                    params=query,
+                    json=body or {},
+                    headers=self._headers(),
+                    proxies=self._proxy_dict(),
+                    timeout=15,
+                )
                 if resp.status_code != 200:
-                    logger.warning(f"GMGN {path}: HTTP {resp.status_code} - {resp.text[:200]}")
+                    logger.warning(f"GMGN {path}: HTTP {resp.status_code}")
                     return {}
                 data = resp.json()
                 if data.get("code") != 0:
