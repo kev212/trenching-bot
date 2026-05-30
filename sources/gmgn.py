@@ -4,7 +4,6 @@ import os
 import time
 import uuid
 import aiohttp
-from aiohttp_socks import ProxyConnector
 
 logger = logging.getLogger("main")
 
@@ -15,9 +14,9 @@ class GMGNClient:
     def __init__(self, api_key: str, proxy: str = ""):
         self.api_key = api_key
         self.host = BASE_URL
-        self.proxy = proxy or os.environ.get("GMGN_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
+        self.proxy = proxy or os.environ.get("GMGN_PROXY") or ""
         if self.proxy:
-            logger.warning(f"GMGN proxy configured: {self.proxy[:40]}...")
+            logger.warning(f"GMGN proxy: {self.proxy[:40]}...")
 
     def _auth_params(self) -> dict:
         return {
@@ -32,26 +31,20 @@ class GMGNClient:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         }
 
-    async def _get_session(self) -> aiohttp.ClientSession:
+    def _proxy_kwargs(self) -> dict:
         if self.proxy:
-            try:
-                connector = ProxyConnector.from_url(self.proxy)
-                return aiohttp.ClientSession(
-                    connector=connector,
-                    headers=self._headers(),
-                )
-            except Exception as e:
-                logger.error(f"Proxy connector error: {e}, falling back to direct")
-        return aiohttp.ClientSession(headers=self._headers())
+            return {"proxy": self.proxy}
+        return {}
 
     async def _get(self, path: str, params: dict = None) -> dict:
         try:
             query = {**(params or {}), **self._auth_params()}
-            async with await self._get_session() as session:
+            async with aiohttp.ClientSession(headers=self._headers()) as session:
                 async with session.get(
                     f"{self.host}{path}",
                     params=query,
                     timeout=aiohttp.ClientTimeout(total=15),
+                    **self._proxy_kwargs(),
                 ) as resp:
                     if resp.status != 200:
                         text = await resp.text()
@@ -72,12 +65,13 @@ class GMGNClient:
     async def _post(self, path: str, body: dict = None) -> dict:
         try:
             query = self._auth_params()
-            async with await self._get_session() as session:
+            async with aiohttp.ClientSession(headers=self._headers()) as session:
                 async with session.post(
                     f"{self.host}{path}",
                     params=query,
                     json=body or {},
                     timeout=aiohttp.ClientTimeout(total=15),
+                    **self._proxy_kwargs(),
                 ) as resp:
                     if resp.status != 200:
                         text = await resp.text()

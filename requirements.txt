@@ -7,5 +7,3 @@ pydantic>=2.5.0
 pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
 structlog>=23.2.0
-aiohttp-socks>=0.11.0
-socksio>=1.0.0
