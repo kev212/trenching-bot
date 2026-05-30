@@ -6,7 +6,7 @@ import uuid
 import aiohttp
 from aiohttp_socks import ProxyConnector
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("main")
 
 BASE_URL = "https://openapi.gmgn.ai"
 
