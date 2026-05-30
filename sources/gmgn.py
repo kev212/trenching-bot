@@ -12,12 +12,12 @@ BASE_URL = "https://openapi.gmgn.ai"
 
 
 class GMGNClient:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, proxy: str = ""):
         self.api_key = api_key
         self.host = BASE_URL
-
-    def _get_proxy(self) -> str:
-        return os.environ.get("GMGN_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
+        self.proxy = proxy or os.environ.get("GMGN_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
+        if self.proxy:
+            logger.warning(f"GMGN proxy configured: {self.proxy[:40]}...")
 
     def _auth_params(self) -> dict:
         return {
@@ -33,10 +33,9 @@ class GMGNClient:
         }
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        proxy = self._get_proxy()
-        if proxy:
+        if self.proxy:
             try:
-                connector = ProxyConnector.from_url(proxy)
+                connector = ProxyConnector.from_url(self.proxy)
                 return aiohttp.ClientSession(
                     connector=connector,
                     headers=self._headers(),

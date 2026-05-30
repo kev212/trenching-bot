@@ -59,7 +59,7 @@ class TrenchingBot:
         self.state = SharedState()
         self.queue = asyncio.Queue(maxsize=settings.max_queue_size)
         self.state.queue = self.queue
-        self.gmgn = GMGNClient(settings.gmgn_api_key)
+        self.gmgn = GMGNClient(settings.gmgn_api_key, settings.http_proxy)
         self.mimo = MiMoClient()
         self.rate_limiter = RateLimiter(15, 60)  # 15 req/min (3 calls per token = ~5 tokens/min)
         self.tasks = {}
