@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     mimo_base_url: str = "https://api.xiaomimimo.com/v1"
     mimo_model: str = "mimo-v2.5-pro"
     gmgn_api_key: str = ""
+    http_proxy: str = ""
     log_level: str = "INFO"
     db_path: str = "trenching.db"
     max_queue_size: int = 1000

@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import os
 import time
 import uuid
 import aiohttp
+from aiohttp_socks import ProxyConnector
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +15,9 @@ class GMGNClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.host = BASE_URL
+        self.proxy = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+        if self.proxy:
+            logger.info(f"GMGN using proxy: {self.proxy}")
 
     def _auth_params(self) -> dict:
         return {
@@ -24,17 +29,26 @@ class GMGNClient:
         return {
             "X-APIKEY": self.api_key,
             "Content-Type": "application/json",
-            "User-Agent": "TrenchingBot/1.0",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         }
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self.proxy:
+            connector = ProxyConnector.from_url(self.proxy)
+            return aiohttp.ClientSession(
+                connector=connector,
+                headers=self._headers(),
+            )
+        return aiohttp.ClientSession(headers=self._headers())
 
     async def _get(self, path: str, params: dict = None) -> dict:
         try:
             query = {**(params or {}), **self._auth_params()}
-            async with aiohttp.ClientSession(headers=self._headers()) as session:
+            async with await self._get_session() as session:
                 async with session.get(
                     f"{self.host}{path}",
                     params=query,
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
                     if resp.status != 200:
                         text = await resp.text()
@@ -44,7 +58,6 @@ class GMGNClient:
                     if data.get("code") != 0:
                         logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
                         return {}
-                    # Handle nested data structure
                     result = data.get("data", data)
                     if isinstance(result, dict) and "data" in result:
                         result = result["data"]
@@ -56,12 +69,12 @@ class GMGNClient:
     async def _post(self, path: str, body: dict = None) -> dict:
         try:
             query = self._auth_params()
-            async with aiohttp.ClientSession(headers=self._headers()) as session:
+            async with await self._get_session() as session:
                 async with session.post(
                     f"{self.host}{path}",
                     params=query,
                     json=body or {},
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
                     if resp.status != 200:
                         text = await resp.text()
