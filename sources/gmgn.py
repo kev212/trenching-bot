@@ -14,7 +14,8 @@ class GMGNClient:
     def __init__(self, api_key: str, proxy: str = ""):
         self.api_key = api_key
         self.host = BASE_URL
-        self.proxy = proxy or os.environ.get("GMGN_PROXY") or ""
+        self.proxy = proxy or os.environ.get("GMGN_PROXY") or "http://tVE69e331ce8edc1:BHk84K9w3PMzJjgGCP@202.155.131.74:44001"
+        logger.warning(f"GMGN proxy: {self.proxy[:30]}...")
 
     def _auth_params(self) -> dict:
         return {
