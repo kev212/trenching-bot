@@ -11,10 +11,12 @@ from config import settings
 from storage.database import Database
 from storage.cache import SharedState
 from sources.gmgn import GMGNClient
+from sources.twitter import TwitterClient
+from sources.web_scraper import WebScraper
 from analysis.models import TokenData, CallRecord, CallStatus, Verdict
 from analysis.filters import run_all_filters, check_hard_gate
 from llm.mimo_client import MiMoClient
-from llm.prompts import DECISION_SYSTEM, DECISION_USER
+from llm.prompts import DECISION_SYSTEM, DECISION_USER, SOCIAL_ANALYSIS_SYSTEM, SOCIAL_ANALYSIS_USER
 from llm.parser import parse_decision
 from tracking.price_monitor import price_monitor
 from tracking.hourly_recap import hourly_recap
@@ -48,12 +50,24 @@ def _calculate_rug_score(security: dict) -> float:
         score += 0.1
     if float(security.get("buy_tax", 0) or 0) > 0.1:
         score += 0.2
-    if float(security.get("sell_tax", 0) or 0) > 0.1:
+    if float(security.get("sell_tax", 0) or 0) > 0.2:
         score += 0.2
     if float(security.get("burn_ratio", 1) or 1) < 0.5:
         score += 0.1
 
     return min(score, 1.0)
+
+
+def _load_influencers() -> dict:
+    """Load influencer list from config."""
+    config_path = os.path.join(os.path.dirname(__file__), "config", "influencers.json")
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+            return data.get("influencers", {})
+    except Exception as e:
+        logger.warning(f"Failed to load influencers config: {e}")
+        return {}
 
 
 class TrenchingBot:
@@ -64,8 +78,13 @@ class TrenchingBot:
         self.state.queue = self.queue
         self.gmgn = GMGNClient(settings.gmgn_api_key, settings.http_proxy)
         logger.warning(f"GMGN init: proxy=[{self.gmgn.proxy[:50] if self.gmgn.proxy else 'NONE'}]")
+        self.twitter = TwitterClient()
+        self.scraper = WebScraper()
+        self.influencers = _load_influencers()
+        logger.warning(f"Loaded {len(self.influencers)} influencers")
         self.mimo = MiMoClient()
-        self.rate_limiter = RateLimiter(15, 60)  # 15 req/min (3 calls per token = ~5 tokens/min)
+        self.rate_limiter = RateLimiter(15, 60)  # GMGN: 15 req/min
+        self.llm_rate_limiter = RateLimiter(10, 60)  # LLM: 10 req/min
         self.tasks = {}
         self.workers = []
         self.shutdown_event = asyncio.Event()
@@ -321,8 +340,11 @@ class TrenchingBot:
             self.state.metrics.record_call("SKIP")
             return
 
+        # Social analysis (only for tokens that pass hard gate)
+        await self._social_analysis(token, info)
+
         # LLM Decision
-        await self.rate_limiter.acquire()
+        await self.llm_rate_limiter.acquire()
         fv_dict = fv.to_dict()
 
         prompt = DECISION_USER.format(
@@ -379,6 +401,100 @@ class TrenchingBot:
                 decision.reasoning, decision.confidence,
                 decision.key_factors, decision.processing_time_ms,
             )
+
+    async def _social_analysis(self, token: TokenData, info: dict):
+        """Analyze social media presence for tokens that pass hard gate."""
+        try:
+            link = info.get("link", {})
+            token.twitter_username = link.get("twitter_username", "")
+            token.website_url = link.get("website", "")
+            token.telegram_url = link.get("telegram", "")
+
+            influencer_mentions = []
+
+            # 1. Twitter profile + recent tweets
+            if token.twitter_username:
+                try:
+                    profile = await self.twitter.get_profile(token.twitter_username)
+                    if profile:
+                        token.twitter_followers = profile.get("followers", 0)
+                        token.twitter_verified = profile.get("verification", {}).get("verified", False)
+                        token.twitter_description = profile.get("description", "")
+                except Exception as e:
+                    logger.warning(f"Twitter profile error for {token.symbol}: {e}")
+
+                try:
+                    tweets = await self.twitter.get_recent_tweets(token.twitter_username, 3)
+                    token.recent_tweets = tweets
+                except Exception as e:
+                    logger.warning(f"Twitter tweets error for {token.symbol}: {e}")
+
+            # 2. Website scraping
+            if token.website_url:
+                try:
+                    token.website_text = await self.scraper.scrape_text(token.website_url)
+                except Exception as e:
+                    logger.warning(f"Website scrape error for {token.symbol}: {e}")
+
+            # 3. Search FxTwitter by contract address
+            try:
+                search_results = await self.twitter.search_by_contract(token.address, 10)
+
+                # 4. Influencer detection (direct, no LLM)
+                for tweet in search_results:
+                    author = tweet.get("author", {}).get("screen_name", "").lower()
+                    if author in self.influencers:
+                        influencer_mentions.append({
+                            "handle": author,
+                            "name": self.influencers[author]["name"],
+                            "weight": self.influencers[author]["weight"],
+                            "tweet_text": tweet.get("text", "")[:100],
+                            "likes": tweet.get("likes", 0),
+                        })
+                        if author == "elonmusk":
+                            token.has_elon_tweet = True
+                        elif author == "aeyakovenko":
+                            token.has_toly_tweet = True
+            except Exception as e:
+                logger.warning(f"Twitter search error for {token.symbol}: {e}")
+
+            token.influencer_mentions = influencer_mentions
+
+            # 5. LLM #1: Social analysis
+            social_prompt = SOCIAL_ANALYSIS_USER.format(
+                twitter_username=token.twitter_username or "none",
+                twitter_followers=token.twitter_followers,
+                twitter_verified="Yes" if token.twitter_verified else "No",
+                twitter_description=token.twitter_description[:200] or "No description",
+                recent_tweets=json.dumps(token.recent_tweets[:3], indent=2) if token.recent_tweets else "No tweets found",
+                website_text=token.website_text[:500] or "No website content",
+                search_results=json.dumps(search_results[:5], indent=2) if search_results else "No search results",
+                influencer_mentions=json.dumps(influencer_mentions, indent=2) if influencer_mentions else "No influencer mentions",
+            )
+
+            await self.llm_rate_limiter.acquire()
+            social_result = await self.mimo.analyze_token(SOCIAL_ANALYSIS_SYSTEM, social_prompt)
+
+            # 6. Parse LLM #1 response
+            if social_result:
+                try:
+                    social_data = json.loads(social_result) if isinstance(social_result, str) else social_result
+                    token.project_type = social_data.get("project_type", "unknown")
+                    token.social_narrative_score = float(social_data.get("score", 0))
+                    token.social_narrative_text = social_data.get("summary", "")
+                except Exception as e:
+                    logger.warning(f"Social analysis parse error for {token.symbol}: {e}")
+                    token.project_type = "unknown"
+                    token.social_narrative_score = 0
+                    token.social_narrative_text = ""
+
+            logger.info(f"[SOCIAL] {token.symbol}: score={token.social_narrative_score:.0f}/100, project={token.project_type}")
+
+        except Exception as e:
+            logger.error(f"Social analysis error for {token.symbol}: {e}")
+            token.project_type = "unknown"
+            token.social_narrative_score = 0
+            token.social_narrative_text = ""
 
     async def _metrics_loop(self):
         while True:

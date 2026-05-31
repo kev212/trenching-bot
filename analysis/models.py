@@ -36,11 +36,33 @@ class TokenData:
     total_volume: float = 0.0
     dex_paid: bool = False
     is_wash_trading: bool = False
-    social_narrative_score: float = 0.0
-    social_narrative_text: str = ""
     created_at: Optional[datetime] = None
     raw_gmgn: dict = field(default_factory=dict)
     raw_dex: dict = field(default_factory=dict)
+    
+    # Social links (from GMGN)
+    twitter_username: str = ""
+    website_url: str = ""
+    telegram_url: str = ""
+    
+    # Twitter data (from FxTwitter)
+    twitter_followers: int = 0
+    twitter_verified: bool = False
+    twitter_description: str = ""
+    recent_tweets: list = field(default_factory=list)
+    
+    # Influencer detection
+    influencer_mentions: list = field(default_factory=list)
+    has_elon_tweet: bool = False
+    has_toly_tweet: bool = False
+    
+    # Website content
+    website_text: str = ""
+    
+    # Social narrative scoring
+    social_narrative_score: float = 0.0
+    social_narrative_text: str = ""
+    project_type: str = ""
 
 
 @dataclass

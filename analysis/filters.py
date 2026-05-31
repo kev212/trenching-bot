@@ -204,16 +204,20 @@ def _filter_holder_distribution(token: TokenData, params: dict) -> dict:
 
 
 def _filter_social_narrative(token: TokenData, params: dict) -> dict:
-    # Social narrative is a bonus, not a hard gate
-    # Always passes, but includes data for LLM context
     score = token.social_narrative_score
-    text = token.social_narrative_text[:100] if token.social_narrative_text else ""
+    project_type = token.project_type
+    influencer_count = len(token.influencer_mentions)
+    has_twitter = bool(token.twitter_username)
+    has_website = bool(token.website_url)
 
     return {
         "score": score,
-        "has_text": bool(text),
+        "project_type": project_type,
+        "influencer_count": influencer_count,
+        "has_twitter": has_twitter,
+        "has_website": has_website,
         "passed": True,  # Always passes (bonus, not hard gate)
-        "note": f"Social score: {score:.1f}" + (f' "{text}..."' if text else " (no data)"),
+        "note": f"Social: {score:.0f}/100 ({project_type}) {influencer_count} influencers",
     }
 
 

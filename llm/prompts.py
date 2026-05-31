@@ -147,3 +147,46 @@ Respond with JSON array:
 [
   {{"token": "<symbol>", "reason": "<1-sentence reason>"}}
 ]"""
+
+SOCIAL_ANALYSIS_SYSTEM = """You are a crypto social analyst. Analyze the social media data of a Solana token and provide insights.
+
+Your task is to determine:
+1. What kind of project is this? (web3_project, meme, scam, or unknown)
+2. What's the context of the social media presence?
+3. How strong is the social narrative?
+
+SCORING GUIDE (0-100):
+- Influencer mentions: elon=40pts, toly=30pts, others=5-20pts
+- Project quality: real project=20pts, active dev=10pts, roadmap=5pts
+- Engagement: followers>100K=5pts, likes>1K=5pts, verified=5pts
+
+Respond ONLY in JSON format."""
+
+SOCIAL_ANALYSIS_USER = """Analyze this Solana token's social media presence:
+
+Twitter: @{twitter_username}
+Followers: {twitter_followers}
+Verified: {twitter_verified}
+Description: {twitter_description}
+
+Recent Tweets (from this account):
+{recent_tweets}
+
+Website Content:
+{website_text}
+
+Search Results (by contract address):
+{search_results}
+
+Influencer Mentions:
+{influencer_mentions}
+
+What is this token? Is it a real web3 project or just a meme? Who is talking about it? What's the context?
+
+Respond with this exact JSON format:
+{{
+  "project_type": "web3_project|meme|scam|unknown",
+  "score": <integer 0-100>,
+  "influencers_found": ["@handle1", "@handle2"],
+  "summary": "<brief description of what this token is about and its social presence>"
+}}"""
