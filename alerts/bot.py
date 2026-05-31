@@ -305,6 +305,7 @@ async def bot_handler(state, db):
             result = await _bot_app.bot.set_webhook(
                 url=webhook_url,
                 drop_pending_updates=True,
+                allowed_updates=["message"],
             )
             if result:
                 logger.info(f"Webhook registered: {webhook_url}")
