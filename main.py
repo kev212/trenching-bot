@@ -265,7 +265,7 @@ class TrenchingBot:
             holders = {}
 
         if not info:
-            logger.info(f"[SKIP] {token_info.get('symbol','?')}: no data")
+            logger.info(f"[SKIP] {token_info.get('symbol','?')} ({address[:8]}): no data")
             self.state.metrics.record_call("SKIP")
             return
 
@@ -334,9 +334,9 @@ class TrenchingBot:
         all_passed, failures = check_hard_gate(fv)
 
         if all_passed:
-            logger.info(f"[PASS] {token.symbol}: all filters passed")
+            logger.info(f"[PASS] {token.symbol} ({address[:8]}): all filters passed")
         else:
-            logger.info(f"[SKIP] {token.symbol}: failed {len(failures)} filters: {failures}")
+            logger.info(f"[SKIP] {token.symbol} ({address[:8]}): failed {len(failures)} filters: {failures}")
             self.state.metrics.record_call("SKIP")
             return
 
@@ -361,7 +361,7 @@ class TrenchingBot:
         raw = await self.mimo.analyze_token(DECISION_SYSTEM, prompt)
         decision = parse_decision(raw)
 
-        logger.info(f"[LLM] {token.symbol} = {decision.score}/100 ({decision.verdict.value})")
+        logger.info(f"[LLM] {token.symbol} ({address[:8]}) = {decision.score}/100 ({decision.verdict.value})")
         self.state.metrics.record_call(decision.verdict.value)
 
         # Alert if APE or WATCH
@@ -394,7 +394,7 @@ class TrenchingBot:
             await dispatcher.send_alert(alert_text)
             self.state.metrics.record_alert()
 
-            logger.info(f"[ALERT SENT] {token.symbol} ({decision.verdict.value})")
+            logger.info(f"[ALERT SENT] {token.symbol} ({address[:8]}) ({decision.verdict.value})")
 
             await self.db.save_llm_decision(
                 call_id, decision.score, decision.verdict.value,
@@ -488,7 +488,7 @@ class TrenchingBot:
                     token.social_narrative_score = 0
                     token.social_narrative_text = ""
 
-            logger.info(f"[SOCIAL] {token.symbol}: score={token.social_narrative_score:.0f}/100, project={token.project_type}")
+            logger.info(f"[SOCIAL] {token.symbol} ({address[:8]}): score={token.social_narrative_score:.0f}/100, project={token.project_type}")
 
         except Exception as e:
             logger.error(f"Social analysis error for {token.symbol}: {e}")

@@ -29,7 +29,7 @@
     },
     "bundle_detection": {
       "enabled": true,
-      "max_insider_ratio": 0.50,
+      "max_insider_ratio": 0.40,
       "weight": 0.10
     },
     "wash_trading": {
