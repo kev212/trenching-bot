@@ -1,7 +1,12 @@
 import asyncio
 import logging
+import os
+import time
+import uuid
 from datetime import datetime, timedelta
 
+import aiohttp
+from aiohttp import web
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from config import settings
@@ -244,7 +249,6 @@ async def bot_handler(state, db):
     global _bot_app
 
     _bot_app = Application.builder().token(settings.telegram_bot_token).build()
-
     _bot_app.bot_data["state"] = state
     _bot_app.bot_data["db"] = db
 
@@ -260,10 +264,58 @@ async def bot_handler(state, db):
     _bot_app.add_handler(CommandHandler("ping", cmd_ping))
 
     await _bot_app.initialize()
-    await _bot_app.start()
-    await _bot_app.updater.start_polling(drop_pending_updates=True)
 
-    logger.info("Telegram bot polling started")
+    port = int(os.environ.get("PORT", 8080))
+
+    webhook_url = os.environ.get("TELEGRAM_WEBHOOK_URL", "")
+    if not webhook_url:
+        railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+        if railway_domain:
+            webhook_url = f"https://{railway_domain}/telegram/webhook"
+        else:
+            webhook_url = f"http://127.0.0.1:{port}/telegram/webhook"
+
+    logger.warning(f"WEBHOOK URL: {webhook_url}")
+
+    async def handle_webhook(request: web.Request):
+        try:
+            data = await request.json()
+            update = Update.de_json(data, _bot_app.bot)
+            await _bot_app.process_update(update)
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
+        return web.Response(text="ok")
+
+    async def health_check(request: web.Request):
+        return web.Response(text="ok")
+
+    app = web.Application()
+    app.router.add_post("/telegram/webhook", handle_webhook)
+    app.router.add_get("/health", health_check)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    logger.info(f"Webhook server started on port {port}")
+
+    for attempt in range(5):
+        try:
+            result = await _bot_app.bot.set_webhook(
+                url=webhook_url,
+                drop_pending_updates=True,
+            )
+            if result:
+                logger.info(f"Webhook registered: {webhook_url}")
+                break
+            else:
+                logger.warning(f"Webhook set failed (attempt {attempt+1}/5)")
+        except Exception as e:
+            logger.warning(f"Webhook set error (attempt {attempt+1}/5): {e}")
+        await asyncio.sleep(2)
+
+    logger.info("Telegram webhook bot ready")
 
     try:
         while True:
@@ -271,6 +323,5 @@ async def bot_handler(state, db):
     except asyncio.CancelledError:
         pass
     finally:
-        await _bot_app.updater.stop()
-        await _bot_app.stop()
         await _bot_app.shutdown()
+        await runner.cleanup()
