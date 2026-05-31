@@ -280,8 +280,10 @@ async def bot_handler(state, db):
     async def handle_webhook(request: web.Request):
         try:
             data = await request.json()
+            logger.info(f"WEBHOOK: update_id={data.get('update_id')} keys={list(data.keys())}")
             update = Update.de_json(data, _bot_app.bot)
             await _bot_app.process_update(update)
+            logger.info(f"WEBHOOK: processed update {data.get('update_id')}")
         except Exception as e:
             logger.error(f"Webhook error: {e}")
         return web.Response(text="ok")
