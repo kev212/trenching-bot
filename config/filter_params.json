@@ -4,7 +4,7 @@
   "filters": {
     "token_age": {
       "enabled": true,
-      "max_token_age_minutes": 30,
+      "max_token_age_minutes": 60,
       "weight": 0.10
     },
     "min_market_cap": {
