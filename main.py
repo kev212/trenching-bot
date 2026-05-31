@@ -215,25 +215,32 @@ class TrenchingBot:
         is_wash = token_info.get("is_wash_trading", False)
         bot_rate = float(token_info.get("bot_degen_rate", 0) or 0)
         open_ts = token_info.get("open_timestamp", 0) or 0
+        symbol = token_info.get("symbol", "?") or "?"
 
         if mc <= 0:
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=0")
             self.state.metrics.record_call("SKIP")
             return
         if mc < 7000:
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=${mc:,.0f} < $7K")
             self.state.metrics.record_call("SKIP")
             return
         if mc > 200000:
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=${mc:,.0f} > $200K")
             self.state.metrics.record_call("SKIP")
             return
         if holder_count < 100:
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): holders={holder_count} < 100")
             self.state.metrics.record_call("SKIP")
             return
         if is_wash or bot_rate > 0.5:
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): wash={is_wash} bot_rate={bot_rate:.2f}")
             self.state.metrics.record_call("SKIP")
             return
         if open_ts > 0:
             age_min = (datetime.now(timezone.utc).timestamp() - open_ts) / 60
             if age_min > 30:
+                logger.info(f"[SKIP] {symbol} ({address[:8]}): age={age_min:.0f}min > 30min")
                 self.state.metrics.record_call("SKIP")
                 return
 
@@ -265,7 +272,7 @@ class TrenchingBot:
             holders = {}
 
         if not info:
-            logger.info(f"[SKIP] {token_info.get('symbol','?')} ({address[:8]}): no data")
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): no data")
             self.state.metrics.record_call("SKIP")
             return
 
@@ -488,7 +495,7 @@ class TrenchingBot:
                     token.social_narrative_score = 0
                     token.social_narrative_text = ""
 
-            logger.info(f"[SOCIAL] {token.symbol} ({address[:8]}): score={token.social_narrative_score:.0f}/100, project={token.project_type}")
+            logger.info(f"[SOCIAL] {token.symbol} ({token.address[:8]}): score={token.social_narrative_score:.0f}/100, project={token.project_type}")
 
         except Exception as e:
             logger.error(f"Social analysis error for {token.symbol}: {e}")
