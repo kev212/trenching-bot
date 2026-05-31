@@ -213,7 +213,6 @@ class TrenchingBot:
         mc = token_info.get("market_cap", 0) or 0
         holder_count = token_info.get("holder_count", 0) or 0
         is_wash = token_info.get("is_wash_trading", False)
-        bot_rate = float(token_info.get("bot_degen_rate", 0) or 0)
         open_ts = token_info.get("open_timestamp", 0) or 0
         symbol = token_info.get("symbol", "?") or "?"
 
@@ -233,8 +232,8 @@ class TrenchingBot:
             logger.info(f"[SKIP] {symbol} ({address[:8]}): holders={holder_count} < 100")
             self.state.metrics.record_call("SKIP")
             return
-        if is_wash or bot_rate > 0.5:
-            logger.info(f"[SKIP] {symbol} ({address[:8]}): wash={is_wash} bot_rate={bot_rate:.2f}")
+        if is_wash:
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): wash_trading=True")
             self.state.metrics.record_call("SKIP")
             return
         if open_ts > 0:
