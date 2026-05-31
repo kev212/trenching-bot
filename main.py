@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import signal
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger("main")
 
@@ -218,7 +218,7 @@ class TrenchingBot:
             self.state.metrics.record_call("SKIP")
             return
         if open_ts > 0:
-            age_min = (datetime.utcnow().timestamp() - open_ts) / 60
+            age_min = (datetime.now(timezone.utc).timestamp() - open_ts) / 60
             if age_min > 30:
                 self.state.metrics.record_call("SKIP")
                 return
@@ -289,7 +289,7 @@ class TrenchingBot:
         # Build token data with correct GMGN field mapping
         # Parse creation timestamp for token age filter
         creation_ts = int(info.get("creation_timestamp", 0) or 0)
-        created_at = datetime.utcfromtimestamp(creation_ts) if creation_ts > 0 else None
+        created_at = datetime.fromtimestamp(creation_ts, timezone.utc) if creation_ts > 0 else None
 
         token = TokenData(
             address=address,
@@ -334,7 +334,7 @@ class TrenchingBot:
             name=token.name,
             symbol=token.symbol,
             address=address,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             feature_vector_json=json.dumps(fv_dict, indent=2),
             sol_price="$150",
             network_status="normal",
@@ -353,7 +353,7 @@ class TrenchingBot:
                 token_address=address,
                 token_name=token.name,
                 token_symbol=token.symbol,
-                call_time=datetime.utcnow(),
+                call_time=datetime.now(timezone.utc),
                 entry_price=current_price,
                 market_cap_at_call=token.market_cap,
                 volume_1h=token.volume_1h,

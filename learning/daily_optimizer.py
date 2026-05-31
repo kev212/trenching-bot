@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from config import settings, load_filter_params, save_filter_params, load_adjustment_rules
 from llm.mimo_client import MiMoClient
@@ -17,7 +17,7 @@ async def daily_optimizer(state, db):
 
     while True:
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             wait_seconds = (tomorrow - now).total_seconds()
             logger.info(f"Next optimization at {tomorrow.isoformat()} (in {wait_seconds:.0f}s)")
@@ -35,14 +35,14 @@ async def _run_optimization(state, db, mimo: MiMoClient):
         rules = load_adjustment_rules()
 
         recent_adjustments = await db.get_adjustments_since(
-            datetime.utcnow() - timedelta(hours=rules["cooldown_hours"])
+            datetime.now(timezone.utc) - timedelta(hours=rules["cooldown_hours"])
         )
         if recent_adjustments:
             logger.info("Skipping optimization: cooldown period active")
             return
 
-        yesterday = datetime.utcnow() - timedelta(hours=24)
-        calls = await db.get_calls_in_range(yesterday, datetime.utcnow())
+        yesterday = datetime.now(timezone.utc) - timedelta(hours=24)
+        calls = await db.get_calls_in_range(yesterday, datetime.now(timezone.utc))
 
         if len(calls) < rules["min_samples"]:
             logger.info(f"Not enough samples ({len(calls)} < {rules['min_samples']}), skipping")
@@ -123,7 +123,7 @@ async def _run_optimization(state, db, mimo: MiMoClient):
 
         current_params["filters"] = filters
         current_params["version"] = current_params.get("version", 0) + 1
-        current_params["updated_at"] = datetime.utcnow().isoformat()
+        current_params["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         save_filter_params(current_params)
         await state.set_filter_params(filters, current_params["version"])

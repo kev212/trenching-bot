@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from config import load_filter_params, save_filter_params, load_adjustment_rules
 from alerts.dispatcher import dispatcher
@@ -17,7 +17,7 @@ async def revert_monitor(state, db):
         try:
             await asyncio.sleep(3600)
 
-            since = datetime.utcnow() - timedelta(hours=24)
+            since = datetime.now(timezone.utc) - timedelta(hours=24)
             adjustments = await db.get_adjustments_since(since)
 
             if not adjustments:
@@ -55,7 +55,7 @@ async def _revert_adjustment(adj: dict, state, db, wr_before: float, wr_after: f
 
             current_params["filters"] = filters
             current_params["version"] = current_params.get("version", 0) + 1
-            current_params["updated_at"] = datetime.utcnow().isoformat()
+            current_params["updated_at"] = datetime.now(timezone.utc).isoformat()
 
             save_filter_params(current_params)
             await state.set_filter_params(filters, current_params["version"])

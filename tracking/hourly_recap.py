@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from config import settings
 from llm.mimo_client import MiMoClient
@@ -17,7 +17,7 @@ async def hourly_recap(state, db):
 
     while True:
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
             wait_seconds = (next_hour - now).total_seconds()
             logger.info(f"Next recap at {next_hour.isoformat()} (in {wait_seconds:.0f}s)")
@@ -32,7 +32,7 @@ async def hourly_recap(state, db):
 
 async def _generate_recap(state, db, mimo: MiMoClient):
     try:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         period_end = now
         period_start = now - timedelta(hours=1)
 

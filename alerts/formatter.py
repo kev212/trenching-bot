@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from analysis.models import CallRecord, LLMDecision, TokenData
 
 
@@ -49,7 +49,7 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict) -> str:
 🔗 Links:
 {chr(10).join(links)}
 
-⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}
+⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
 🎯 Confidence: {decision.confidence:.0%}"""
 
     return msg

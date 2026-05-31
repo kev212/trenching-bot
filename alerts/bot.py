@@ -3,7 +3,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 from aiohttp import web
@@ -104,7 +104,7 @@ async def cmd_active(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for call in active[:10]:
         age = ""
         if call.call_time:
-            mins = (datetime.utcnow() - call.call_time).total_seconds() / 60
+            mins = (datetime.now(timezone.utc) - call.call_time).total_seconds() / 60
             age = f" ({mins:.0f}m ago)"
 
         gain = call.max_gain
@@ -177,7 +177,7 @@ async def cmd_recent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Bot not ready yet.")
         return
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     calls = await db.get_calls_in_range(now - timedelta(hours=24), now)
     if not calls:
         await update.message.reply_text("No calls in the last 24h.")
@@ -207,7 +207,7 @@ async def cmd_best(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Bot not ready yet.")
         return
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     calls = await db.get_calls_in_range(now - timedelta(days=7), now)
     if not calls:
         await update.message.reply_text("No calls in the last 7 days.")

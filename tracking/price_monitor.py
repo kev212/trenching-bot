@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from config import settings
 from analysis.models import CallStatus, PriceSnapshot
 from sources.dexscreener import fetch_pair_data, extract_pair_info
@@ -52,7 +52,7 @@ async def _check_single_call(call, state, db, mimo: MiMoClient):
             call_id=call.id,
             price=current_price,
             gain=gain,
-            snapshot_time=datetime.utcnow(),
+            snapshot_time=datetime.now(timezone.utc),
         )
         await db.save_price_snapshot(snapshot)
 
@@ -66,7 +66,7 @@ async def _check_single_call(call, state, db, mimo: MiMoClient):
             await state.remove_active_call(call.token_address)
             return
 
-        elapsed = (datetime.utcnow() - call.call_time).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - call.call_time).total_seconds()
         if elapsed >= WIN_TIME_LIMIT and gain < WIN_MULTIPLIER:
             logger.info(f"LOSS: {call.token_symbol} at {gain:.2f}x after {elapsed:.0f}s")
             await db.update_call_status(call.id, CallStatus.LOSS, max_gain=gain)

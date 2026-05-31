@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from analysis.models import TokenData, FeatureVector
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ def _filter_token_age(token: TokenData, params: dict) -> dict:
             "note": "No creation timestamp",
         }
 
-    age_minutes = (datetime.utcnow() - token.created_at).total_seconds() / 60
+    age_minutes = (datetime.now(timezone.utc) - token.created_at).total_seconds() / 60
     passed = age_minutes <= max_minutes
 
     return {

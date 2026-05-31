@@ -1,5 +1,5 @@
 import aiosqlite
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from analysis.models import CallRecord, PriceSnapshot, CallStatus
 
@@ -187,7 +187,7 @@ class Database:
     async def update_call_status(
         self, call_id: int, status: CallStatus, max_gain: float = 1.0
     ):
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         await self.db.execute(
             """UPDATE calls SET status = ?, max_gain = MAX(max_gain, ?),
              completed_at = CASE WHEN ? != 'PENDING' THEN ? ELSE completed_at END,
@@ -202,7 +202,7 @@ class Database:
             "INSERT INTO price_snapshots (call_id, snapshot_time, price, gain) VALUES (?, ?, ?, ?)",
             (
                 snapshot.call_id,
-                snapshot.snapshot_time.isoformat() if snapshot.snapshot_time else datetime.utcnow().isoformat(),
+                snapshot.snapshot_time.isoformat() if snapshot.snapshot_time else datetime.now(timezone.utc).isoformat(),
                 snapshot.price,
                 snapshot.gain,
             ),
@@ -231,7 +231,7 @@ class Database:
             (filter_name, param_name, old_value, new_value, reason, confidence, applied_at, win_rate_before)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (filter_name, param_name, old_value, new_value, reason, confidence,
-             datetime.utcnow().isoformat(), win_rate_before),
+             datetime.now(timezone.utc).isoformat(), win_rate_before),
         )
         await self.db.commit()
 
@@ -247,7 +247,7 @@ class Database:
         await self.db.execute(
             """UPDATE filter_adjustments SET reverted = TRUE, reverted_at = ?, revert_reason = ?
              WHERE id = ?""",
-            (datetime.utcnow().isoformat(), reason, adjustment_id),
+            (datetime.now(timezone.utc).isoformat(), reason, adjustment_id),
         )
         await self.db.commit()
 
