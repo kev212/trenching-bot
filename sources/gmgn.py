@@ -86,6 +86,34 @@ class GMGNClient:
             logger.error(f"GMGN {path} error: {e}")
             return {}
 
+    async def _post_form(self, path: str, body: dict = None) -> dict:
+        try:
+            query = self._auth_params()
+            headers = {
+                "X-APIKEY": self.api_key,
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            async with AsyncSession(impersonate="chrome") as session:
+                resp = await session.post(
+                    f"{self.host}{path}",
+                    params=query,
+                    data=body or {},
+                    headers=headers,
+                    proxies=self._proxy_dict(),
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"GMGN POST-FORM {path}: HTTP {resp.status_code} - {resp.text[:200]}")
+                    return {}
+                data = resp.json()
+                if data.get("code") != 0:
+                    logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
+                    return {}
+                return data.get("data", data)
+        except Exception as e:
+            logger.error(f"GMGN {path} error: {e}")
+            return {}
+
     async def get_trending(self, limit: int = 20) -> list:
         data = await self._get("/v1/market/rank", {"chain": "sol", "interval": "5m", "limit": limit})
         if isinstance(data, list):
@@ -102,13 +130,13 @@ class GMGNClient:
         return await self._get("/v1/market/token_top_holders", {"chain": "sol", "address": address})
 
     async def get_trenches(self, limit: int = 20) -> list:
-        params = {
+        body = {
             "chain": "sol",
             "types": ["new_creation"],
             "platforms": ["Pump.fun"],
             "limit": limit,
         }
-        data = await self._get("/v1/trenches", params)
+        data = await self._post_form("/v1/trenches", body)
         if isinstance(data, list):
             return data
         return data.get("items", []) if isinstance(data, dict) else []
