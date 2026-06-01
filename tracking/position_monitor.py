@@ -1,7 +1,8 @@
 """Position state machine: SL / TP1 / TP2 / trailing / time exits.
 
 Runs 4×/sec. Reads open positions, fetches current price via Jupiter,
-advances each position toward its exit trigger.
+advances each position toward its exit trigger. Sends Telegram alerts
+on every exit.
 """
 import asyncio
 import logging
@@ -11,6 +12,8 @@ from core.jupiter_client import JupiterClient
 from core.position_manager import PositionManager
 from core.risk_manager import RiskManager
 from core.trade_executor import TradeExecutor
+from alerts.dispatcher import dispatcher
+from alerts.formatter import format_exit_alert
 
 logger = logging.getLogger("position_monitor")
 
@@ -63,26 +66,32 @@ async def position_monitor(state, db, position_manager: PositionManager,
                     await position_manager.update_position(position)
 
                 triggered = False
+                last_reason = ""
                 if current_price <= entry * (1 - stop_loss_pct / 100):
                     await executor.execute_sell(position, 100, "SL")
                     triggered = True
+                    last_reason = "SL"
                 elif position.get("exit_reason") in (None, "", "TP1") and \
                         current_price >= entry * tp1_mult:
                     await executor.execute_sell(position, tp1_pct, "TP1")
                     triggered = True
+                    last_reason = "TP1"
                 elif position.get("exit_reason") == "TP1" and \
                         current_price >= entry * tp2_mult:
                     remaining_pct = 100 - tp1_pct
                     await executor.execute_sell(position, remaining_pct, "TP2")
                     triggered = True
+                    last_reason = "TP2"
                 elif current_price <= peak * (1 - trailing_pct / 100):
                     await executor.execute_sell(position, 100, "TRAILING")
                     triggered = True
+                    last_reason = "TRAILING"
                 else:
                     held = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
                     if held > time_limit:
                         await executor.execute_sell(position, 100, "TIME")
                         triggered = True
+                        last_reason = "TIME"
 
                 if triggered:
                     logger.info(
@@ -90,6 +99,24 @@ async def position_monitor(state, db, position_manager: PositionManager,
                         f"price={current_price:.10f}, entry={entry:.10f}, "
                         f"peak={peak:.10f}, paper={is_paper}"
                     )
+                    try:
+                        pnl_sol = (current_price - entry) * position.get("current_amount_token", 0)
+                        pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0.0
+                        exit_msg = format_exit_alert(
+                            symbol=position["token_symbol"],
+                            address=position["token_address"],
+                            entry_price=entry,
+                            exit_price=current_price,
+                            pnl_sol=pnl_sol,
+                            pnl_pct=pnl_pct,
+                            reason=last_reason or "TIME",
+                            hold_seconds=(datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
+                                if position.get("entry_time") else 0,
+                            paper=is_paper,
+                        )
+                        await dispatcher.send_alert(exit_msg)
+                    except Exception as e:
+                        logger.error(f"[POS-MON] exit alert send failed: {e}")
 
         except Exception as e:
             logger.error(f"Position monitor error: {e}")

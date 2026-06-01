@@ -36,8 +36,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/stats - Performance metrics\n"
         "/status - Bot status & queue\n"
         "/active - Tracked alert calls\n"
-        "/positions - Open trading positions (Phase 1 paper)\n"
-        "/pnl - PnL summary (realized + unrealized)\n"
+        "/positions - Open trading positions (paper)\n"
+        "/history - Closed positions with PnL\n"
+        "/pnl - PnL summary + wallet balance\n"
         "/filter - Current filter params\n"
         "/queue - Queue size\n"
         "/recent - Last 10 calls\n"
@@ -216,6 +217,69 @@ async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show closed (past) trading positions with PnL."""
+    state = ctx.bot_data.get("state")
+    db = ctx.bot_data.get("db")
+    if not state or not db:
+        await update.message.reply_text("Bot not ready yet.")
+        return
+
+    try:
+        cursor = await db.db.execute(
+            "SELECT * FROM positions WHERE status = 'CLOSED' "
+            "ORDER BY exit_time DESC LIMIT 15"
+        )
+        rows = await cursor.fetchall()
+    except Exception as e:
+        await update.message.reply_text(f"DB error: {e}")
+        return
+
+    if not rows:
+        await update.message.reply_text("No closed positions yet.")
+        return
+
+    realized_total = sum((r["pnl_sol"] or 0) for r in rows)
+    wins = sum(1 for r in rows if (r["pnl_sol"] or 0) > 0)
+    losses = sum(1 for r in rows if (r["pnl_sol"] or 0) <= 0)
+
+    lines = [
+        f"📜 POSITION HISTORY ({len(rows)})\n",
+        f"Total: {realized_total:+.4f} SOL (W:{wins} / L:{losses})\n",
+    ]
+    for r in rows:
+        pnl_sol = r["pnl_sol"] or 0
+        pnl_pct = r["pnl_pct"] or 0
+        exit_reason = r["exit_reason"] or "?"
+        paper_tag = " [PAPER]" if r["paper"] else " [LIVE]"
+        pnl_emoji = "🟢" if pnl_sol >= 0 else "🔴"
+        entry_sol = r["entry_amount_sol"] or 0
+        entry_price = r["entry_price"] or 0
+        exit_price = r["exit_price"] or 0
+
+        hold_str = ""
+        if r["hold_seconds"]:
+            mins = r["hold_seconds"] // 60
+            secs = r["hold_seconds"] % 60
+            hold_str = f"{mins}m{secs}s" if mins > 0 else f"{secs}s"
+
+        exit_time_short = ""
+        if r["exit_time"]:
+            try:
+                dt = datetime.fromisoformat(r["exit_time"])
+                exit_time_short = dt.strftime("%m-%d %H:%M")
+            except (ValueError, TypeError):
+                pass
+
+        lines.append(
+            f"{pnl_emoji} {r['token_symbol']} ({exit_reason}){paper_tag} {exit_time_short}\n"
+            f"   {entry_sol:.4f} SOL | {entry_price:.2e} → {exit_price:.2e}\n"
+            f"   PnL: {pnl_sol:+.4f} SOL ({pnl_pct:+.1f}%) | Hold: {hold_str}"
+        )
+
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = ctx.bot_data.get("state")
     if not state:
@@ -354,6 +418,7 @@ async def bot_handler(state, db):
     _bot_app.add_handler(CommandHandler("status", cmd_status))
     _bot_app.add_handler(CommandHandler("active", cmd_active))
     _bot_app.add_handler(CommandHandler("positions", cmd_positions))
+    _bot_app.add_handler(CommandHandler("history", cmd_history))
     _bot_app.add_handler(CommandHandler("pnl", cmd_pnl))
     _bot_app.add_handler(CommandHandler("filter", cmd_filter))
     _bot_app.add_handler(CommandHandler("queue", cmd_queue))
@@ -415,6 +480,28 @@ async def bot_handler(state, db):
         await asyncio.sleep(2)
 
     logger.info("Telegram webhook bot ready")
+
+    try:
+        from telegram import BotCommand
+        commands = [
+            BotCommand("start", "Show welcome + commands"),
+            BotCommand("help", "Show command list"),
+            BotCommand("stats", "Performance metrics"),
+            BotCommand("status", "Bot status & queue"),
+            BotCommand("active", "Tracked alert calls"),
+            BotCommand("positions", "Open trading positions"),
+            BotCommand("history", "Closed (past) positions with PnL"),
+            BotCommand("pnl", "PnL summary + wallet balance"),
+            BotCommand("filter", "Current filter params"),
+            BotCommand("queue", "Queue size"),
+            BotCommand("recent", "Last 10 calls"),
+            BotCommand("best", "Best performing tokens"),
+            BotCommand("ping", "Check bot alive"),
+        ]
+        await _bot_app.bot.set_my_commands(commands)
+        logger.info(f"[BOT] Registered {len(commands)} commands (use / to see)")
+    except Exception as e:
+        logger.warning(f"setMyCommands failed: {e}")
 
     try:
         while True:

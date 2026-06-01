@@ -123,6 +123,36 @@ def _score_bar(score: int) -> str:
     return "█" * filled + "░" * empty
 
 
+def format_exit_alert(symbol: str, address: str, entry_price: float,
+                       exit_price: float, pnl_sol: float, pnl_pct: float,
+                       reason: str, hold_seconds: float, paper: bool = True) -> str:
+    """Format a position exit alert (SL / TP1 / TP2 / TRAILING / TIME)."""
+    reason_emojis = {
+        "SL": "🛑",
+        "TP1": "🎯",
+        "TP2": "🎯🎯",
+        "TRAILING": "📉",
+        "TIME": "⏰",
+    }
+    pnl_emoji = "📈" if pnl_sol >= 0 else "📉"
+    paper_tag = " [PAPER]" if paper else " [LIVE]"
+    minutes = int(hold_seconds // 60)
+    seconds = int(hold_seconds % 60)
+    hold_str = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
+
+    reason_emoji = reason_emojis.get(reason, "🔔")
+
+    return (
+        f"{reason_emoji} EXIT: {reason} {symbol}{paper_tag}\n"
+        f"\n"
+        f"  Entry:  {entry_price:.10f}\n"
+        f"  Exit:   {exit_price:.10f}\n"
+        f"  PnL: {pnl_emoji} {pnl_sol:+.4f} SOL ({pnl_pct:+.1f}%)\n"
+        f"  Hold:   {hold_str}\n"
+        f"  Token:  {address[:8]}..."
+    )
+
+
 def format_trade_alert(position, side: str) -> str:
     """Format a trade alert (BUY/SELL) for Telegram."""
     emoji = "🟢" if side == "BUY" else "🔴"

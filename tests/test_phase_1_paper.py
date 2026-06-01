@@ -471,3 +471,68 @@ def test_database_update_position_works_on_dict():
 def test_cmd_pnl_importable():
     from alerts.bot import cmd_pnl
     assert callable(cmd_pnl)
+
+
+# ============ /history + format_exit_alert ============
+
+def test_cmd_history_importable():
+    from alerts.bot import cmd_history
+    assert callable(cmd_history)
+
+
+def test_format_exit_alert_sl():
+    from alerts.formatter import format_exit_alert
+    text = format_exit_alert(
+        symbol="TST", address="ABCDEFGH",
+        entry_price=0.001, exit_price=0.0007,
+        pnl_sol=-0.015, pnl_pct=-30.0,
+        reason="SL", hold_seconds=120, paper=True,
+    )
+    assert "SL" in text
+    assert "TST" in text
+    assert "PAPER" in text
+    assert "-30.0%" in text
+    assert "🛑" in text
+    assert "2m 0s" in text
+
+
+def test_format_exit_alert_tp():
+    from alerts.formatter import format_exit_alert
+    text = format_exit_alert(
+        symbol="WIN", address="WINPADDR",
+        entry_price=0.0001, exit_price=0.00015,
+        pnl_sol=0.025, pnl_pct=50.0,
+        reason="TP1", hold_seconds=300, paper=True,
+    )
+    assert "TP1" in text
+    assert "🎯" in text
+    assert "5m 0s" in text
+    assert "📈" in text  # profit emoji
+    assert "+50.0%" in text
+
+
+def test_format_exit_alert_trailing():
+    from alerts.formatter import format_exit_alert
+    text = format_exit_alert(
+        symbol="TRAIL", address="TRLADDR",
+        entry_price=0.0001, exit_price=0.00009,
+        pnl_sol=-0.005, pnl_pct=-10.0,
+        reason="TRAILING", hold_seconds=45, paper=False,
+    )
+    assert "TRAILING" in text
+    assert "📉" in text
+    assert "LIVE" in text
+    assert "45s" in text
+
+
+def test_format_exit_alert_time():
+    from alerts.formatter import format_exit_alert
+    text = format_exit_alert(
+        symbol="TIMEOUT", address="TIMEADDR",
+        entry_price=0.0001, exit_price=0.0001,
+        pnl_sol=0.0, pnl_pct=0.0,
+        reason="TIME", hold_seconds=1800, paper=True,
+    )
+    assert "TIME" in text
+    assert "⏰" in text
+    assert "30m 0s" in text
