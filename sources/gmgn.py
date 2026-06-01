@@ -87,7 +87,7 @@ class GMGNClient:
             return {}
 
     async def get_trending(self, limit: int = 20) -> list:
-        data = await self._get("/v1/market/rank", {"chain": "sol", "interval": "1h", "limit": limit})
+        data = await self._get("/v1/market/rank", {"chain": "sol", "interval": "5min", "limit": limit})
         if isinstance(data, list):
             return data
         return data.get("rank", []) if isinstance(data, dict) else []
