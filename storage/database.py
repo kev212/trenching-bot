@@ -599,7 +599,12 @@ class Database:
         return cursor.lastrowid
 
     async def update_position(self, position) -> None:
-        """Update mutable position fields (peak, current_amount, status, exit info)."""
+        """Update mutable position fields. Accepts dict or dataclass."""
+        def _g(key, default=None):
+            if isinstance(position, dict):
+                return position.get(key, default)
+            return getattr(position, key, default)
+        exit_time = _g("exit_time")
         await self.db.execute(
             """UPDATE positions SET
             peak_price = ?, current_amount_token = ?, status = ?,
@@ -607,11 +612,11 @@ class Database:
             pnl_sol = ?, pnl_pct = ?, hold_seconds = ?, exit_reason = ?
             WHERE id = ?""",
             (
-                position.peak_price, position.current_amount_token, position.status,
-                position.exit_tx_sig, position.exit_price,
-                position.exit_time.isoformat() if position.exit_time else None,
-                position.pnl_sol, position.pnl_pct, position.hold_seconds,
-                position.exit_reason, position.id,
+                _g("peak_price", 0), _g("current_amount_token", 0), _g("status", "OPEN"),
+                _g("exit_tx_sig", ""), _g("exit_price", 0),
+                exit_time.isoformat() if exit_time else None,
+                _g("pnl_sol", 0), _g("pnl_pct", 0), _g("hold_seconds", 0),
+                _g("exit_reason", ""), _g("id"),
             ),
         )
         await self.db.commit()

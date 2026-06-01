@@ -31,38 +31,55 @@ class PositionManager:
         return position.id
 
     async def update_position(self, position) -> None:
-        """Persist mutable fields (peak_price, current_amount_token, etc)."""
+        """Persist mutable fields (peak_price, current_amount_token, etc).
+        Works on both dict (from get_open_positions) and dataclass (from open_position)."""
         await self.db.update_position(position)
+
+    def _set(self, position, key, value):
+        """Set field on dict or dataclass (whichever is passed)."""
+        if isinstance(position, dict):
+            position[key] = value
+        else:
+            setattr(position, key, value)
+
+    def _get(self, position, key, default=None):
+        """Get field from dict or dataclass."""
+        if isinstance(position, dict):
+            return position.get(key, default)
+        return getattr(position, key, default)
 
     async def record_partial_sell(self, position, sold_amount_token: float,
                                     remaining_amount_token: float) -> None:
         """Update current_amount_token after a partial sell (TP1/TP2)."""
-        position.current_amount_token = remaining_amount_token
+        self._set(position, "current_amount_token", remaining_amount_token)
         await self.db.update_position(position)
         logger.info(
-            f"[POS] PARTIAL SELL {position.token_symbol}: "
+            f"[POS] PARTIAL SELL {self._get(position, 'token_symbol', '?')}: "
             f"remaining={remaining_amount_token:.2f} tokens"
         )
 
     async def close_position(self, position, exit_reason: str,
                               exit_price: float, pnl_sol: float, pnl_pct: float) -> None:
-        """Mark position as CLOSED and persist final PnL."""
+        """Mark position as CLOSED and persist final PnL. Works on dict or dataclass."""
         now = datetime.now(timezone.utc)
-        position.status = "CLOSED"
-        position.exit_reason = exit_reason
-        position.exit_price = exit_price
-        position.exit_time = now
-        position.pnl_sol = pnl_sol
-        position.pnl_pct = pnl_pct
-        position.hold_seconds = int(
-            (now - position.entry_time).total_seconds()
-        ) if position.entry_time else 0
+        entry_time = self._get(position, "entry_time")
+        hold_seconds = int((now - entry_time).total_seconds()) if entry_time else 0
+
+        self._set(position, "status", "CLOSED")
+        self._set(position, "exit_reason", exit_reason)
+        self._set(position, "exit_price", exit_price)
+        self._set(position, "exit_time", now)
+        self._set(position, "pnl_sol", pnl_sol)
+        self._set(position, "pnl_pct", pnl_pct)
+        self._set(position, "hold_seconds", hold_seconds)
+
         await self.db.update_position(position)
         logger.info(
-            f"[POS] CLOSE {position.token_symbol} ({position.token_address[:8]}): "
+            f"[POS] CLOSE {self._get(position, 'token_symbol', '?')} "
+            f"({self._get(position, 'token_address', '?')[:8]}): "
             f"reason={exit_reason}, exit={exit_price:.8f}, "
             f"pnl={pnl_sol:+.4f} SOL ({pnl_pct:+.1f}%), "
-            f"hold={position.hold_seconds}s"
+            f"hold={hold_seconds}s"
         )
 
     async def get_open_positions(self) -> list[dict]:

@@ -35,8 +35,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/stats - Performance metrics\n"
         "/status - Bot status & queue\n"
-        "/active - Tracked calls\n"
-        "/positions - Open trading positions\n"
+        "/active - Tracked alert calls\n"
+        "/positions - Open trading positions (Phase 1 paper)\n"
+        "/pnl - PnL summary (realized + unrealized)\n"
         "/filter - Current filter params\n"
         "/queue - Queue size\n"
         "/recent - Last 10 calls\n"
@@ -161,6 +162,57 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"  ID: {r['id']}"
         )
 
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show PnL summary + wallet balance (Phase 1 paper mode)."""
+    state = ctx.bot_data.get("state")
+    db = ctx.bot_data.get("db")
+    if not state or not db:
+        await update.message.reply_text("Bot not ready yet.")
+        return
+
+    try:
+        cursor = await db.db.execute(
+            "SELECT COUNT(*) as n, "
+            "COALESCE(SUM(pnl_sol), 0) as realized_sol, "
+            "COALESCE(AVG(pnl_pct), 0) as avg_pnl_pct, "
+            "COALESCE(SUM(CASE WHEN pnl_sol > 0 THEN 1 ELSE 0 END), 0) as wins, "
+            "COALESCE(SUM(CASE WHEN pnl_sol <= 0 THEN 1 ELSE 0 END), 0) as losses "
+            "FROM positions WHERE status = 'CLOSED'"
+        )
+        row = await cursor.fetchone()
+        wins = row["wins"] or 0
+        losses = row["losses"] or 0
+        win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0.0
+
+        cursor = await db.db.execute(
+            "SELECT COUNT(*) as n, COALESCE(SUM(entry_amount_sol), 0) as deployed "
+            "FROM positions WHERE status = 'OPEN'"
+        )
+        open_row = await cursor.fetchone()
+        open_count = open_row["n"] or 0
+        deployed = open_row["deployed"] or 0.0
+
+        cursor = await db.db.execute(
+            "SELECT snapshot_time, sol_balance FROM wallet_balances "
+            "WHERE paper = 1 ORDER BY snapshot_time DESC LIMIT 1"
+        )
+        bal_row = await cursor.fetchone()
+        wallet_balance = bal_row["sol_balance"] if bal_row else None
+    except Exception as e:
+        await update.message.reply_text(f"DB error: {e}")
+        return
+
+    lines = [
+        "💰 PnL SUMMARY (PAPER)\n",
+        f"Closed trades: {row['n'] or 0} (W:{wins} / L:{losses}, WR={win_rate:.0f}%)",
+        f"Realized: {row['realized_sol'] or 0:+.4f} SOL (avg {row['avg_pnl_pct'] or 0:+.1f}%)",
+        f"Open: {open_count} positions, {deployed:.4f} SOL deployed",
+    ]
+    if wallet_balance is not None:
+        lines.append(f"Wallet: {wallet_balance:.4f} SOL")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -302,6 +354,7 @@ async def bot_handler(state, db):
     _bot_app.add_handler(CommandHandler("status", cmd_status))
     _bot_app.add_handler(CommandHandler("active", cmd_active))
     _bot_app.add_handler(CommandHandler("positions", cmd_positions))
+    _bot_app.add_handler(CommandHandler("pnl", cmd_pnl))
     _bot_app.add_handler(CommandHandler("filter", cmd_filter))
     _bot_app.add_handler(CommandHandler("queue", cmd_queue))
     _bot_app.add_handler(CommandHandler("recent", cmd_recent))

@@ -372,3 +372,102 @@ def test_executor_paper_simulated_slippage():
         actual_tokens = captured["position"].entry_amount_token
         assert abs(actual_tokens - expected_tokens) < 0.01
     asyncio.run(go())
+
+
+# ============ dict/dataclass compatibility ============
+
+def test_position_manager_close_works_on_dict():
+    """The position_monitor passes dicts; close_position must work on them."""
+    from core.position_manager import PositionManager
+    from datetime import datetime, timezone, timedelta
+
+    class FakeDB:
+        def __init__(self):
+            self.updates = []
+        async def update_position(self, p):
+            self.updates.append(p)
+        async def commit(self):
+            pass
+
+    async def go():
+        db = FakeDB()
+        pm = PositionManager(db)
+        entry_time = datetime.now(timezone.utc) - timedelta(seconds=30)
+        position = {
+            "id": 1,
+            "token_address": "ABC",
+            "token_symbol": "TST",
+            "status": "OPEN",
+            "entry_price": 0.001,
+            "entry_amount_sol": 0.05,
+            "entry_amount_token": 50.0,
+            "current_amount_token": 50.0,
+            "peak_price": 0.001,
+            "entry_time": entry_time,
+        }
+        await pm.close_position(position, "TP1", 0.0013, 0.015, 30.0)
+        assert position["status"] == "CLOSED"
+        assert position["exit_reason"] == "TP1"
+        assert position["pnl_sol"] == 0.015
+        assert len(db.updates) == 1
+    asyncio.run(go())
+
+
+def test_position_manager_record_partial_sell_works_on_dict():
+    """Partial sell on dict should update current_amount_token."""
+    from core.position_manager import PositionManager
+
+    class FakeDB:
+        async def update_position(self, p): pass
+        async def commit(self): pass
+
+    async def go():
+        pm = PositionManager(FakeDB())
+        position = {
+            "id": 1, "token_symbol": "TST", "current_amount_token": 100.0,
+        }
+        await pm.record_partial_sell(position, 33.0, 67.0)
+        assert position["current_amount_token"] == 67.0
+    asyncio.run(go())
+
+
+def test_database_update_position_works_on_dict():
+    """Database.update_position must accept dicts from _row_to_position."""
+    from storage.database import Database
+    import tempfile, os
+
+    async def go():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            db = Database(tmp.name)
+            await db.init()
+            from analysis.models import Position
+            from datetime import datetime, timezone
+            p = Position(
+                token_address="X1", token_symbol="TST",
+                entry_price=0.001, entry_amount_sol=0.05,
+                entry_amount_token=50.0, entry_time=datetime.now(timezone.utc),
+                peak_price=0.001, current_amount_token=50.0,
+            )
+            pid = await db.save_position(p)
+            await db.update_position({
+                "id": pid, "peak_price": 0.0013, "current_amount_token": 50.0,
+                "status": "OPEN", "exit_tx_sig": "", "exit_price": 0.0,
+                "exit_time": None, "pnl_sol": 0.0, "pnl_pct": 0.0,
+                "hold_seconds": 0, "exit_reason": "",
+            })
+            cursor = await db.db.execute("SELECT peak_price FROM positions WHERE id = ?", (pid,))
+            row = await cursor.fetchone()
+            assert row["peak_price"] == 0.0013
+            await db.close()
+        finally:
+            os.unlink(tmp.name)
+    asyncio.run(go())
+
+
+# ============ /pnl command ============
+
+def test_cmd_pnl_importable():
+    from alerts.bot import cmd_pnl
+    assert callable(cmd_pnl)
