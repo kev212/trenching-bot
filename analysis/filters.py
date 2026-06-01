@@ -306,6 +306,44 @@ def check_hard_gate(fv: FeatureVector) -> tuple[bool, list[str]]:
     return len(failures) == 0, failures
 
 
+SKIP_WEIGHT_SCORING = {"social_narrative", "token_data"}
+
+
+def calculate_weighted_score(fv: FeatureVector, filter_params: dict) -> tuple[float, dict]:
+    """Calculate weighted score from hard gate filters (0.0-1.0).
+
+    social_narrative is excluded — handled separately by LLM #1.
+    Returns (score, breakdown) where breakdown shows per-filter details.
+    """
+    total_weight = 0.0
+    weighted_sum = 0.0
+    breakdown = {}
+
+    filters = filter_params.get("filters", filter_params)
+
+    for name, data in fv.to_dict().items():
+        if name in SKIP_WEIGHT_SCORING:
+            continue
+        params = filters.get(name, {})
+        weight = params.get("weight", 0)
+        enabled = params.get("enabled", True)
+        if not enabled or weight == 0:
+            continue
+
+        passed = data.get("passed", False)
+        total_weight += weight
+        if passed:
+            weighted_sum += weight
+        breakdown[name] = {
+            "weight": weight,
+            "passed": passed,
+            "contribution": weight if passed else 0,
+        }
+
+    score = weighted_sum / total_weight if total_weight > 0 else 0.0
+    return score, breakdown
+
+
 def _filter_ath_drawdown(token: TokenData, params: dict) -> dict:
     """Filter by max drawdown from ATH (all-time high price)."""
     max_dd = params.get("max_drawdown_pct", -50.0)

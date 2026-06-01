@@ -2,10 +2,11 @@ from datetime import datetime, timezone
 from analysis.models import CallRecord, LLMDecision, TokenData
 
 
-def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict) -> str:
+def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict,
+                  social_score: float = 0.0, hg_score: float = 0.0) -> str:
     verdict_emoji = {"APE": "🔥", "WATCH": "👀", "SKIP": "⛔"}.get(decision.verdict.value, "❓")
 
-    score_bar = _score_bar(decision.score)
+    score_bar = _score_bar(int(decision.confidence * 100))
 
     filters_text = ""
     filter_names = {
@@ -53,11 +54,22 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict) -> str:
                 social_text += f"  • 🔥 @{inf['handle']} tweeted ({inf['likes']:,} likes)\n"
         if token.project_type:
             social_text += f"  • Project: {token.project_type}\n"
-        social_text += f"  • Social Score: {token.social_narrative_score:.0f}/100\n"
+
+    data_score = decision.score
+    hg_bonus = hg_score * 5
+    final_score = (social_score * 0.6) + (data_score * 0.4) + hg_bonus
+
+    scoring_text = f"""📊 SCORE BREAKDOWN:
+  Social (LLM #1):  {social_score:.0f}/100 × 60% = {social_score*0.6:.1f}
+  Data (LLM #2):    {data_score}/100 × 40% = {data_score*0.4:.1f}
+  Hard Gate:         {hg_score:.2f} × 5 = +{hg_bonus:.1f}
+  ─────────────────────────────
+  Final Score:       {final_score:.1f}/100
+  Verdict:           {decision.verdict.value} {verdict_emoji}"""
 
     msg = f"""{verdict_emoji} {decision.verdict.value} ALERT — ${token.symbol or token.name}
 
-📊 Score: {decision.score}/100 {score_bar}
+{scoring_text}
 🏷️ Contract: {ca_short}
 💰 Market Cap: ${token.market_cap:,.0f}
 📈 Volume (1h): ${token.volume_1h:,.0f}

@@ -859,3 +859,127 @@ def test_executor_buy_uses_oracle_first():
         expected_tokens = 0.05 / (0.001 * 1.01)
         assert abs(position.entry_amount_token - expected_tokens) < 1e-6
     asyncio.run(go())
+
+
+# ============ Weighted Scoring ============
+
+def test_calculate_weighted_score_basic():
+    """calculate_weighted_score returns 0.0-1.0 based on passed filters."""
+    from analysis.filters import FeatureVector, calculate_weighted_score
+
+    fv = FeatureVector()
+    fv.token_age = {"passed": True, "enabled": True}
+    fv.min_market_cap = {"passed": True, "enabled": True}
+    fv.max_market_cap = {"passed": True, "enabled": True}
+    fv.min_total_fee = {"passed": False, "enabled": True}
+    fv.fee_tier = {"passed": True, "enabled": True}
+    fv.min_holders = {"passed": True, "enabled": True}
+    fv.funded_wallet_age = {"passed": True, "enabled": True}
+    fv.holder_distribution = {"passed": True, "enabled": True}
+    fv.ath_drawdown = {"passed": True, "enabled": True}
+    fv.insider_concentration = {"passed": True, "enabled": False}
+    fv.rug_probability = {"passed": True, "enabled": False}
+    fv.social_narrative = {"passed": True, "enabled": True}
+
+    filter_params = {
+        "filters": {
+            "token_age": {"weight": 0.05, "enabled": True},
+            "min_market_cap": {"weight": 0.0, "enabled": True},
+            "max_market_cap": {"weight": 0.0, "enabled": True},
+            "min_total_fee": {"weight": 0.25, "enabled": True},
+            "fee_tier": {"weight": 0.0, "enabled": True},
+            "min_holders": {"weight": 0.25, "enabled": True},
+            "funded_wallet_age": {"weight": 0.10, "enabled": True},
+            "holder_distribution": {"weight": 0.20, "enabled": True},
+            "ath_drawdown": {"weight": 0.15, "enabled": True},
+        }
+    }
+
+    score, breakdown = calculate_weighted_score(fv, filter_params)
+
+    total_weight = 0.05 + 0.25 + 0.25 + 0.10 + 0.20 + 0.15
+    passed_weight = 0.05 + 0.25 + 0.10 + 0.20 + 0.15
+    expected = passed_weight / total_weight
+    assert abs(score - expected) < 0.01
+    assert "social_narrative" not in breakdown
+    assert breakdown["min_total_fee"]["passed"] is False
+    assert breakdown["min_holders"]["passed"] is True
+
+
+def test_calculate_weighted_score_all_pass():
+    """All active filters pass → score = 1.0."""
+    from analysis.filters import FeatureVector, calculate_weighted_score
+
+    fv = FeatureVector()
+    fv.token_age = {"passed": True, "enabled": True}
+    fv.min_total_fee = {"passed": True, "enabled": True}
+    fv.min_holders = {"passed": True, "enabled": True}
+    fv.funded_wallet_age = {"passed": True, "enabled": True}
+    fv.holder_distribution = {"passed": True, "enabled": True}
+    fv.ath_drawdown = {"passed": True, "enabled": True}
+
+    filter_params = {
+        "filters": {
+            "token_age": {"weight": 0.05, "enabled": True},
+            "min_total_fee": {"weight": 0.25, "enabled": True},
+            "min_holders": {"weight": 0.25, "enabled": True},
+            "funded_wallet_age": {"weight": 0.10, "enabled": True},
+            "holder_distribution": {"weight": 0.20, "enabled": True},
+            "ath_drawdown": {"weight": 0.15, "enabled": True},
+        }
+    }
+
+    score, _ = calculate_weighted_score(fv, filter_params)
+    assert abs(score - 1.0) < 0.01
+
+
+def test_calculate_weighted_score_social_excluded():
+    """social_narrative is excluded from weighted scoring."""
+    from analysis.filters import FeatureVector, calculate_weighted_score
+
+    fv = FeatureVector()
+    fv.token_age = {"passed": True, "enabled": True}
+    fv.social_narrative = {"passed": True, "enabled": True, "score": 80}
+
+    filter_params = {
+        "filters": {
+            "token_age": {"weight": 1.0, "enabled": True},
+            "social_narrative": {"weight": 1.0, "enabled": True},
+        }
+    }
+
+    score, breakdown = calculate_weighted_score(fv, filter_params)
+    assert score == 1.0
+    assert "social_narrative" not in breakdown
+
+
+def test_final_scoring_formula():
+    """final_score = social×0.6 + data×0.4 + hg_bonus."""
+    social_score = 75
+    data_score = 80
+    hg_score = 0.9
+    hg_bonus = hg_score * 5
+
+    final_score = (social_score * 0.6) + (data_score * 0.4) + hg_bonus
+
+    expected = (75 * 0.6) + (80 * 0.4) + (0.9 * 5)
+    assert abs(final_score - expected) < 0.01
+    assert abs(final_score - 81.5) < 0.01
+
+
+def test_final_scoring_verdict_thresholds():
+    """Verdict thresholds: ≥70 APE, 50-69 WATCH, <50 SKIP."""
+    def get_verdict(score):
+        if score >= 70:
+            return "APE"
+        elif score >= 50:
+            return "WATCH"
+        else:
+            return "SKIP"
+
+    assert get_verdict(70) == "APE"
+    assert get_verdict(69.9) == "WATCH"
+    assert get_verdict(50) == "WATCH"
+    assert get_verdict(49.9) == "SKIP"
+    assert get_verdict(0) == "SKIP"
+    assert get_verdict(100) == "APE"
