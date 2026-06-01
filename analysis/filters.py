@@ -239,22 +239,28 @@ def _filter_social_narrative(token: TokenData, params: dict) -> dict:
     score = token.social_narrative_score
     project_type = token.project_type
     influencer_count = len(token.influencer_mentions)
+    organic_count = len(getattr(token, "organic_mentions", []))
     has_twitter = bool(token.twitter_username)
     has_website = bool(token.website_url)
     has_telegram = bool(token.telegram_url)
     has_community = bool(getattr(token, "has_community", False))
+    catalyst_match = bool(getattr(token, "catalyst_match", False))
+    catalyst_description = getattr(token, "catalyst_description", "")
 
     return {
         "score": score,
         "project_type": project_type,
         "influencer_count": influencer_count,
+        "organic_count": organic_count,
         "has_twitter": has_twitter,
         "has_website": has_website,
         "has_telegram": has_telegram,
         "has_community": has_community,
+        "catalyst_match": catalyst_match,
+        "catalyst_description": catalyst_description,
         "passed": True,  # Always passes (bonus, not hard gate)
         "enabled": True,
-        "note": f"Social: {score:.0f}/100 ({project_type}) {influencer_count} influencers",
+        "note": f"Social: {score:.0f}/100 ({project_type}) {influencer_count} inf / {organic_count} org / catalyst={catalyst_match}",
     }
 
 

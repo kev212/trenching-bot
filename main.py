@@ -628,9 +628,14 @@ class TrenchingBot:
             try:
                 search_results = await self.twitter.search_by_contract(token.address, 10)
 
-                # 4. Influencer detection (direct, no LLM)
+                # 4. Influencer + organic mention detection (direct, no LLM)
                 for tweet in search_results:
                     author = tweet.get("author", {}).get("screen_name", "").lower()
+                    if not author:
+                        continue
+                    created_ts = tweet.get("created_timestamp", 0)
+                    tweet_age_min = (time.time() - created_ts) / 60 if created_ts else 0
+
                     if author in self.influencers:
                         influencer_mentions.append({
                             "handle": author,
@@ -638,11 +643,20 @@ class TrenchingBot:
                             "weight": self.influencers[author]["weight"],
                             "tweet_text": tweet.get("text", "")[:100],
                             "likes": tweet.get("likes", 0),
+                            "tweet_age_min": tweet_age_min,
                         })
                         if author == "elonmusk":
                             token.has_elon_tweet = True
                         elif author == "aeyakovenko":
                             token.has_toly_tweet = True
+                    else:
+                        token.organic_mentions.append({
+                            "handle": author,
+                            "followers": tweet.get("author", {}).get("followers", 0),
+                            "likes": tweet.get("likes", 0),
+                            "tweet_text": tweet.get("text", "")[:100],
+                            "tweet_age_min": tweet_age_min,
+                        })
             except Exception as e:
                 logger.warning(f"Twitter search error for {token.symbol}: {e}")
 
@@ -685,24 +699,33 @@ class TrenchingBot:
                     token.project_type = social_data.get("project_type", "unknown")
                     token.social_narrative_score = float(social_data.get("score", 0))
                     token.social_narrative_text = social_data.get("summary", "")
+                    token.catalyst_match = bool(social_data.get("has_catalyst", False))
+                    token.catalyst_description = social_data.get("catalyst_description", "")
                 except Exception as e:
                     logger.warning(f"Social analysis parse error for {token.symbol}: {e}")
                     token.project_type = "unknown"
                     token.social_narrative_score = 0
                     token.social_narrative_text = ""
+                    token.catalyst_match = False
+                    token.catalyst_description = ""
 
             # Score floor: tokens with basic social links get minimum 15pts
             has_basic_social = bool(token.twitter_username or token.website_url or token.telegram_url)
             if has_basic_social and token.social_narrative_score < 15:
                 token.social_narrative_score = 15
 
-            # Bonus for influencer/KOL mentions
-            if influencer_mentions:
-                max_influencer_weight = max(inf.get("weight", 0) for inf in influencer_mentions)
-                influencer_bonus = min(max_influencer_weight, 20)
-                token.social_narrative_score = min(100, token.social_narrative_score + influencer_bonus)
+            # Compute social signals bonus (replaces simple max(weight))
+            from llm.social_scoring import calculate_social_signals_bonus
+            signals = calculate_social_signals_bonus(token)
+            signals_bonus = signals["total_bonus"]
+            token.social_narrative_score = min(100, token.social_narrative_score + signals_bonus)
 
-            logger.info(f"[SOCIAL] {token.symbol} ({token.address[:8]}): score={token.social_narrative_score:.0f}/100, project={token.project_type}, social_links={has_basic_social}, influencers={len(influencer_mentions)}")
+            logger.info(
+                f"[SOCIAL] {token.symbol} ({token.address[:8]}): score={token.social_narrative_score:.0f}/100, "
+                f"project={token.project_type}, social_links={has_basic_social}, "
+                f"influencers={len(influencer_mentions)}, organic={len(token.organic_mentions)}, "
+                f"catalyst={token.catalyst_match}, signals_bonus=+{signals_bonus}"
+            )
 
         except Exception as e:
             logger.error(f"Social analysis error for {token.symbol}: {e}")

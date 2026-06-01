@@ -56,17 +56,20 @@ class TokenData:
     
     # Influencer detection
     influencer_mentions: list = field(default_factory=list)
+    organic_mentions: list = field(default_factory=list)
     has_elon_tweet: bool = False
     has_toly_tweet: bool = False
     has_community: bool = False
-    
+
     # Website content
     website_text: str = ""
-    
+
     # Social narrative scoring
     social_narrative_score: float = 0.0
     social_narrative_text: str = ""
     project_type: str = ""
+    catalyst_match: bool = False
+    catalyst_description: str = ""
 
 
 @dataclass

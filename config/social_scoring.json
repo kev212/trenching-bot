@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "updated_at": "2026-06-01T00:00:00Z",
+  "caps": {
+    "mega": 12,
+    "major": 8,
+    "mid": 6,
+    "niche_no_cap": true
+  },
+  "consensus_multiplier": 0.3,
+  "organic_spread": {
+    "three_authors": 5,
+    "seven_authors": 10,
+    "fifteen_authors": 15
+  },
+  "engagement": {
+    "tier1_likes": 20,
+    "tier2_likes": 100,
+    "tier3_likes": 500,
+    "tier1_min_count": 2,
+    "tier2_min_count": 5,
+    "tier1_bonus": 5,
+    "tier2_bonus": 10,
+    "tier3_bonus": 5
+  },
+  "catalyst_bonus": 8,
+  "time_decay": {
+    "fresh_hours": 6,
+    "aging_hours": 24,
+    "fresh_multiplier": 1.0,
+    "aging_multiplier": 0.5,
+    "stale_multiplier": 0.25
+  },
+  "max_total_bonus": 40
+}
