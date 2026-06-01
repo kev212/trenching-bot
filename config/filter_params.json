@@ -27,8 +27,8 @@
       "enabled": true,
       "weight": 0.10
     },
-    "bundle_detection": {
-      "enabled": true,
+    "insider_concentration": {
+      "enabled": false,
       "max_insider_ratio": 0.30,
       "weight": 0.10
     },
