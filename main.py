@@ -157,8 +157,8 @@ class TrenchingBot:
         )
         logger.warning(
             f"Trading: paper_mode={self.paper_mode}, "
-            f"balance={self.wallet.starting_balance} SOL, "
-            f"position_size={self.trading_config.get('position_size_sol')} SOL"
+            f"position_size={self.trading_config.get('position_size_sol')} SOL, "
+            f"reserve={self.wallet.RESERVE_SOL if hasattr(self.wallet, 'RESERVE_SOL') else 0.1} SOL"
         )
 
     async def start(self):
