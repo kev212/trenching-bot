@@ -75,31 +75,7 @@ class GMGNClient:
                     timeout=15,
                 )
                 if resp.status_code != 200:
-                    logger.warning(f"GMGN POST {path}: HTTP {resp.status_code} - {resp.text[:200]}")
-                    return {}
-                data = resp.json()
-                if data.get("code") != 0:
-                    logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
-                    return {}
-                return data.get("data", data)
-        except Exception as e:
-            logger.error(f"GMGN {path} error: {e}")
-            return {}
-
-    async def _post_form(self, path: str, body: dict = None) -> dict:
-        try:
-            auth = self._auth_params()
-            full_body = {**(body or {}), **auth}
-            async with AsyncSession(impersonate="chrome") as session:
-                resp = await session.post(
-                    f"{self.host}{path}",
-                    json=full_body,
-                    headers=self._headers(),
-                    proxies=self._proxy_dict(),
-                    timeout=15,
-                )
-                if resp.status_code != 200:
-                    logger.warning(f"GMGN POST-FORM {path}: HTTP {resp.status_code} - {resp.text[:200]}")
+                    logger.warning(f"GMGN POST {path}: HTTP {resp.status_code} - {resp.text[:300]}")
                     return {}
                 data = resp.json()
                 if data.get("code") != 0:
@@ -132,7 +108,7 @@ class GMGNClient:
             "platforms": ["Pump.fun"],
             "limit": limit,
         }
-        data = await self._post_form("/v1/trenches", body)
+        data = await self._post("/v1/trenches", body)
         if isinstance(data, list):
             return data
         return data.get("items", []) if isinstance(data, dict) else []
