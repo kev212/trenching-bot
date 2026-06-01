@@ -710,16 +710,21 @@ class TrenchingBot:
                 decision.key_factors, decision.processing_time_ms,
             )
 
-            # Trading hook (Phase 1 paper mode): auto-buy on high-confidence APE
-            if decision.verdict == Verdict.APE and self.executor:
+            # Trading hook (Phase 1 paper mode): auto-buy on confidence threshold
+            # (not verdict — a WATCH with conf>=0.75 is still a strong signal)
+            if decision.confidence >= settings.confidence_auto_execute and self.executor:
                 await self._try_buy(token, decision, filter_params_version=await self.state.get_filter_version())
             else:
-                # Log why we didn't trade (WATCH/SKIP never trades; APE w/o executor)
+                # Log why we didn't trade
+                reason = (
+                    "below confidence threshold"
+                    if decision.confidence < settings.confidence_auto_execute
+                    else "executor not initialized"
+                )
                 logger.info(
                     f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
                     f"verdict={decision.verdict.value}, conf={decision.confidence:.2f}, "
-                    f"action=NO_TRADE "
-                    f"(only APE with conf>={settings.confidence_auto_execute} trades)"
+                    f"action=NO_TRADE ({reason}, threshold={settings.confidence_auto_execute})"
                 )
 
     async def get_open_positions_summary(self) -> list[dict]:

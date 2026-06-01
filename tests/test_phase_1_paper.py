@@ -221,21 +221,23 @@ def test_risk_rules_loads():
 # ============ BUY-DECISION log format ============
 
 def test_buy_decision_log_format():
-    """BUY-DECISION log should include verdict, conf, threshold, action."""
-    from config import settings
-    threshold = settings.confidence_auto_execute
-    assert threshold == 0.75
+    """BUY-DECISION gate: confidence-based, NOT verdict-based.
 
-    ape_high = ("APE", 0.85)
-    ape_low = ("APE", 0.60)
-    watch_high = ("WATCH", 0.70)
-
-    for verdict, conf in [ape_high, ape_low, watch_high]:
-        if verdict == "APE" and conf >= threshold:
-            action = "TRADE"
-        else:
-            action = "NO_TRADE"
-        assert action in ("TRADE", "NO_TRADE")
+    A WATCH with conf>=0.75 still trades.
+    An APE with conf<0.75 does NOT trade.
+    """
+    threshold = 0.75
+    cases = [
+        ("APE", 0.85, "TRADE"),
+        ("APE", 0.60, "NO_TRADE"),
+        ("WATCH", 0.70, "NO_TRADE"),
+        ("WATCH", 0.80, "TRADE"),
+        ("SKIP", 0.90, "TRADE"),
+        ("SKIP", 0.50, "NO_TRADE"),
+    ]
+    for verdict, conf, expected in cases:
+        action = "TRADE" if conf >= threshold else "NO_TRADE"
+        assert action == expected, f"{verdict}@{conf} should be {expected}, got {action}"
 
 
 def test_position_summary_fields():
