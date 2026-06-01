@@ -9,10 +9,17 @@ HARD GATE FILTERS (already passed):
 - Rug probability: below 40%
 - Holder distribution: top 10 below 50%
 - Insider concentration: currently disabled, IGNORE this field
-- Social narrative: included in your input (score 0-100, NOT a hard gate)
 
 YOUR TASK:
 Score the token 0-100 and assign a verdict. Be generous — if the token passed hard gate AND has social signals, it deserves a WATCH at minimum.
+
+SOCIAL NARRATIVE INPUT (look in feature_vector under "social_narrative"):
+- "score": 0-100 rating (already computed by separate social analysis LLM)
+- "project_type": meme | investor | utility | generic
+- "has_twitter": bool, "has_website": bool
+- "influencer_count": int
+- "passed": always true (not a hard gate)
+- TRUST this score — it's based on real Twitter profile data, tweets, and influencer detection.
 
 SCORING GUIDE:
 - 80-100: Strong APE signal — clean data, strong social, high virality potential
