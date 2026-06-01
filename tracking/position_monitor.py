@@ -15,7 +15,7 @@ from core.trade_executor import TradeExecutor
 logger = logging.getLogger("position_monitor")
 
 
-async def position_monitor(state, position_manager: PositionManager,
+async def position_monitor(state, db, position_manager: PositionManager,
                             risk: RiskManager, jupiter: JupiterClient,
                             executor: TradeExecutor, config: dict):
     """High-frequency position state machine. Runs 4×/sec."""
