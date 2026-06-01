@@ -102,13 +102,13 @@ class GMGNClient:
         return await self._get("/v1/market/token_top_holders", {"chain": "sol", "address": address})
 
     async def get_trenches(self, limit: int = 20) -> list:
-        body = {
+        params = {
             "chain": "sol",
             "types": ["new_creation"],
             "platforms": ["Pump.fun"],
             "limit": limit,
         }
-        data = await self._post("/v1/trenches", body)
+        data = await self._get("/v1/trenches", params)
         if isinstance(data, list):
             return data
         return data.get("items", []) if isinstance(data, dict) else []
