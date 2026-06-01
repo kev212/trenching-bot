@@ -48,7 +48,7 @@ class GMGNClient:
                     timeout=15,
                 )
                 if resp.status_code != 200:
-                    logger.warning(f"GMGN {path}: HTTP {resp.status_code}")
+                    logger.warning(f"GMGN GET {path}: HTTP {resp.status_code} - {resp.text[:200]}")
                     return {}
                 data = resp.json()
                 if data.get("code") != 0:
@@ -75,7 +75,7 @@ class GMGNClient:
                     timeout=15,
                 )
                 if resp.status_code != 200:
-                    logger.warning(f"GMGN {path}: HTTP {resp.status_code}")
+                    logger.warning(f"GMGN POST {path}: HTTP {resp.status_code} - {resp.text[:200]}")
                     return {}
                 data = resp.json()
                 if data.get("code") != 0:
@@ -87,7 +87,7 @@ class GMGNClient:
             return {}
 
     async def get_trending(self, limit: int = 20) -> list:
-        data = await self._get("/v1/market/rank", {"chain": "sol", "interval": "5min", "limit": limit})
+        data = await self._get("/v1/market/rank", {"chain": "sol", "interval": "5m", "limit": limit})
         if isinstance(data, list):
             return data
         return data.get("rank", []) if isinstance(data, dict) else []
@@ -105,7 +105,7 @@ class GMGNClient:
         body = {
             "chain": "sol",
             "types": ["new_creation"],
-            "platforms": ["pump", "raydium"],
+            "platforms": ["Pump.fun"],
             "limit": limit,
         }
         data = await self._post("/v1/trenches", body)
