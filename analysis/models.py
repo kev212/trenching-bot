@@ -27,7 +27,7 @@ class TokenData:
     volume_1h: float = 0.0
     liquidity: float = 0.0
     holders_count: int = 0
-    top10_hold_pct: float = 0.0
+    top15_hold_pct: float = 0.0
     insider_ratio: float = 0.0
     rug_probability: float = 0.0
     funded_wallet_new_pct: float = 0.0

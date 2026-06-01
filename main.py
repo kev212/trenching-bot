@@ -457,17 +457,22 @@ class TrenchingBot:
         )
 
         # Calculate holder stats from holders list
-        if holders_list:
-            top10 = holders_list[:10]
+        if holders_list and len(holders_list) >= 15:
+            top15 = holders_list[:15]
             # amount_percentage is decimal (0.1189 = 11.89%), convert to percentage
-            top10_pct = sum(float(h.get("amount_percentage", 0)) for h in top10) * 100
+            top15_pct = sum(float(h.get("amount_percentage", 0)) for h in top15) * 100
             new_wallet_count = sum(1 for h in holders_list if h.get("is_new", False))
             new_wallet_pct = (new_wallet_count / len(holders_list) * 100) if holders_list else 0
             # native_balance is in lamports, convert to SOL (1 SOL = 1e9 lamports)
             top_holder_balance = float(holders_list[0].get("native_balance", 0)) / 1e9
+        elif holders_list:
+            # Holders < 15: use what we have (less reliable but still data)
+            top15_pct = sum(float(h.get("amount_percentage", 0)) for h in holders_list) * 100
+            new_wallet_pct = (sum(1 for h in holders_list if h.get("is_new", False)) / len(holders_list) * 100) if holders_list else 0
+            top_holder_balance = float(holders_list[0].get("native_balance", 0)) / 1e9
         else:
-            # stat rates are decimals (0.1847 = 18.47%), convert to percentage
-            top10_pct = float(stat_obj.get("top_10_holder_rate", 0) or 0) * 100
+            # Fallback: GMGN stat rates are decimals (0.1847 = 18.47%), convert to percentage
+            top15_pct = float(stat_obj.get("top_10_holder_rate", 0) or 0) * 100
             new_wallet_pct = float(stat_obj.get("fresh_wallet_rate", 0) or 0) * 100
             top_holder_balance = 0
 
@@ -491,7 +496,7 @@ class TrenchingBot:
             volume_1h=float(price_obj.get("volume_1h", 0) or 0),
             liquidity=float(info.get("liquidity", 0) or 0),
             holders_count=int(info.get("holder_count", 0) or 0),
-            top10_hold_pct=top10_pct,
+            top15_hold_pct=top15_pct,
             insider_ratio=float(stat_obj.get("top_bundler_trader_percentage", 0) or 0),
             rug_probability=_calculate_rug_score(security),
             funded_wallet_new_pct=new_wallet_pct,
@@ -622,7 +627,7 @@ class TrenchingBot:
                     market_cap=token.market_cap,
                     holders_count=token.holders_count,
                     age_minutes=age_min_skip,
-                    top10_pct=token.top10_hold_pct,
+                    top15_pct=token.top15_hold_pct,
                     social_score=social_score_skip,
                     feature_vector=fv_dict,
                 )

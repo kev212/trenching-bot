@@ -143,7 +143,7 @@ CREATE TABLE IF NOT EXISTS skip_decisions (
     market_cap REAL,
     holders_count INTEGER,
     age_minutes REAL,
-    top10_pct REAL,
+    top15_pct REAL,
     social_score REAL,
     feature_vector TEXT,           -- JSON: full fv
     skipped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -393,7 +393,7 @@ class Database:
         market_cap: float,
         holders_count: int,
         age_minutes: float,
-        top10_pct: float,
+        top15_pct: float,
         social_score: float,
         feature_vector: dict,
     ):
@@ -402,12 +402,12 @@ class Database:
         await self.db.execute(
             """INSERT INTO skip_decisions
             (token_address, token_name, token_symbol, llm_score, llm_reasoning, llm_key_factors,
-             market_cap, holders_count, age_minutes, top10_pct, social_score, feature_vector)
+             market_cap, holders_count, age_minutes, top15_pct, social_score, feature_vector)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 token_address, token_name, token_symbol, llm_score, llm_reasoning,
                 _json.dumps(llm_key_factors), market_cap, holders_count, age_minutes,
-                top10_pct, social_score, _json.dumps(feature_vector),
+                top15_pct, social_score, _json.dumps(feature_vector),
             ),
         )
         await self.db.commit()

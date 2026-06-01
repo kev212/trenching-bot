@@ -221,17 +221,17 @@ def _filter_rug_probability(token: TokenData, params: dict) -> dict:
 
 
 def _filter_holder_distribution(token: TokenData, params: dict) -> dict:
-    max_top10 = params.get("max_top10_pct", 50)
-    top10 = token.top10_hold_pct
+    max_top15 = params.get("max_top15_pct", 50)
+    top15 = token.top15_hold_pct
 
-    passed = top10 <= max_top10
+    passed = top15 <= max_top15
     return {
-        "top10_hold_pct": top10,
+        "top15_hold_pct": top15,
         "holders_count": token.holders_count,
-        "threshold": max_top10,
+        "threshold": max_top15,
         "passed": passed,
         "enabled": True,
-        "note": f"Top10 hold: {top10:.1f}% (max: {max_top10}%), {token.holders_count} holders",
+        "note": f"Top15 hold: {top15:.1f}% (max: {max_top15}%), {token.holders_count} holders",
     }
 
 

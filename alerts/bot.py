@@ -138,7 +138,7 @@ async def cmd_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "min_holders": ("min_holders", "min_holders", ""),
         "funded_wallet_age": ("max_new", "max_new_wallet_pct", "%"),
         "rug_probability": ("max_rug", "max_rug_prob", ""),
-        "holder_distribution": ("max_top10", "max_top10_pct", "%"),
+        "holder_distribution": ("max_top15", "max_top15_pct", "%"),
     }
 
     for filter_name, (short, param_key, unit) in key_map.items():

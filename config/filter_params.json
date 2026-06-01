@@ -50,7 +50,7 @@
     },
     "holder_distribution": {
       "enabled": true,
-      "max_top10_pct": 50,
+      "max_top15_pct": 50,
       "weight": 0.05
     },
     "social_narrative": {

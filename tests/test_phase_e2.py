@@ -67,7 +67,7 @@ async def run_tests():
         market_cap=35000,
         holders_count=200,
         age_minutes=20.0,
-        top10_pct=45.0,
+        top15_pct=45.0,
         social_score=10.0,
         feature_vector={"min_market_cap": {"passed": True}},
     )
