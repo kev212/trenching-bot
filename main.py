@@ -486,16 +486,20 @@ class TrenchingBot:
         """Analyze social media presence for tokens that pass hard gate."""
         try:
             link = info.get("link", {})
-            token.twitter_username = link.get("twitter_username", "")
+            raw_twitter = link.get("twitter_username", "")
             token.website_url = link.get("website", "")
             token.telegram_url = link.get("telegram", "")
 
+            # Extract clean Twitter handle
+            clean_handle = self.twitter._extract_handle(raw_twitter)
+            token.twitter_username = clean_handle
+
             influencer_mentions = []
 
-            # 1. Twitter profile + recent tweets
-            if token.twitter_username:
+            # 1. Twitter profile + recent tweets (only if valid handle)
+            if clean_handle:
                 try:
-                    profile = await self.twitter.get_profile(token.twitter_username)
+                    profile = await self.twitter.get_profile(clean_handle)
                     if profile:
                         token.twitter_followers = profile.get("followers", 0)
                         token.twitter_verified = profile.get("verification", {}).get("verified", False)
@@ -504,10 +508,12 @@ class TrenchingBot:
                     logger.warning(f"Twitter profile error for {token.symbol}: {e}")
 
                 try:
-                    tweets = await self.twitter.get_recent_tweets(token.twitter_username, 3)
+                    tweets = await self.twitter.get_recent_tweets(clean_handle, 3)
                     token.recent_tweets = tweets
                 except Exception as e:
                     logger.warning(f"Twitter tweets error for {token.symbol}: {e}")
+            else:
+                logger.info(f"[SOCIAL] {token.symbol}: no valid twitter handle (raw: {raw_twitter})")
 
             # 2. Website scraping
             if token.website_url:
