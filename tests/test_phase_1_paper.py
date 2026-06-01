@@ -605,3 +605,74 @@ def test_format_exit_alert_sl_full_close():
     assert "50,000 tokens" in text
     assert "SL" in text
     assert "🛑" in text
+
+
+# ============ Phantom exit prevention ============
+
+def test_min_hold_prevents_phantom_trailing():
+    """The bug: TRAILING fired at 1s because GMGN returned a different
+    price on the first check after buy. Fix: min_hold_seconds gate."""
+    min_hold = 30
+    held_so_far = 1
+    entry = 0.0000806914
+    phantom_current = 0.0000577607
+    peak = max(entry, phantom_current)
+    trailing_pct = 15
+
+    in_warmup = held_so_far < min_hold
+    would_trail = (not in_warmup) and phantom_current <= peak * (1 - trailing_pct / 100)
+    assert in_warmup is True
+    assert would_trail is False
+
+
+def test_min_hold_allows_real_trailing_after_grace():
+    """After 30s warmup, real trailing should fire."""
+    min_hold = 30
+    held_so_far = 45
+    entry = 0.0001
+    peak = 0.00015
+    drop_price = 0.00012
+    trailing_pct = 15
+
+    in_warmup = held_so_far < min_hold
+    would_trail = (not in_warmup) and drop_price <= peak * (1 - trailing_pct / 100)
+    assert in_warmup is False
+    assert would_trail is True
+
+
+def test_paper_buy_warms_price_cache():
+    """execute_buy should warm the paper price cache so first 5s can't trigger exits."""
+    from core.trade_executor import TradeExecutor
+    from core.wallet import Wallet
+    from core.jupiter_client import JupiterClient
+    from core.position_manager import PositionManager
+    from core.risk_manager import RiskManager
+    from analysis.models import TokenData
+    import time
+
+    class FakeJupiter:
+        async def get_quote(self, *a, **k): return {}
+        async def get_token_price_in_sol_with_retry(self, *a, **k): return 0.0
+
+    class FakePM:
+        db = None
+        async def open_position(self, p): return 1
+        async def record_trade(self, t): return 1
+
+    async def go():
+        executor = TradeExecutor(
+            paper=True,
+            wallet=Wallet(paper=True, starting_balance_sol=10.0),
+            jupiter=FakeJupiter(),
+            positions=FakePM(),
+            risk=RiskManager({}),
+            config={},
+        )
+        token = TokenData(address="HuJuQYaZ", symbol="DATBIHGAH", name="D")
+        token.raw_gmgn = {"price": {"price": 0.0000806914}}
+        await executor.execute_buy(token, 0.05)
+        cached = executor._paper_price_cache.get("HuJuQYaZ")
+        assert cached is not None
+        assert cached["price"] == 0.0000806914
+        assert (time.time() - cached["ts"]) < 1.0
+    asyncio.run(go())

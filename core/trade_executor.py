@@ -7,6 +7,7 @@ Live mode (Phase 2): also builds, signs, submits via Helius RPC.
 """
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -155,6 +156,17 @@ class TradeExecutor:
             f"@ {entry_price:.10f} SOL, size={size_sol:.4f} SOL, "
             f"tokens={amount_token:.2f}, impact={price_impact:.2f}%"
         )
+
+        if self.paper and entry_price > 0:
+            self._paper_price_cache[token.address] = {
+                "ts": time.time(),
+                "price": entry_price,
+            }
+            logger.debug(
+                f"[EXEC] warmed price cache for {token.symbol} @ {entry_price:.10f} "
+                f"(5s grace before any exit check)"
+            )
+
         return position
 
     def _gmgn_price_in_sol(self, token: TokenData) -> float:

@@ -36,6 +36,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
     trailing_pct = config.get("trailing_stop_pct", 15)
     time_limit = config.get("time_limit_seconds", 1800)
     is_paper = config.get("paper_mode", True)
+    min_hold_seconds = config.get("min_hold_seconds", 30)
 
     while True:
         await asyncio.sleep(check_interval)
@@ -70,17 +71,23 @@ async def position_monitor(state, db, position_manager: PositionManager,
                 already_partial = bool(position.get("exit_reason")) and \
                     position.get("exit_reason") in ("TP1", "TP2")
 
+                held_so_far = (
+                    (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
+                    if position.get("entry_time") else 0
+                )
+                in_warmup = held_so_far < min_hold_seconds
+
                 if current_price <= entry * (1 - stop_loss_pct / 100):
                     await executor.execute_sell(position, 100, "SL")
                     triggered = True
                     last_reason = "SL"
-                elif not already_partial and current_price >= entry * tp1_mult:
+                elif not in_warmup and not already_partial and current_price >= entry * tp1_mult:
                     await executor.execute_sell(position, tp1_pct, "TP1")
                     position["exit_reason"] = "TP1"
                     await position_manager.update_position(position)
                     triggered = True
                     last_reason = "TP1"
-                elif position.get("exit_reason") == "TP1" and \
+                elif not in_warmup and position.get("exit_reason") == "TP1" and \
                         current_price >= entry * tp2_mult:
                     remaining_pct = 100 - tp1_pct
                     await executor.execute_sell(position, remaining_pct, "TP2")
@@ -88,13 +95,12 @@ async def position_monitor(state, db, position_manager: PositionManager,
                     await position_manager.update_position(position)
                     triggered = True
                     last_reason = "TP2"
-                elif current_price <= peak * (1 - trailing_pct / 100):
+                elif not in_warmup and current_price <= peak * (1 - trailing_pct / 100):
                     await executor.execute_sell(position, 100, "TRAILING")
                     triggered = True
                     last_reason = "TRAILING"
                 else:
-                    held = (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
-                    if held > time_limit:
+                    if held_so_far > time_limit:
                         await executor.execute_sell(position, 100, "TIME")
                         triggered = True
                         last_reason = "TIME"
@@ -103,7 +109,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
                     logger.info(
                         f"[POS-MON] {position['token_symbol']} exit: "
                         f"price={current_price:.10f}, entry={entry:.10f}, "
-                        f"peak={peak:.10f}, paper={is_paper}"
+                        f"peak={peak:.10f}, paper={is_paper}, hold={held_so_far:.0f}s"
                     )
                     try:
                         entry_tokens = position.get("entry_amount_token", 0) or 0

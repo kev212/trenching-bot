@@ -9,6 +9,7 @@
   "max_price_impact_pct": 5.0,
   "slippage_bps": 300,
   "stop_loss_pct": 30,
+  "min_hold_seconds": 30,
   "tp1_multiplier": 1.30,
   "tp1_sell_pct": 33,
   "tp2_multiplier": 1.50,
