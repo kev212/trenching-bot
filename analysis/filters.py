@@ -19,6 +19,7 @@ def run_all_filters(token: TokenData, filter_params: dict) -> FeatureVector:
     fv.rug_probability = _filter_rug_probability(token, filter_params.get("rug_probability", {}))
     fv.holder_distribution = _filter_holder_distribution(token, filter_params.get("holder_distribution", {}))
     fv.social_narrative = _filter_social_narrative(token, filter_params.get("social_narrative", {}))
+    fv.ath_drawdown = _filter_ath_drawdown(token, filter_params.get("ath_drawdown", {}))
 
     return fv
 
@@ -301,3 +302,18 @@ def check_hard_gate(fv: FeatureVector) -> tuple[bool, list[str]]:
     """Hard gate: ALL filters must pass. Returns (passed, failures)."""
     _, _, failures = count_passed_filters(fv)
     return len(failures) == 0, failures
+
+
+def _filter_ath_drawdown(token: TokenData, params: dict) -> dict:
+    """Filter by max drawdown from ATH (all-time high price)."""
+    max_dd = params.get("max_drawdown_pct", -50.0)
+    dd = token.drawdown_from_ath_pct
+    passed = dd >= max_dd
+    return {
+        "drawdown_pct": dd,
+        "ath_price": token.ath_price,
+        "threshold": max_dd,
+        "passed": passed,
+        "enabled": params.get("enabled", True),
+        "note": f"Drawdown from ATH: {dd:.1f}% (max: {max_dd}%)",
+    }

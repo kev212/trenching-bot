@@ -19,6 +19,7 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict) -> str:
         "funded_wallet_age": "👛 Wallet Age",
         "rug_probability": "🛡️ Rug Risk",
         "holder_distribution": "👥 Holders",
+        "ath_drawdown": "📉 ATH Drawdown",
     }
     for key, label in filter_names.items():
         f = fv_dict.get(key, {})

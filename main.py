@@ -400,35 +400,34 @@ class TrenchingBot:
                 self.state.metrics.record_call("SKIP")
                 return
 
-        # Acquire rate limit slot + fetch data sequentially (no burst)
+        # Acquire 1 rate limit slot (4 parallel calls = 1 budget slot)
         await self.rate_limiter.acquire()
 
+        # Phase B: parallel fetch — info + security + holders + ath in one round-trip
+        # Pre-filter at lines 341-366 already screens ~80% of tokens before this
         try:
-            info = await self.gmgn.get_token_info(address)
+            results = await asyncio.gather(
+                self.gmgn.get_token_info(address),
+                self.gmgn.get_token_security(address),
+                self.gmgn.get_token_holders(address),
+                self.gmgn.get_token_ath(address),
+                return_exceptions=True,
+            )
+            info, security, holders, ath_data = [
+                r if not isinstance(r, Exception) else {} for r in results
+            ]
+            if isinstance(results[1], Exception):
+                logger.warning(f"GMGN security error for {address[:10]}: {results[1]}")
+            if isinstance(results[2], Exception):
+                logger.warning(f"GMGN holders error for {address[:10]}: {results[2]}")
+            if isinstance(results[3], Exception):
+                logger.warning(f"GMGN ath error for {address[:10]}: {results[3]}")
         except Exception as e:
-            logger.warning(f"GMGN info error for {address[:10]}: {e}")
-            info = {}
-
-        await asyncio.sleep(2)
-        await self.rate_limiter.acquire()
-
-        try:
-            security = await self.gmgn.get_token_security(address)
-        except Exception as e:
-            logger.warning(f"GMGN security error for {address[:10]}: {e}")
-            security = {}
+            logger.warning(f"GMGN gather error for {address[:10]}: {e}")
+            info, security, holders, ath_data = {}, {}, {}, {}
 
         if not security:
             logger.warning(f"[SECURITY-EMPTY] {symbol} ({address[:8]}): rug_score will be 0")
-
-        await asyncio.sleep(2)
-        await self.rate_limiter.acquire()
-
-        try:
-            holders = await self.gmgn.get_token_holders(address)
-        except Exception as e:
-            logger.warning(f"GMGN holders error for {address[:10]}: {e}")
-            holders = {}
 
         if not info:
             logger.info(f"[SKIP] {symbol} ({address[:8]}): no data")
@@ -445,6 +444,17 @@ class TrenchingBot:
         current_price = float(price_obj.get("price", 0) or 0)
         total_supply = float(info.get("total_supply", 0) or 0)
         market_cap = current_price * total_supply
+
+        # Phase B: compute drawdown from ATH (0 if no ATH data — fresh tokens)
+        ath_price_val = ath_data.get("ath_price", 0.0) if ath_data else 0.0
+        if ath_price_val > 0 and current_price > 0:
+            drawdown = (current_price - ath_price_val) / ath_price_val * 100
+        else:
+            drawdown = 0.0
+        logger.info(
+            f"[ATH] {symbol} ({address[:8]}): drawdown={drawdown:.1f}%, "
+            f"ath=${ath_price_val:.8f}, current=${current_price:.8f}, candles={ath_data.get('candles_checked', 0) if ath_data else 0}"
+        )
 
         # Calculate holder stats from holders list
         if holders_list:
@@ -495,6 +505,9 @@ class TrenchingBot:
             open_timestamp=open_ts_from_info,
             migrated_timestamp=migrated_ts,
             raw_gmgn=info,
+            ath_price=ath_price_val,
+            ath_timestamp=ath_data.get("ath_timestamp", 0) if ath_data else 0,
+            drawdown_from_ath_pct=drawdown,
         )
 
         # Run filters

@@ -56,6 +56,11 @@
     "social_narrative": {
       "enabled": true,
       "weight": 0.05
+    },
+    "ath_drawdown": {
+      "enabled": true,
+      "max_drawdown_pct": -50.0,
+      "weight": 0.10
     }
   }
 }
