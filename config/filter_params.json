@@ -43,9 +43,10 @@
       "weight": 0.10
     },
     "rug_probability": {
-      "enabled": true,
+      "enabled": false,
       "max_rug_prob": 0.40,
-      "weight": 0.10
+      "weight": 0.10,
+      "note": "Informational only, passed to LLM as context"
     },
     "holder_distribution": {
       "enabled": true,

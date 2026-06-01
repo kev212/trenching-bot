@@ -34,26 +34,60 @@ logger = setup_logger("main")
 MIN_FILTERS_FOR_LLM = 6
 
 
+def _safe_float(val, default=0.0) -> float:
+    if val is None or val == "":
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
 def _calculate_rug_score(security: dict) -> float:
-    """Calculate rug probability from GMGN security fields."""
+    """Use GMGN's rug_ratio (ML-computed) with manual fallback."""
     if not security:
         return 0.0
 
-    score = 0.0
+    # Primary: GMGN's own rug_ratio
+    rug_ratio = security.get("rug_ratio")
+    if rug_ratio is not None and rug_ratio != "":
+        try:
+            return min(max(float(rug_ratio), 0.0), 1.0)
+        except (TypeError, ValueError):
+            pass
 
-    if security.get("blacklist", 0):
+    # Fallback: manual calc
+    score = 0.0
+    if security.get("honeypot") in (1, True, "1"):
+        score += 0.4
+    if security.get("blacklist") in (1, True, "1"):
         score += 0.3
-    if security.get("honeypot", 0):
-        score += 0.5
-    if not security.get("renounced_freeze_account", True):
+    if security.get("renounced_mint") in (False, 0, "0"):
         score += 0.1
-    if not security.get("renounced_mint", True):
+    if security.get("renounced_freeze_account") in (False, 0, "0"):
         score += 0.1
-    if float(security.get("buy_tax", 0) or 0) > 0.1:
+
+    buy_tax = _safe_float(security.get("buy_tax"))
+    sell_tax = _safe_float(security.get("sell_tax"))
+    if buy_tax > 0.1 or sell_tax > 0.1:
         score += 0.2
-    if float(security.get("sell_tax", 0) or 0) > 0.2:
+
+    burn = _safe_float(security.get("burn_ratio"), default=1.0)
+    if burn < 0.5:
+        score += 0.1
+
+    if security.get("is_wash_trading") in (True, "true", 1):
         score += 0.2
-    if float(security.get("burn_ratio", 1) or 1) < 0.5:
+    lock = security.get("lock_summary", {}) or {}
+    if not lock.get("is_locked"):
+        score += 0.15
+    if _safe_float(security.get("top_10_holder_rate")) > 0.5:
+        score += 0.2
+    if _safe_float(security.get("rat_trader_amount_rate")) > 0.3:
+        score += 0.2
+    if _safe_float(security.get("bundler_trader_amount_rate")) > 0.5:
+        score += 0.15
+    if int(security.get("sniper_count", 0) or 0) > 5:
         score += 0.1
 
     return min(score, 1.0)
@@ -383,6 +417,9 @@ class TrenchingBot:
         except Exception as e:
             logger.warning(f"GMGN security error for {address[:10]}: {e}")
             security = {}
+
+        if not security:
+            logger.warning(f"[SECURITY-EMPTY] {symbol} ({address[:8]}): rug_score will be 0")
 
         await asyncio.sleep(2)
         await self.rate_limiter.acquire()

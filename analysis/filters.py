@@ -210,12 +210,11 @@ def _filter_rug_probability(token: TokenData, params: dict) -> dict:
     max_prob = params.get("max_rug_prob", 0.40)
     prob = token.rug_probability
 
-    passed = prob <= max_prob
     return {
         "probability": prob,
         "threshold": max_prob,
-        "passed": passed,
-        "enabled": True,
+        "passed": prob <= max_prob,
+        "enabled": params.get("enabled", True),
         "note": f"Rug probability: {prob:.0%} (max: {max_prob:.0%})",
     }
 
