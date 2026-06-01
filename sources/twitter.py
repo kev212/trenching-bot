@@ -11,21 +11,24 @@ class TwitterClient:
     def __init__(self):
         self.host = BASE_URL
 
+    INVALID_HANDLES = {"i", "status", "statuses", "search", "home", "notifications", "messages", "explore", "settings", "lists"}
+
     def _extract_handle(self, raw: str) -> str:
         """Extract clean Twitter handle from URL or raw string."""
         if not raw:
             return ""
-        # Remove @ prefix
         handle = raw.lstrip("@")
-        # Extract from URL: https://x.com/username or https://twitter.com/username
         match = re.search(r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]+)", handle)
         if match:
-            return match.group(1)
-        # Extract from path: username/status/...
+            candidate = match.group(1)
+            if candidate.lower() not in self.INVALID_HANDLES:
+                return candidate
         match = re.match(r"^([A-Za-z0-9_]+)", handle)
         if match:
-            return match.group(1)
-        return handle
+            candidate = match.group(1)
+            if candidate.lower() not in self.INVALID_HANDLES:
+                return candidate
+        return ""
 
     async def _get(self, path: str, params: dict = None) -> dict:
         try:
