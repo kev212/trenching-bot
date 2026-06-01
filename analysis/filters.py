@@ -12,11 +12,9 @@ def run_all_filters(token: TokenData, filter_params: dict) -> FeatureVector:
     fv.min_market_cap = _filter_min_market_cap(token, filter_params.get("min_market_cap", {}))
     fv.max_market_cap = _filter_max_market_cap(token, filter_params.get("max_market_cap", {}))
     fv.min_total_fee = _filter_min_total_fee(token, filter_params.get("min_total_fee", {}))
-    fv.mc_fee_ratio = _filter_mc_fee_ratio(token, filter_params.get("mc_fee_ratio", {}))
+    fv.fee_tier = _filter_fee_tier(token, filter_params.get("fee_tier", {}))
     fv.bundle_detection = _filter_bundle_detection(token, filter_params.get("bundle_detection", {}))
-    fv.wash_trading = _filter_wash_trading(token, filter_params.get("wash_trading", {}))
     fv.min_holders = _filter_min_holders(token, filter_params.get("min_holders", {}))
-    fv.top_holder_balance = _filter_top_holder_balance(token, filter_params.get("top_holder_balance", {}))
     fv.funded_wallet_age = _filter_funded_wallet_age(token, filter_params.get("funded_wallet_age", {}))
     fv.rug_probability = _filter_rug_probability(token, filter_params.get("rug_probability", {}))
     fv.holder_distribution = _filter_holder_distribution(token, filter_params.get("holder_distribution", {}))
@@ -26,24 +24,48 @@ def run_all_filters(token: TokenData, filter_params: dict) -> FeatureVector:
 
 
 def _filter_token_age(token: TokenData, params: dict) -> dict:
-    max_minutes = params.get("max_token_age_minutes", 30)
+    max_pre_migrate = params.get("max_pre_migrate_minutes", 120)
+    max_post_migrate = params.get("max_post_migrate_minutes", 45)
+    now = datetime.now(timezone.utc).timestamp()
 
-    if not token.created_at:
-        return {
-            "age_minutes": None,
-            "threshold": max_minutes,
-            "passed": False,
-            "note": "No creation timestamp",
-        }
+    if token.migrated_timestamp > 0:
+        # Post-migrate: use open_timestamp, max 45 min
+        if token.open_timestamp > 0:
+            age_min = (now - token.open_timestamp) / 60
+            max_minutes = max_post_migrate
+            status = "post-migrate"
+        else:
+            return {
+                "age_minutes": None,
+                "threshold": max_post_migrate,
+                "passed": False,
+                "note": "Post-migrate but no open_timestamp",
+            }
+    else:
+        # Pre-migrate: use creation_timestamp, max 120 min
+        if token.creation_timestamp > 0:
+            age_min = (now - token.creation_timestamp) / 60
+            max_minutes = max_pre_migrate
+            status = "pre-migrate"
+        elif token.created_at:
+            age_min = (now - token.created_at.timestamp()) / 60
+            max_minutes = max_pre_migrate
+            status = "pre-migrate"
+        else:
+            return {
+                "age_minutes": None,
+                "threshold": max_pre_migrate,
+                "passed": False,
+                "note": "No creation timestamp",
+            }
 
-    age_minutes = (datetime.now(timezone.utc) - token.created_at).total_seconds() / 60
-    passed = age_minutes <= max_minutes
-
+    passed = age_min <= max_minutes
     return {
-        "age_minutes": age_minutes,
+        "age_minutes": age_min,
         "threshold": max_minutes,
+        "status": status,
         "passed": passed,
-        "note": f"Age: {age_minutes:.0f}min (max: {max_minutes}min)",
+        "note": f"Age: {age_min:.0f}min (max: {max_minutes}min) [{status}]",
     }
 
 
@@ -86,9 +108,7 @@ def _filter_min_total_fee(token: TokenData, params: dict) -> dict:
     }
 
 
-def _filter_mc_fee_ratio(token: TokenData, params: dict) -> dict:
-    # Rule: min 1 SOL fee per $10K MC
-    min_fee_per_10k = params.get("min_fee_sol_per_10k_mc", 1.0)
+def _filter_fee_tier(token: TokenData, params: dict) -> dict:
     fee = token.fee_collected  # dalam SOL
     mc = token.market_cap      # dalam USD
 
@@ -101,15 +121,29 @@ def _filter_mc_fee_ratio(token: TokenData, params: dict) -> dict:
             "note": "No MC data",
         }
 
-    min_fee = (mc / 10000) * min_fee_per_10k
+    # 3-tier fee system
+    if mc < 50000:
+        # MC < $50K: proportional 1 SOL per $10K
+        min_fee = mc / 10000
+        tier = "proportional"
+    elif mc <= 100000:
+        # $50K <= MC <= $100K: flat 5 SOL
+        min_fee = 5.0
+        tier = "flat-5"
+    else:
+        # MC > $100K: flat 10 SOL
+        min_fee = 10.0
+        tier = "flat-10"
+
     passed = fee >= min_fee
 
     return {
         "fee_sol": fee,
         "mc_usd": mc,
         "min_fee_sol": min_fee,
+        "tier": tier,
         "passed": passed,
-        "note": f"Fee: {fee:.2f} SOL (min: {min_fee:.2f} SOL for ${mc:,.0f} MC)",
+        "note": f"Fee: {fee:.2f} SOL (min: {min_fee:.2f} SOL [{tier}] for ${mc:,.0f} MC)",
     }
 
 
@@ -126,17 +160,6 @@ def _filter_bundle_detection(token: TokenData, params: dict) -> dict:
     }
 
 
-def _filter_wash_trading(token: TokenData, params: dict) -> dict:
-    is_wash = token.is_wash_trading
-
-    passed = not is_wash
-    return {
-        "is_wash_trading": is_wash,
-        "passed": passed,
-        "note": "Wash trading detected!" if is_wash else "No wash trading",
-    }
-
-
 def _filter_min_holders(token: TokenData, params: dict) -> dict:
     min_holders = params.get("min_holders", 100)
     holders = token.holders_count
@@ -147,19 +170,6 @@ def _filter_min_holders(token: TokenData, params: dict) -> dict:
         "threshold": min_holders,
         "passed": passed,
         "note": f"Holders: {holders} (min: {min_holders})",
-    }
-
-
-def _filter_top_holder_balance(token: TokenData, params: dict) -> dict:
-    min_sol = params.get("min_balance_sol", 0.2)
-    balance = token.top_holder_balance_sol
-
-    passed = balance >= min_sol
-    return {
-        "balance_sol": balance,
-        "threshold": min_sol,
-        "passed": passed,
-        "note": f"Top holder balance: {balance:.2f} SOL (min: {min_sol})",
     }
 
 
@@ -204,16 +214,20 @@ def _filter_holder_distribution(token: TokenData, params: dict) -> dict:
 
 
 def _filter_social_narrative(token: TokenData, params: dict) -> dict:
-    # Social narrative is a bonus, not a hard gate
-    # Always passes, but includes data for LLM context
     score = token.social_narrative_score
-    text = token.social_narrative_text[:100] if token.social_narrative_text else ""
+    project_type = token.project_type
+    influencer_count = len(token.influencer_mentions)
+    has_twitter = bool(token.twitter_username)
+    has_website = bool(token.website_url)
 
     return {
         "score": score,
-        "has_text": bool(text),
+        "project_type": project_type,
+        "influencer_count": influencer_count,
+        "has_twitter": has_twitter,
+        "has_website": has_website,
         "passed": True,  # Always passes (bonus, not hard gate)
-        "note": f"Social score: {score:.1f}" + (f' "{text}..."' if text else " (no data)"),
+        "note": f"Social: {score:.0f}/100 ({project_type}) {influencer_count} influencers",
     }
 
 
@@ -224,11 +238,9 @@ def count_passed_filters(fv: FeatureVector) -> tuple[int, int, list[str]]:
         "min_market_cap": fv.min_market_cap,
         "max_market_cap": fv.max_market_cap,
         "min_total_fee": fv.min_total_fee,
-        "mc_fee_ratio": fv.mc_fee_ratio,
+        "fee_tier": fv.fee_tier,
         "bundle_detection": fv.bundle_detection,
-        "wash_trading": fv.wash_trading,
         "min_holders": fv.min_holders,
-        "top_holder_balance": fv.top_holder_balance,
         "funded_wallet_age": fv.funded_wallet_age,
         "rug_probability": fv.rug_probability,
         "holder_distribution": fv.holder_distribution,

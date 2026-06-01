@@ -1,0 +1,15 @@
+{
+  "influencers": {
+    "elonmusk": {"name": "Elon Musk", "weight": 40},
+    "aeyakovenko": {"name": "Toly (Solana)", "weight": 30},
+    "sama": {"name": "Sam Altman", "weight": 20},
+    "VitalikButerin": {"name": "Vitalik", "weight": 15},
+    "jack": {"name": "Jack Dorsey", "weight": 15},
+    "CryptoHayes": {"name": "Arthur Hayes", "weight": 10},
+    "inversebrah": {"name": "Inversebrah", "weight": 10},
+    "blknoiz01": {"name": "Ansem", "weight": 10},
+    "DeFiTracer": {"name": "DeFi Tracer", "weight": 5},
+    "cobaborat": {"name": "Coba Borat", "weight": 5},
+    "solana_maxi": {"name": "Solana Maxi", "weight": 5}
+  }
+}

@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import signal
+import time
 from datetime import datetime, timezone
 
 logger = logging.getLogger("main")
@@ -11,10 +12,12 @@ from config import settings
 from storage.database import Database
 from storage.cache import SharedState
 from sources.gmgn import GMGNClient
+from sources.twitter import TwitterClient
+from sources.web_scraper import WebScraper
 from analysis.models import TokenData, CallRecord, CallStatus, Verdict
 from analysis.filters import run_all_filters, check_hard_gate
 from llm.mimo_client import MiMoClient
-from llm.prompts import DECISION_SYSTEM, DECISION_USER
+from llm.prompts import DECISION_SYSTEM, DECISION_USER, SOCIAL_ANALYSIS_SYSTEM, SOCIAL_ANALYSIS_USER
 from llm.parser import parse_decision
 from tracking.price_monitor import price_monitor
 from tracking.hourly_recap import hourly_recap
@@ -48,12 +51,24 @@ def _calculate_rug_score(security: dict) -> float:
         score += 0.1
     if float(security.get("buy_tax", 0) or 0) > 0.1:
         score += 0.2
-    if float(security.get("sell_tax", 0) or 0) > 0.1:
+    if float(security.get("sell_tax", 0) or 0) > 0.2:
         score += 0.2
     if float(security.get("burn_ratio", 1) or 1) < 0.5:
         score += 0.1
 
     return min(score, 1.0)
+
+
+def _load_influencers() -> dict:
+    """Load influencer list from config."""
+    config_path = os.path.join(os.path.dirname(__file__), "config", "influencers.json")
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+            return data.get("influencers", {})
+    except Exception as e:
+        logger.warning(f"Failed to load influencers config: {e}")
+        return {}
 
 
 class TrenchingBot:
@@ -64,10 +79,16 @@ class TrenchingBot:
         self.state.queue = self.queue
         self.gmgn = GMGNClient(settings.gmgn_api_key, settings.http_proxy)
         logger.warning(f"GMGN init: proxy=[{self.gmgn.proxy[:50] if self.gmgn.proxy else 'NONE'}]")
+        self.twitter = TwitterClient()
+        self.scraper = WebScraper()
+        self.influencers = _load_influencers()
+        logger.warning(f"Loaded {len(self.influencers)} influencers")
         self.mimo = MiMoClient()
-        self.rate_limiter = RateLimiter(15, 60)  # 15 req/min (3 calls per token = ~5 tokens/min)
+        self.rate_limiter = RateLimiter(15, 60)  # GMGN: 15 req/min
+        self.llm_rate_limiter = RateLimiter(10, 60)  # LLM: 10 req/min
         self.tasks = {}
         self.workers = []
+        self.seen_trenches = set()
         self.shutdown_event = asyncio.Event()
 
     async def start(self):
@@ -95,6 +116,7 @@ class TrenchingBot:
 
         self.tasks = {
             "gmgn_poller": asyncio.create_task(self._gmgn_poller()),
+            "trenches_poller": asyncio.create_task(self._trenches_poller()),
             "worker_0": asyncio.create_task(self._token_worker(0)),
             "price_monitor": asyncio.create_task(self._run_forever("price_monitor", price_monitor)),
             "hourly_recap": asyncio.create_task(self._run_forever("hourly_recap", hourly_recap)),
@@ -129,19 +151,33 @@ class TrenchingBot:
         seen = set()
         poll_count = 0
         ban_count = 0
-        base_delay = 60  # 60 detik base delay
+        base_delay = 60
 
         while True:
             try:
                 tokens = await self.gmgn.get_trending(limit=20)
-                ban_count = 0  # Reset ban counter kalau sukses
+                ban_count = 0
                 new_count = 0
                 for token in tokens:
                     addr = token.get("address") or token.get("token_address")
-                    if addr and addr not in seen:
-                        seen.add(addr)
-                        await self.queue.put(token)
-                        new_count += 1
+                    if not addr:
+                        continue
+
+                    # Skip if already processed
+                    if addr in seen:
+                        continue
+
+                    # Skip if in retry queue and not ready
+                    if addr in self.state.retry_queue:
+                        retry_info = self.state.retry_queue[addr]
+                        if retry_info["retries"] >= 3:
+                            continue
+                        if time.time() - retry_info["timestamp"] < 300:
+                            continue
+
+                    seen.add(addr)
+                    await self.queue.put(token)
+                    new_count += 1
 
                 poll_count += 1
                 if new_count > 0:
@@ -156,11 +192,58 @@ class TrenchingBot:
                 err_str = str(e).upper()
                 if "429" in err_str or "RATE_LIMIT" in err_str or "BANNED" in err_str:
                     ban_count += 1
-                    wait_time = min(60 * (2 ** ban_count), 600)  # 60s, 120s, 240s, max 10min
+                    wait_time = min(60 * (2 ** ban_count), 600)
                     logger.warning(f"GMGN rate limited (ban #{ban_count}), waiting {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"GMGN poller error: {e}")
+                    await asyncio.sleep(base_delay)
+
+    async def _trenches_poller(self):
+        logger.info("Trenches Poller starting...")
+        poll_count = 0
+        ban_count = 0
+        base_delay = 30
+
+        while True:
+            try:
+                tokens = await self.gmgn.get_trenches(limit=20)
+                ban_count = 0
+                new_count = 0
+                for token in tokens:
+                    addr = token.get("address") or token.get("token_address")
+                    if not addr:
+                        continue
+                    if addr in self.seen_trenches:
+                        continue
+                    if addr in self.state.retry_queue:
+                        retry_info = self.state.retry_queue[addr]
+                        if retry_info["retries"] >= 3:
+                            continue
+                        if time.time() - retry_info["timestamp"] < 300:
+                            continue
+                    self.seen_trenches.add(addr)
+                    await self.queue.put(token)
+                    new_count += 1
+
+                poll_count += 1
+                if new_count > 0:
+                    logger.info(f"Trenches #{poll_count}: +{new_count} tokens (queue:{self.queue.qsize()})")
+
+                if len(self.seen_trenches) > 10000:
+                    self.seen_trenches.clear()
+
+                await asyncio.sleep(base_delay)
+
+            except Exception as e:
+                err_str = str(e).upper()
+                if "429" in err_str or "RATE_LIMIT" in err_str or "BANNED" in err_str:
+                    ban_count += 1
+                    wait_time = min(60 * (2 ** ban_count), 600)
+                    logger.warning(f"Trenches rate limited (ban #{ban_count}), waiting {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"Trenches poller error: {e}")
                     await asyncio.sleep(base_delay)
 
     async def _token_worker(self, worker_id: int):
@@ -173,14 +256,21 @@ class TrenchingBot:
                 addr = token_info.get("address") or token_info.get("token_address", "")
                 symbol = token_info.get("symbol", "?") or "?"
 
+                # Check if already processed (skip forever)
                 if await self.state.is_duplicate(addr):
                     continue
 
+                # Check if in retry queue and ready
+                is_retry = addr in self.state.retry_queue
+                if is_retry:
+                    if not await self.state.should_retry(addr):
+                        continue  # not ready or max retries
+
                 processed += 1
-                logger.info(f"[W{worker_id}] #{processed} {symbol} ({addr[:8]}...) q:{self.queue.qsize()}")
+                logger.info(f"[W{worker_id}] #{processed} {symbol} ({addr[:8]}...) retry:{is_retry} q:{self.queue.qsize()}")
 
                 await self._process_token(addr, token_info)
-                await asyncio.sleep(1)  # Jeda antar token
+                await asyncio.sleep(1)
 
             except asyncio.CancelledError:
                 break
@@ -194,29 +284,28 @@ class TrenchingBot:
         mc = token_info.get("market_cap", 0) or 0
         holder_count = token_info.get("holder_count", 0) or 0
         is_wash = token_info.get("is_wash_trading", False)
-        bot_rate = float(token_info.get("bot_degen_rate", 0) or 0)
-        open_ts = token_info.get("open_timestamp", 0) or 0
+        symbol = token_info.get("symbol", "?") or "?"
 
         if mc <= 0:
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=0")
             self.state.metrics.record_call("SKIP")
             return
         if mc < 7000:
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=${mc:,.0f} < $7K")
             self.state.metrics.record_call("SKIP")
             return
         if mc > 200000:
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=${mc:,.0f} > $200K")
             self.state.metrics.record_call("SKIP")
             return
         if holder_count < 100:
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): holders={holder_count} < 100")
             self.state.metrics.record_call("SKIP")
             return
-        if is_wash or bot_rate > 0.5:
+        if is_wash:
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): wash_trading=True")
             self.state.metrics.record_call("SKIP")
             return
-        if open_ts > 0:
-            age_min = (datetime.now(timezone.utc).timestamp() - open_ts) / 60
-            if age_min > 30:
-                self.state.metrics.record_call("SKIP")
-                return
 
         # Acquire rate limit slot + fetch data sequentially (no burst)
         await self.rate_limiter.acquire()
@@ -246,7 +335,7 @@ class TrenchingBot:
             holders = {}
 
         if not info:
-            logger.info(f"[SKIP] {token_info.get('symbol','?')}: no data")
+            logger.info(f"[SKIP] {symbol} ({address[:8]}): no data")
             self.state.metrics.record_call("SKIP")
             return
 
@@ -282,8 +371,10 @@ class TrenchingBot:
         is_wash_trading = bot_degen_rate > 0.5  # >50% bot activity = wash trading
 
         # Build token data with correct GMGN field mapping
-        # Parse creation timestamp for token age filter
+        # Parse timestamps for tiered age filter
         creation_ts = int(info.get("creation_timestamp", 0) or 0)
+        open_ts_from_info = int(info.get("open_timestamp", 0) or 0)
+        migrated_ts = int(info.get("migrated_timestamp", 0) or 0)
         created_at = datetime.fromtimestamp(creation_ts, timezone.utc) if creation_ts > 0 else None
 
         token = TokenData(
@@ -304,6 +395,9 @@ class TrenchingBot:
             dex_paid=bool(dev_obj.get("dexscr_ad", 0)),
             is_wash_trading=is_wash_trading,
             created_at=created_at,
+            creation_timestamp=creation_ts,
+            open_timestamp=open_ts_from_info,
+            migrated_timestamp=migrated_ts,
             raw_gmgn=info,
         )
 
@@ -315,14 +409,22 @@ class TrenchingBot:
         all_passed, failures = check_hard_gate(fv)
 
         if all_passed:
-            logger.info(f"[PASS] {token.symbol}: all filters passed")
+            logger.info(f"[PASS] {token.symbol} ({address[:8]}): all filters passed")
+            await self.state.mark_processed(address)
+            await self.state.remove_retry(address)
         else:
-            logger.info(f"[SKIP] {token.symbol}: failed {len(failures)} filters: {failures}")
+            retry_info = await self.state.get_retry_info(address)
+            retries = retry_info.get("retries", 0)
+            logger.info(f"[RETRY {retries+1}/3] {token.symbol} ({address[:8]}): failed {len(failures)} filters: {failures}")
+            await self.state.add_retry(address)
             self.state.metrics.record_call("SKIP")
             return
 
+        # Social analysis (only for tokens that pass hard gate)
+        await self._social_analysis(token, info)
+
         # LLM Decision
-        await self.rate_limiter.acquire()
+        await self.llm_rate_limiter.acquire()
         fv_dict = fv.to_dict()
 
         prompt = DECISION_USER.format(
@@ -339,7 +441,7 @@ class TrenchingBot:
         raw = await self.mimo.analyze_token(DECISION_SYSTEM, prompt)
         decision = parse_decision(raw)
 
-        logger.info(f"[LLM] {token.symbol} = {decision.score}/100 ({decision.verdict.value})")
+        logger.info(f"[LLM] {token.symbol} ({address[:8]}) = {decision.score}/100 ({decision.verdict.value})")
         self.state.metrics.record_call(decision.verdict.value)
 
         # Alert if APE or WATCH
@@ -372,7 +474,7 @@ class TrenchingBot:
             await dispatcher.send_alert(alert_text)
             self.state.metrics.record_alert()
 
-            logger.info(f"[ALERT SENT] {token.symbol} ({decision.verdict.value})")
+            logger.info(f"[ALERT SENT] {token.symbol} ({address[:8]}) ({decision.verdict.value})")
 
             await self.db.save_llm_decision(
                 call_id, decision.score, decision.verdict.value,
@@ -380,14 +482,171 @@ class TrenchingBot:
                 decision.key_factors, decision.processing_time_ms,
             )
 
+    async def _social_analysis(self, token: TokenData, info: dict):
+        """Analyze social media presence for tokens that pass hard gate."""
+        try:
+            link = info.get("link", {})
+            raw_twitter = link.get("twitter_username", "")
+            token.website_url = link.get("website", "")
+            token.telegram_url = link.get("telegram", "")
+
+            # Parse Twitter input into structured data
+            parsed = self.twitter.parse_twitter_input(raw_twitter)
+            token.twitter_username = parsed["handle"]
+
+            influencer_mentions = []
+
+            logger.info(f"[SOCIAL] {token.symbol}: twitter parsed={parsed}")
+
+            # 1. Profile + recent tweets (if valid handle)
+            if parsed["handle"]:
+                try:
+                    profile = await self.twitter.get_profile(parsed["handle"])
+                    if profile:
+                        token.twitter_followers = profile.get("followers", 0)
+                        token.twitter_verified = profile.get("verification", {}).get("verified", False)
+                        token.twitter_description = profile.get("description", "")
+                except Exception as e:
+                    logger.warning(f"Twitter profile error for {token.symbol}: {e}")
+
+                try:
+                    tweets = await self.twitter.get_recent_tweets(parsed["handle"], 3)
+                    token.recent_tweets = tweets
+                except Exception as e:
+                    logger.warning(f"Twitter tweets error for {token.symbol}: {e}")
+
+            # 2. Specific tweet (if tweet URL)
+            if parsed["tweet_id"]:
+                try:
+                    tweet = await self.twitter.get_tweet(parsed["tweet_id"])
+                    if tweet:
+                        # Add to recent_tweets if not already there
+                        if not token.recent_tweets:
+                            token.recent_tweets = [tweet]
+                        else:
+                            token.recent_tweets.insert(0, tweet)
+                        # Check if tweet author is influencer
+                        author = tweet.get("author", {}).get("screen_name", "").lower()
+                        if author in self.influencers:
+                            influencer_mentions.append({
+                                "handle": author,
+                                "name": self.influencers[author]["name"],
+                                "weight": self.influencers[author]["weight"],
+                                "tweet_text": tweet.get("text", "")[:100],
+                                "likes": tweet.get("likes", 0),
+                            })
+                        logger.info(f"[SOCIAL] {token.symbol}: fetched tweet {parsed['tweet_id']} by @{author}")
+                except Exception as e:
+                    logger.warning(f"Twitter tweet fetch error for {token.symbol}: {e}")
+
+            # 3. Community (if community URL)
+            if parsed["community_id"]:
+                token.has_community = True
+                logger.info(f"[SOCIAL] {token.symbol}: has community {parsed['community_id']}")
+
+            # 4. Website scraping
+            if token.website_url:
+                try:
+                    token.website_text = await self.scraper.scrape_text(token.website_url)
+                except Exception as e:
+                    logger.warning(f"Website scrape error for {token.symbol}: {e}")
+
+            # 3. Search FxTwitter by contract address
+            try:
+                search_results = await self.twitter.search_by_contract(token.address, 10)
+
+                # 4. Influencer detection (direct, no LLM)
+                for tweet in search_results:
+                    author = tweet.get("author", {}).get("screen_name", "").lower()
+                    if author in self.influencers:
+                        influencer_mentions.append({
+                            "handle": author,
+                            "name": self.influencers[author]["name"],
+                            "weight": self.influencers[author]["weight"],
+                            "tweet_text": tweet.get("text", "")[:100],
+                            "likes": tweet.get("likes", 0),
+                        })
+                        if author == "elonmusk":
+                            token.has_elon_tweet = True
+                        elif author == "aeyakovenko":
+                            token.has_toly_tweet = True
+            except Exception as e:
+                logger.warning(f"Twitter search error for {token.symbol}: {e}")
+
+            token.influencer_mentions = influencer_mentions
+
+            # 5. LLM #1: Social analysis
+            # Calculate age description
+            if token.creation_timestamp > 0:
+                age_min = (datetime.now(timezone.utc).timestamp() - token.creation_timestamp) / 60
+                if age_min < 60:
+                    age_description = f"{age_min:.0f} minutes ago"
+                else:
+                    age_description = f"{age_min/60:.1f} hours ago"
+            else:
+                age_description = "unknown"
+
+            social_prompt = SOCIAL_ANALYSIS_USER.format(
+                token_name=token.name,
+                token_symbol=token.symbol,
+                market_cap=token.market_cap,
+                age_description=age_description,
+                holders_count=token.holders_count,
+                twitter_username=token.twitter_username or "none",
+                twitter_followers=token.twitter_followers,
+                twitter_verified="Yes" if token.twitter_verified else "No",
+                twitter_description=token.twitter_description[:200] or "No description",
+                recent_tweets=json.dumps(token.recent_tweets[:3], indent=2) if token.recent_tweets else "No tweets from this account yet",
+                website_text=token.website_text[:500] or "No website content",
+                search_results=json.dumps(search_results[:5], indent=2) if search_results else "No search results yet",
+                influencer_mentions=json.dumps(influencer_mentions, indent=2) if influencer_mentions else "No influencer mentions",
+            )
+
+            await self.llm_rate_limiter.acquire()
+            social_result = await self.mimo.analyze_token(SOCIAL_ANALYSIS_SYSTEM, social_prompt)
+
+            # 6. Parse LLM #1 response
+            if social_result:
+                try:
+                    social_data = json.loads(social_result) if isinstance(social_result, str) else social_result
+                    token.project_type = social_data.get("project_type", "unknown")
+                    token.social_narrative_score = float(social_data.get("score", 0))
+                    token.social_narrative_text = social_data.get("summary", "")
+                except Exception as e:
+                    logger.warning(f"Social analysis parse error for {token.symbol}: {e}")
+                    token.project_type = "unknown"
+                    token.social_narrative_score = 0
+                    token.social_narrative_text = ""
+
+            # Score floor: tokens with basic social links get minimum 15pts
+            has_basic_social = bool(token.twitter_username or token.website_url or token.telegram_url)
+            if has_basic_social and token.social_narrative_score < 15:
+                token.social_narrative_score = 15
+
+            # Bonus for influencer/KOL mentions
+            if influencer_mentions:
+                max_influencer_weight = max(inf.get("weight", 0) for inf in influencer_mentions)
+                influencer_bonus = min(max_influencer_weight, 20)
+                token.social_narrative_score = min(100, token.social_narrative_score + influencer_bonus)
+
+            logger.info(f"[SOCIAL] {token.symbol} ({token.address[:8]}): score={token.social_narrative_score:.0f}/100, project={token.project_type}, social_links={has_basic_social}, influencers={len(influencer_mentions)}")
+
+        except Exception as e:
+            logger.error(f"Social analysis error for {token.symbol}: {e}")
+            token.project_type = "unknown"
+            token.social_narrative_score = 0
+            token.social_narrative_text = ""
+
     async def _metrics_loop(self):
         while True:
             await asyncio.sleep(300)
             m = self.state.metrics
+            retry_count = len(self.state.retry_queue)
             logger.info(
                 f"STATS | calls:{m.calls_total} ape:{m.calls_ape} watch:{m.calls_watch} skip:{m.calls_skip} | "
-                f"w/l:{m.wins}/{m.losses} alerts:{m.alerts_sent} q:{self.queue.qsize()} err:{m.errors}"
+                f"w/l:{m.wins}/{m.losses} alerts:{m.alerts_sent} q:{self.queue.qsize()} retry:{retry_count} err:{m.errors}"
             )
+            await self.state.cleanup_retry_queue()
 
     async def shutdown(self):
         logger.info("Shutdown initiated...")

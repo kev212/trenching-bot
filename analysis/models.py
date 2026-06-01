@@ -36,44 +36,66 @@ class TokenData:
     total_volume: float = 0.0
     dex_paid: bool = False
     is_wash_trading: bool = False
-    social_narrative_score: float = 0.0
-    social_narrative_text: str = ""
     created_at: Optional[datetime] = None
+    creation_timestamp: int = 0
+    open_timestamp: int = 0
+    migrated_timestamp: int = 0
     raw_gmgn: dict = field(default_factory=dict)
     raw_dex: dict = field(default_factory=dict)
+    
+    # Social links (from GMGN)
+    twitter_username: str = ""
+    website_url: str = ""
+    telegram_url: str = ""
+    
+    # Twitter data (from FxTwitter)
+    twitter_followers: int = 0
+    twitter_verified: bool = False
+    twitter_description: str = ""
+    recent_tweets: list = field(default_factory=list)
+    
+    # Influencer detection
+    influencer_mentions: list = field(default_factory=list)
+    has_elon_tweet: bool = False
+    has_toly_tweet: bool = False
+    has_community: bool = False
+    
+    # Website content
+    website_text: str = ""
+    
+    # Social narrative scoring
+    social_narrative_score: float = 0.0
+    social_narrative_text: str = ""
+    project_type: str = ""
 
 
 @dataclass
 class FeatureVector:
     funded_wallet_age: dict = field(default_factory=dict)
-    top_holder_balance: dict = field(default_factory=dict)
     min_market_cap: dict = field(default_factory=dict)
     max_market_cap: dict = field(default_factory=dict)
     bundle_detection: dict = field(default_factory=dict)
-    mc_fee_ratio: dict = field(default_factory=dict)
+    fee_tier: dict = field(default_factory=dict)
     rug_probability: dict = field(default_factory=dict)
     holder_distribution: dict = field(default_factory=dict)
     token_age: dict = field(default_factory=dict)
     min_holders: dict = field(default_factory=dict)
     min_total_fee: dict = field(default_factory=dict)
-    wash_trading: dict = field(default_factory=dict)
     social_narrative: dict = field(default_factory=dict)
     token_data: Optional[TokenData] = None
 
     def to_dict(self) -> dict:
         return {
             "funded_wallet_age": self.funded_wallet_age,
-            "top_holder_balance": self.top_holder_balance,
             "min_market_cap": self.min_market_cap,
             "max_market_cap": self.max_market_cap,
             "bundle_detection": self.bundle_detection,
-            "mc_fee_ratio": self.mc_fee_ratio,
+            "fee_tier": self.fee_tier,
             "rug_probability": self.rug_probability,
             "holder_distribution": self.holder_distribution,
             "token_age": self.token_age,
             "min_holders": self.min_holders,
             "min_total_fee": self.min_total_fee,
-            "wash_trading": self.wash_trading,
             "social_narrative": self.social_narrative,
         }
 

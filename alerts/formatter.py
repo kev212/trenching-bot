@@ -9,12 +9,14 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict) -> str:
 
     filters_text = ""
     filter_names = {
-        "gas_fee": "⛽ Gas Fee",
-        "funded_wallet_age": "👛 Wallet Age",
-        "top_holder_balance": "💰 Top Holder",
-        "entry_market_cap": "📊 Entry MC",
+        "token_age": "⏰ Age",
+        "min_market_cap": "📊 Min MC",
+        "max_market_cap": "📊 Max MC",
+        "min_total_fee": "⛽ Min Fee",
+        "fee_tier": "💰 Fee Tier",
         "bundle_detection": "🔍 Bundle",
-        "volume_fee_ratio": "📈 Volume",
+        "min_holders": "👥 Min Holders",
+        "funded_wallet_age": "👛 Wallet Age",
         "rug_probability": "🛡️ Rug Risk",
         "holder_distribution": "👥 Holders",
     }
@@ -30,6 +32,23 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict) -> str:
     links.append(f"  • DexScreener: https://dexscreener.com/solana/{token.address}")
     links.append(f"  • Solscan: https://solscan.io/token/{token.address}")
 
+    social_text = ""
+    if token.twitter_username or token.website_url or token.influencer_mentions or token.has_community:
+        social_text = "\n🐦 Social Analysis:\n"
+        if token.twitter_username:
+            verified = "✓" if token.twitter_verified else ""
+            social_text += f"  • Twitter: @{token.twitter_username} ({token.twitter_followers:,} followers {verified})\n"
+        if token.website_url:
+            social_text += f"  • Website: {token.website_url}\n"
+        if token.has_community:
+            social_text += f"  • Community: Yes\n"
+        if token.influencer_mentions:
+            for inf in token.influencer_mentions[:3]:
+                social_text += f"  • 🔥 @{inf['handle']} tweeted ({inf['likes']:,} likes)\n"
+        if token.project_type:
+            social_text += f"  • Project: {token.project_type}\n"
+        social_text += f"  • Social Score: {token.social_narrative_score:.0f}/100\n"
+
     msg = f"""{verdict_emoji} {decision.verdict.value} ALERT — ${token.symbol or token.name}
 
 📊 Score: {decision.score}/100 {score_bar}
@@ -38,7 +57,7 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict) -> str:
 📈 Volume (1h): ${token.volume_1h:,.0f}
 💧 Liquidity: ${token.liquidity:,.0f}
 👥 Holders: {token.holders_count}
-
+{social_text}
 🤖 MiMo Analysis:
 "{decision.reasoning}"
 

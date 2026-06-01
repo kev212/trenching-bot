@@ -49,6 +49,10 @@ class LRUCache:
         return len(self._cache)
 
 
+RETRY_DELAY = 300  # 5 minutes
+MAX_RETRIES = 3
+
+
 class SharedState:
     def __init__(self):
         self._lock = asyncio.Lock()
@@ -58,12 +62,48 @@ class SharedState:
         self._filter_params_version: int = 0
         self.metrics = Metrics()
         self.queue: asyncio.Queue = None
+        self.retry_queue: dict[str, dict] = {}  # {address: {timestamp, retries}}
 
     async def is_duplicate(self, address: str) -> bool:
-        if await self.processed_cache.has(address):
-            return True
+        return await self.processed_cache.has(address)
+
+    async def mark_processed(self, address: str):
         await self.processed_cache.set(address, True)
-        return False
+
+    async def add_retry(self, address: str):
+        async with self._lock:
+            if address in self.retry_queue:
+                self.retry_queue[address]["retries"] += 1
+                self.retry_queue[address]["timestamp"] = time.time()
+            else:
+                self.retry_queue[address] = {"timestamp": time.time(), "retries": 0}
+
+    async def should_retry(self, address: str) -> bool:
+        async with self._lock:
+            if address not in self.retry_queue:
+                return False
+            info = self.retry_queue[address]
+            if info["retries"] >= MAX_RETRIES:
+                return False
+            if time.time() - info["timestamp"] < RETRY_DELAY:
+                return False
+            return True
+
+    async def get_retry_info(self, address: str) -> dict:
+        async with self._lock:
+            return self.retry_queue.get(address, {})
+
+    async def remove_retry(self, address: str):
+        async with self._lock:
+            self.retry_queue.pop(address, None)
+
+    async def cleanup_retry_queue(self):
+        async with self._lock:
+            now = time.time()
+            expired = [k for k, v in self.retry_queue.items()
+                       if v["retries"] >= MAX_RETRIES or now - v["timestamp"] > RETRY_DELAY * MAX_RETRIES]
+            for k in expired:
+                del self.retry_queue[k]
 
     async def add_active_call(self, address: str, call):
         async with self._lock:
