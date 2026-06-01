@@ -45,7 +45,16 @@ class TradeExecutor:
             SOL_MINT, token.address, amount_lamports, self.slippage_bps
         )
         if not quote:
-            logger.warning(f"[EXEC] No Jupiter quote for {token.symbol}")
+            logger.warning(
+                f"[EXEC] TRADE-SKIPPED {token.symbol} ({token.address[:8]}): "
+                f"Jupiter quote failed after retries, size={size_sol:.4f} SOL"
+            )
+            if self.positions.db:
+                await self.positions.db.save_risk_event(
+                    "JUPITER_QUOTE_FAILED", token.address,
+                    f"symbol={token.symbol}, size={size_sol:.4f} SOL, "
+                    f"action=BUY_SKIPPED, paper={self.paper}"
+                )
             return None
 
         out_amount = int(quote.get("outAmount", 0))
@@ -124,9 +133,21 @@ class TradeExecutor:
         if sell_pct <= 0 or sell_pct > 100:
             return None
 
-        current_price = await self.jupiter.get_token_price_in_sol(position["token_address"])
+        current_price = await self.jupiter.get_token_price_in_sol_with_retry(
+            position["token_address"]
+        )
         if current_price <= 0:
-            logger.debug(f"[EXEC] No price for {position['token_symbol']}, skipping sell check")
+            logger.warning(
+                f"[EXEC] SELL-SKIPPED {position['token_symbol']} "
+                f"({position['token_address'][:8]}): no price after retries, "
+                f"sell_pct={sell_pct:.0f}%, reason={reason}"
+            )
+            if self.positions.db:
+                await self.positions.db.save_risk_event(
+                    "JUPITER_PRICE_FAILED", position["token_address"],
+                    f"symbol={position['token_symbol']}, reason={reason}, "
+                    f"action=SELL_SKIPPED, paper={self.paper}"
+                )
             return None
 
         sell_amount_token = position["current_amount_token"] * (sell_pct / 100)

@@ -56,7 +56,11 @@ class JupiterClient:
     async def get_quote(self, input_mint: str, output_mint: str,
                         amount_lamports: int, slippage_bps: int = DEFAULT_SLIPPAGE_BPS,
                         only_direct: bool = False) -> dict:
-        """Get a swap quote. Returns Jupiter QuoteResponse or {} on error."""
+        """Get a swap quote. Returns Jupiter QuoteResponse or {} on error.
+
+        Retries up to 3 times on 5xx/proxy errors with exponential backoff.
+        4xx errors (bad params) are returned immediately as {}.
+        """
         if not self._session:
             return {}
         params = {
@@ -67,22 +71,39 @@ class JupiterClient:
             "onlyDirectRoutes": str(only_direct).lower(),
             "asLegacyTransaction": "false",
         }
-        try:
-            async with self._session.get(f"{QUOTE_API}/quote", params=params) as resp:
-                if resp.status != 200:
-                    logger.warning(f"[JUP] quote HTTP {resp.status} for {output_mint[:8]}")
-                    return {}
-                return await resp.json()
-        except Exception as e:
-            err = str(e)
-            if "No address associated" in err or "ssl:default" in err:
-                logger.error(
-                    f"[JUP] DNS/ssl error for {output_mint[:8]}: {err} "
-                    f"(proxy={'set' if self.proxy else 'NONE'})"
-                )
-            else:
-                logger.error(f"[JUP] quote error: {e}")
-            return {}
+
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                async with self._session.get(f"{QUOTE_API}/quote", params=params) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    if 400 <= resp.status < 500:
+                        logger.warning(
+                            f"[JUP] quote HTTP {resp.status} for {output_mint[:8]} "
+                            f"(no retry, client error)"
+                        )
+                        return {}
+                    logger.warning(
+                        f"[JUP] quote HTTP {resp.status} for {output_mint[:8]} "
+                        f"(attempt {attempt}/{max_retries})"
+                    )
+            except Exception as e:
+                err = str(e)
+                if "No address associated" in err or "ssl:default" in err:
+                    logger.error(
+                        f"[JUP] DNS/ssl error for {output_mint[:8]}: {err} "
+                        f"(proxy={'set' if self.proxy else 'NONE'})"
+                    )
+                else:
+                    logger.error(f"[JUP] quote error (attempt {attempt}/{max_retries}): {e}")
+
+            if attempt < max_retries:
+                import asyncio as _aio
+                await _aio.sleep(0.5 * (2 ** (attempt - 1)))
+
+        logger.error(f"[JUP] quote FAILED for {output_mint[:8]} after {max_retries} attempts")
+        return {}
 
     async def get_token_price_usd(self, token_mint: str) -> float:
         """Get current token price in USD via Jupiter Price API. Returns 0 on miss."""
@@ -124,7 +145,23 @@ class JupiterClient:
             return out_lamports / 1e9
         except Exception as e:
             logger.debug(f"[JUP] price sol error for {token_mint[:8]}: {e}")
-            return 0.0
+        return 0.0
+
+    async def get_token_price_in_sol_with_retry(self, token_mint: str, max_attempts: int = 3) -> float:
+        """Same as get_token_price_in_sol but with explicit retry on 0 result.
+
+        Position monitor calls this 4×/sec — a single 502 should not silently
+        skip a price check. Returns last non-zero price seen, or 0 after
+        max_attempts.
+        """
+        for attempt in range(1, max_attempts + 1):
+            price = await self.get_token_price_in_sol(token_mint)
+            if price > 0:
+                return price
+            if attempt < max_attempts:
+                import asyncio as _aio
+                await _aio.sleep(0.3 * attempt)
+        return 0.0
 
     def price_impact_pct(self, quote: dict) -> float:
         """Extract price impact as percentage (0-100)."""

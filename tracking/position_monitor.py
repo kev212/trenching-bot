@@ -38,7 +38,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
 
             for position in open_positions:
                 token_address = position["token_address"]
-                current_price = await jupiter.get_token_price_in_sol(token_address)
+                current_price = await jupiter.get_token_price_in_sol_with_retry(token_address)
                 if current_price <= 0:
                     continue
 
