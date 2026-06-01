@@ -37,10 +37,16 @@ class JupiterClient:
     async def init(self) -> None:
         if not self._session:
             connector = aiohttp.TCPConnector()
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self.timeout),
-                connector=connector,
-            )
+            kwargs = {
+                "timeout": aiohttp.ClientTimeout(total=self.timeout),
+                "connector": connector,
+            }
+            if self.proxy:
+                kwargs["proxy"] = self.proxy
+                logger.warning(f"[JUP] init with proxy={self.proxy[:50]}...")
+            else:
+                logger.warning("[JUP] init WITHOUT proxy (Railway may not resolve DNS)")
+            self._session = aiohttp.ClientSession(**kwargs)
 
     async def close(self) -> None:
         if self._session:
@@ -68,7 +74,14 @@ class JupiterClient:
                     return {}
                 return await resp.json()
         except Exception as e:
-            logger.error(f"[JUP] quote error: {e}")
+            err = str(e)
+            if "No address associated" in err or "ssl:default" in err:
+                logger.error(
+                    f"[JUP] DNS/ssl error for {output_mint[:8]}: {err} "
+                    f"(proxy={'set' if self.proxy else 'NONE'})"
+                )
+            else:
+                logger.error(f"[JUP] quote error: {e}")
             return {}
 
     async def get_token_price_usd(self, token_mint: str) -> float:
