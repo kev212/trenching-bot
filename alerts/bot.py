@@ -134,7 +134,7 @@ async def cmd_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "max_market_cap": ("max_mc", "max_mc_usd", "$"),
         "min_total_fee": ("min_fee", "min_fee_sol", " SOL"),
         "fee_tier": ("fee_tier", None, ""),
-        "bundle_detection": ("max_insider", "max_insider_ratio", "%"),
+        "insider_concentration": ("max_insider", "max_insider_ratio", "%"),
         "min_holders": ("min_holders", "min_holders", ""),
         "funded_wallet_age": ("max_new", "max_new_wallet_pct", "%"),
         "rug_probability": ("max_rug", "max_rug_prob", ""),

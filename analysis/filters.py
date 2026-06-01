@@ -13,7 +13,7 @@ def run_all_filters(token: TokenData, filter_params: dict) -> FeatureVector:
     fv.max_market_cap = _filter_max_market_cap(token, filter_params.get("max_market_cap", {}))
     fv.min_total_fee = _filter_min_total_fee(token, filter_params.get("min_total_fee", {}))
     fv.fee_tier = _filter_fee_tier(token, filter_params.get("fee_tier", {}))
-    fv.bundle_detection = _filter_bundle_detection(token, filter_params.get("bundle_detection", {}))
+    fv.insider_concentration = _filter_insider_concentration(token, filter_params.get("insider_concentration", {}))
     fv.min_holders = _filter_min_holders(token, filter_params.get("min_holders", {}))
     fv.funded_wallet_age = _filter_funded_wallet_age(token, filter_params.get("funded_wallet_age", {}))
     fv.rug_probability = _filter_rug_probability(token, filter_params.get("rug_probability", {}))
@@ -39,6 +39,7 @@ def _filter_token_age(token: TokenData, params: dict) -> dict:
                 "age_minutes": None,
                 "threshold": max_post_migrate,
                 "passed": False,
+                "enabled": True,
                 "note": "Post-migrate but no open_timestamp",
             }
     else:
@@ -56,6 +57,7 @@ def _filter_token_age(token: TokenData, params: dict) -> dict:
                 "age_minutes": None,
                 "threshold": max_pre_migrate,
                 "passed": False,
+                "enabled": True,
                 "note": "No creation timestamp",
             }
 
@@ -65,6 +67,7 @@ def _filter_token_age(token: TokenData, params: dict) -> dict:
         "threshold": max_minutes,
         "status": status,
         "passed": passed,
+        "enabled": True,
         "note": f"Age: {age_min:.0f}min (max: {max_minutes}min) [{status}]",
     }
 
@@ -78,6 +81,7 @@ def _filter_min_market_cap(token: TokenData, params: dict) -> dict:
         "market_cap": mc,
         "threshold": min_mc,
         "passed": passed,
+        "enabled": True,
         "note": f"MC: ${mc:,.0f} (min: ${min_mc:,})",
     }
 
@@ -91,6 +95,7 @@ def _filter_max_market_cap(token: TokenData, params: dict) -> dict:
         "market_cap": mc,
         "threshold": max_mc,
         "passed": passed,
+        "enabled": True,
         "note": f"MC: ${mc:,.0f} (max: ${max_mc:,})",
     }
 
@@ -104,6 +109,7 @@ def _filter_min_total_fee(token: TokenData, params: dict) -> dict:
         "fee_sol": fee,
         "threshold": min_fee,
         "passed": passed,
+        "enabled": True,
         "note": f"Fee: {fee:.2f} SOL (min: {min_fee} SOL)",
     }
 
@@ -118,6 +124,7 @@ def _filter_fee_tier(token: TokenData, params: dict) -> dict:
             "mc_usd": 0,
             "min_fee_sol": 0,
             "passed": False,
+            "enabled": True,
             "note": "No MC data",
         }
 
@@ -143,11 +150,21 @@ def _filter_fee_tier(token: TokenData, params: dict) -> dict:
         "min_fee_sol": min_fee,
         "tier": tier,
         "passed": passed,
+        "enabled": True,
         "note": f"Fee: {fee:.2f} SOL (min: {min_fee:.2f} SOL [{tier}] for ${mc:,.0f} MC)",
     }
 
 
-def _filter_bundle_detection(token: TokenData, params: dict) -> dict:
+def _filter_insider_concentration(token: TokenData, params: dict) -> dict:
+    if not params.get("enabled", True):
+        return {
+            "insider_ratio": token.insider_ratio,
+            "threshold": None,
+            "passed": True,
+            "enabled": False,
+            "note": "Insider concentration check disabled",
+        }
+
     max_insider = params.get("max_insider_ratio", 0.50)
     insider = token.insider_ratio
 
@@ -156,6 +173,7 @@ def _filter_bundle_detection(token: TokenData, params: dict) -> dict:
         "insider_ratio": insider,
         "threshold": max_insider,
         "passed": passed,
+        "enabled": True,
         "note": f"Insider ratio: {insider:.1%} (max: {max_insider:.0%})",
     }
 
@@ -169,6 +187,7 @@ def _filter_min_holders(token: TokenData, params: dict) -> dict:
         "holders_count": holders,
         "threshold": min_holders,
         "passed": passed,
+        "enabled": True,
         "note": f"Holders: {holders} (min: {min_holders})",
     }
 
@@ -182,6 +201,7 @@ def _filter_funded_wallet_age(token: TokenData, params: dict) -> dict:
         "new_wallet_pct": new_pct,
         "threshold": max_new_pct,
         "passed": passed,
+        "enabled": True,
         "note": f"{new_pct:.1f}% new wallets (threshold: {max_new_pct}%)",
     }
 
@@ -195,6 +215,7 @@ def _filter_rug_probability(token: TokenData, params: dict) -> dict:
         "probability": prob,
         "threshold": max_prob,
         "passed": passed,
+        "enabled": True,
         "note": f"Rug probability: {prob:.0%} (max: {max_prob:.0%})",
     }
 
@@ -209,6 +230,7 @@ def _filter_holder_distribution(token: TokenData, params: dict) -> dict:
         "holders_count": token.holders_count,
         "threshold": max_top10,
         "passed": passed,
+        "enabled": True,
         "note": f"Top10 hold: {top10:.1f}% (max: {max_top10}%), {token.holders_count} holders",
     }
 
@@ -227,19 +249,23 @@ def _filter_social_narrative(token: TokenData, params: dict) -> dict:
         "has_twitter": has_twitter,
         "has_website": has_website,
         "passed": True,  # Always passes (bonus, not hard gate)
+        "enabled": True,
         "note": f"Social: {score:.0f}/100 ({project_type}) {influencer_count} influencers",
     }
 
 
 def count_passed_filters(fv: FeatureVector) -> tuple[int, int, list[str]]:
-    """Count passed filters and return failures list for hard gate."""
+    """Count passed filters and return failures list for hard gate.
+
+    Filters with `enabled: False` are auto-passed (not counted as failures).
+    """
     filters = {
         "token_age": fv.token_age,
         "min_market_cap": fv.min_market_cap,
         "max_market_cap": fv.max_market_cap,
         "min_total_fee": fv.min_total_fee,
         "fee_tier": fv.fee_tier,
-        "bundle_detection": fv.bundle_detection,
+        "insider_concentration": fv.insider_concentration,
         "min_holders": fv.min_holders,
         "funded_wallet_age": fv.funded_wallet_age,
         "rug_probability": fv.rug_probability,
@@ -248,9 +274,12 @@ def count_passed_filters(fv: FeatureVector) -> tuple[int, int, list[str]]:
 
     passed = 0
     failures = []
-    total = len(filters)
+    total = 0
 
     for name, data in filters.items():
+        if not data.get("enabled", True):
+            continue
+        total += 1
         if data.get("passed", False):
             passed += 1
         else:

@@ -14,7 +14,7 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict) -> str:
         "max_market_cap": "📊 Max MC",
         "min_total_fee": "⛽ Min Fee",
         "fee_tier": "💰 Fee Tier",
-        "bundle_detection": "🔍 Bundle",
+        "insider_concentration": "🔍 Insider",
         "min_holders": "👥 Min Holders",
         "funded_wallet_age": "👛 Wallet Age",
         "rug_probability": "🛡️ Rug Risk",
