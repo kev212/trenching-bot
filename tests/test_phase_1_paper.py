@@ -954,17 +954,15 @@ def test_calculate_weighted_score_social_excluded():
 
 
 def test_final_scoring_formula():
-    """final_score = social×0.6 + data×0.4 + hg_bonus."""
+    """final_score = social×0.6 + data×0.4 (no more hard gate bonus)."""
     social_score = 75
     data_score = 80
-    hg_score = 0.9
-    hg_bonus = hg_score * 5
 
-    final_score = (social_score * 0.6) + (data_score * 0.4) + hg_bonus
+    final_score = (social_score * 0.6) + (data_score * 0.4)
 
-    expected = (75 * 0.6) + (80 * 0.4) + (0.9 * 5)
+    expected = (75 * 0.6) + (80 * 0.4)
     assert abs(final_score - expected) < 0.01
-    assert abs(final_score - 81.5) < 0.01
+    assert abs(final_score - 77.0) < 0.01
 
 
 def test_final_scoring_verdict_thresholds():

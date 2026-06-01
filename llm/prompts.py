@@ -11,22 +11,27 @@ HARD GATE FILTERS (already passed):
 - Insider concentration: currently disabled, IGNORE this field
 
 YOUR TASK:
-Score the token's DATA QUALITY 0-100 based ONLY on on-chain metrics. Do NOT consider social media — that's scored separately.
+Score the token's DATA QUALITY 0-100 based ONLY on on-chain metrics. Do NOT consider social media — that's scored separately by another LLM.
 
-Focus on:
+SCORING WEIGHTS (prioritize your evaluation based on these):
+- token_age:           0.15 — Younger tokens have more upside. 5min >> 60min.
+- total_fee:           0.20 — High fees = real organic trading, not wash/bundle.
+- holders:             0.20 — More holders = real community, less rug risk.
+- holder_distribution: 0.20 — Top15 >65% = high rug risk.
+- ath_drawdown:        0.15 — Deeper drawdown = riskier entry timing.
+- funded_wallet_age:   0.10 — Many fresh wallets = bot/sniper activity.
+
+When scoring, weigh factors according to these weights. A token with high fees (0.20) and many holders (0.20) should score HIGHER than a token with perfect age (0.15) but wash trading.
+
+ALSO CONSIDER:
 - Market cap sweet spot ($20K-$80K has highest hit rate)
-- Fee level (higher fee = more committed project)
-- Holder count and distribution quality
-- Token age (fresher = more opportunity, but also more risk)
-- ATH drawdown (good entry timing vs catching a falling knife)
-- Funded wallet age (fresh wallets = bot/sniper activity)
 - Any subtle red flags (copy-paste name, suspicious supply, etc)
 
 SCORING GUIDE:
-- 80-100: Strong data — sweet spot MC, healthy holders, good fees, clean metrics
+- 80-100: Strong data — sweet spot MC, healthy holders, real trading, clean metrics
 - 70-79: Good data — solid metrics, minor concerns
 - 60-69: Decent data — passable, some yellow flags
-- 50-59: Weak data — concerning metrics, needs social to compensate
+- 50-59: Weak data — concerning metrics, needs strong social to compensate
 - 40-49: Bad data — multiple red flags
 - 0-39: Terrible data — avoid
 

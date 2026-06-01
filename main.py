@@ -15,7 +15,7 @@ from sources.gmgn import GMGNClient
 from sources.twitter import TwitterClient
 from sources.web_scraper import WebScraper
 from analysis.models import TokenData, CallRecord, CallStatus, Verdict
-from analysis.filters import run_all_filters, check_hard_gate, calculate_weighted_score
+from analysis.filters import run_all_filters, check_hard_gate
 from llm.mimo_client import MiMoClient
 from llm.prompts import DECISION_SYSTEM, DECISION_USER, SOCIAL_ANALYSIS_SYSTEM, SOCIAL_ANALYSIS_USER
 from llm.parser import parse_decision
@@ -648,13 +648,11 @@ class TrenchingBot:
         logger.debug(f"[LLM-RAW] {token.symbol} ({address[:8]}): {raw}")
         decision = parse_decision(raw)
 
-        # Dual-LLM scoring: social (LLM #1) × 0.6 + data (LLM #2) × 0.4 + hard gate bonus
+        # Dual-LLM scoring: social (LLM #1) × 0.6 + data (LLM #2) × 0.4
         social_score = token.social_narrative_score  # 0-100 from LLM #1
-        data_score = decision.score  # 0-100 from LLM #2
-        hg_score, hg_breakdown = calculate_weighted_score(fv, filter_params)
-        hg_bonus = hg_score * 5  # max +5 poin
+        data_score = decision.score  # 0-100 from LLM #2 (weights used as scoring guidance)
 
-        final_score = (social_score * 0.6) + (data_score * 0.4) + hg_bonus
+        final_score = (social_score * 0.6) + (data_score * 0.4)
         final_score = max(0, min(100, final_score))
 
         if final_score >= 70:
@@ -670,8 +668,7 @@ class TrenchingBot:
         logger.info(
             f"[SCORING] {token.symbol} ({address[:8]}): "
             f"social={social_score:.0f}×0.6={social_score*0.6:.1f} + "
-            f"data={data_score}×0.4={data_score*0.4:.1f} + "
-            f"HG={hg_score:.2f}×5={hg_bonus:.1f} = "
+            f"data={data_score}×0.4={data_score*0.4:.1f} = "
             f"FINAL={final_score:.1f}/100 ({final_verdict.value})"
         )
         logger.info(
@@ -734,7 +731,7 @@ class TrenchingBot:
             await self.state.add_active_call(address, call)
 
             alert_text = format_alert(token, decision, fv_dict,
-                                       social_score=social_score, hg_score=hg_score)
+                                       social_score=social_score)
             await dispatcher.send_alert(alert_text)
             self.state.metrics.record_alert()
 
