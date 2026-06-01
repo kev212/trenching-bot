@@ -16,8 +16,11 @@ def parse_decision(raw: dict) -> LLMDecision:
         except ValueError:
             verdict = Verdict.SKIP
 
-        if score >= 70 and verdict == Verdict.SKIP:
+        # Enforce score→verdict rules (override LLM if inconsistent)
+        if score >= 70:
             verdict = Verdict.APE
+        elif score >= 50:
+            verdict = Verdict.WATCH
         elif score < 40 and verdict == Verdict.APE:
             verdict = Verdict.SKIP
 

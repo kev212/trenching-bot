@@ -497,9 +497,15 @@ class TrenchingBot:
         )
 
         raw = await self.mimo.analyze_token(DECISION_SYSTEM, prompt)
+        logger.debug(f"[LLM-RAW] {token.symbol} ({address[:8]}): {raw}")
         decision = parse_decision(raw)
 
-        logger.info(f"[LLM] {token.symbol} ({address[:8]}) = {decision.score}/100 ({decision.verdict.value})")
+        logger.info(
+            f"[LLM] {token.symbol} ({address[:8]}) = {decision.score}/100 ({decision.verdict.value}) "
+            f"conf={decision.confidence:.2f} | {decision.reasoning[:120]}"
+        )
+        if decision.key_factors:
+            logger.info(f"[LLM-FACTORS] {token.symbol}: {decision.key_factors}")
         self.state.metrics.record_call(decision.verdict.value)
 
         # Alert if APE or WATCH
