@@ -9,12 +9,14 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict) -> str:
 
     filters_text = ""
     filter_names = {
-        "gas_fee": "⛽ Gas Fee",
-        "funded_wallet_age": "👛 Wallet Age",
-        "top_holder_balance": "💰 Top Holder",
-        "entry_market_cap": "📊 Entry MC",
+        "token_age": "⏰ Age",
+        "min_market_cap": "📊 Min MC",
+        "max_market_cap": "📊 Max MC",
+        "min_total_fee": "⛽ Min Fee",
+        "fee_tier": "💰 Fee Tier",
         "bundle_detection": "🔍 Bundle",
-        "volume_fee_ratio": "📈 Volume",
+        "min_holders": "👥 Min Holders",
+        "funded_wallet_age": "👛 Wallet Age",
         "rug_probability": "🛡️ Rug Risk",
         "holder_distribution": "👥 Holders",
     }

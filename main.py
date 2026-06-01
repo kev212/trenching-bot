@@ -213,7 +213,6 @@ class TrenchingBot:
         mc = token_info.get("market_cap", 0) or 0
         holder_count = token_info.get("holder_count", 0) or 0
         is_wash = token_info.get("is_wash_trading", False)
-        open_ts = token_info.get("open_timestamp", 0) or 0
         symbol = token_info.get("symbol", "?") or "?"
 
         if mc <= 0:
@@ -236,12 +235,6 @@ class TrenchingBot:
             logger.info(f"[SKIP] {symbol} ({address[:8]}): wash_trading=True")
             self.state.metrics.record_call("SKIP")
             return
-        if open_ts > 0:
-            age_min = (datetime.now(timezone.utc).timestamp() - open_ts) / 60
-            if age_min > 30:
-                logger.info(f"[SKIP] {symbol} ({address[:8]}): age={age_min:.0f}min > 30min")
-                self.state.metrics.record_call("SKIP")
-                return
 
         # Acquire rate limit slot + fetch data sequentially (no burst)
         await self.rate_limiter.acquire()
@@ -307,8 +300,10 @@ class TrenchingBot:
         is_wash_trading = bot_degen_rate > 0.5  # >50% bot activity = wash trading
 
         # Build token data with correct GMGN field mapping
-        # Parse creation timestamp for token age filter
+        # Parse timestamps for tiered age filter
         creation_ts = int(info.get("creation_timestamp", 0) or 0)
+        open_ts_from_info = int(info.get("open_timestamp", 0) or 0)
+        migrated_ts = int(info.get("migrated_timestamp", 0) or 0)
         created_at = datetime.fromtimestamp(creation_ts, timezone.utc) if creation_ts > 0 else None
 
         token = TokenData(
@@ -329,6 +324,9 @@ class TrenchingBot:
             dex_paid=bool(dev_obj.get("dexscr_ad", 0)),
             is_wash_trading=is_wash_trading,
             created_at=created_at,
+            creation_timestamp=creation_ts,
+            open_timestamp=open_ts_from_info,
+            migrated_timestamp=migrated_ts,
             raw_gmgn=info,
         )
 

@@ -37,6 +37,9 @@ class TokenData:
     dex_paid: bool = False
     is_wash_trading: bool = False
     created_at: Optional[datetime] = None
+    creation_timestamp: int = 0
+    open_timestamp: int = 0
+    migrated_timestamp: int = 0
     raw_gmgn: dict = field(default_factory=dict)
     raw_dex: dict = field(default_factory=dict)
     
@@ -68,34 +71,30 @@ class TokenData:
 @dataclass
 class FeatureVector:
     funded_wallet_age: dict = field(default_factory=dict)
-    top_holder_balance: dict = field(default_factory=dict)
     min_market_cap: dict = field(default_factory=dict)
     max_market_cap: dict = field(default_factory=dict)
     bundle_detection: dict = field(default_factory=dict)
-    mc_fee_ratio: dict = field(default_factory=dict)
+    fee_tier: dict = field(default_factory=dict)
     rug_probability: dict = field(default_factory=dict)
     holder_distribution: dict = field(default_factory=dict)
     token_age: dict = field(default_factory=dict)
     min_holders: dict = field(default_factory=dict)
     min_total_fee: dict = field(default_factory=dict)
-    wash_trading: dict = field(default_factory=dict)
     social_narrative: dict = field(default_factory=dict)
     token_data: Optional[TokenData] = None
 
     def to_dict(self) -> dict:
         return {
             "funded_wallet_age": self.funded_wallet_age,
-            "top_holder_balance": self.top_holder_balance,
             "min_market_cap": self.min_market_cap,
             "max_market_cap": self.max_market_cap,
             "bundle_detection": self.bundle_detection,
-            "mc_fee_ratio": self.mc_fee_ratio,
+            "fee_tier": self.fee_tier,
             "rug_probability": self.rug_probability,
             "holder_distribution": self.holder_distribution,
             "token_age": self.token_age,
             "min_holders": self.min_holders,
             "min_total_fee": self.min_total_fee,
-            "wash_trading": self.wash_trading,
             "social_narrative": self.social_narrative,
         }
 
