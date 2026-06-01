@@ -241,6 +241,8 @@ def _filter_social_narrative(token: TokenData, params: dict) -> dict:
     influencer_count = len(token.influencer_mentions)
     has_twitter = bool(token.twitter_username)
     has_website = bool(token.website_url)
+    has_telegram = bool(token.telegram_url)
+    has_community = bool(getattr(token, "has_community", False))
 
     return {
         "score": score,
@@ -248,6 +250,8 @@ def _filter_social_narrative(token: TokenData, params: dict) -> dict:
         "influencer_count": influencer_count,
         "has_twitter": has_twitter,
         "has_website": has_website,
+        "has_telegram": has_telegram,
+        "has_community": has_community,
         "passed": True,  # Always passes (bonus, not hard gate)
         "enabled": True,
         "note": f"Social: {score:.0f}/100 ({project_type}) {influencer_count} influencers",

@@ -481,6 +481,15 @@ class TrenchingBot:
         # Social analysis (only for tokens that pass hard gate)
         await self._social_analysis(token, info)
 
+        # Re-run social_narrative filter — token.social_narrative_score was just
+        # updated by _social_analysis, but fv.social_narrative was computed
+        # before _social_analysis ran (in run_all_filters above). Without this
+        # refresh, the LLM sees score=0 in the feature_vector.
+        from analysis.filters import _filter_social_narrative
+        fv.social_narrative = _filter_social_narrative(
+            token, filter_params.get("social_narrative", {})
+        )
+
         # LLM Decision
         await self.llm_rate_limiter.acquire()
         fv_dict = fv.to_dict()
