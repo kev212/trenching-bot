@@ -125,7 +125,10 @@ def _score_bar(score: int) -> str:
 
 def format_exit_alert(symbol: str, address: str, entry_price: float,
                        exit_price: float, pnl_sol: float, pnl_pct: float,
-                       reason: str, hold_seconds: float, paper: bool = True) -> str:
+                       reason: str, hold_seconds: float, paper: bool = True,
+                       position_size_sol: float = 0.0, total_tokens: float = 0.0,
+                       sold_pct: float = 100.0, sold_tokens: float = 0.0,
+                       remaining_tokens: float = 0.0) -> str:
     """Format a position exit alert (SL / TP1 / TP2 / TRAILING / TIME)."""
     reason_emojis = {
         "SL": "🛑",
@@ -142,15 +145,28 @@ def format_exit_alert(symbol: str, address: str, entry_price: float,
 
     reason_emoji = reason_emojis.get(reason, "🔔")
 
-    return (
-        f"{reason_emoji} EXIT: {reason} {symbol}{paper_tag}\n"
-        f"\n"
-        f"  Entry:  {entry_price:.10f}\n"
-        f"  Exit:   {exit_price:.10f}\n"
-        f"  PnL: {pnl_emoji} {pnl_sol:+.4f} SOL ({pnl_pct:+.1f}%)\n"
-        f"  Hold:   {hold_str}\n"
-        f"  Token:  {address[:8]}..."
-    )
+    lines = [
+        f"{reason_emoji} EXIT: {reason} {symbol}{paper_tag}",
+        "",
+    ]
+
+    if position_size_sol > 0 or total_tokens > 0:
+        size_str = f"{position_size_sol:.4f} SOL" if position_size_sol > 0 else "?"
+        if reason in ("TP1", "TP2") and sold_pct < 100:
+            size_str += f" (sold {sold_pct:.0f}% = {sold_tokens:,.0f} tokens, {remaining_tokens:,.0f} remain)"
+        else:
+            size_str += f" (closed 100% = {total_tokens:,.0f} tokens)"
+        lines.append(f"  Size:   {size_str}")
+
+    lines.extend([
+        f"  Entry:  {entry_price:.10f}",
+        f"  Exit:   {exit_price:.10f}",
+        f"  PnL: {pnl_emoji} {pnl_sol:+.4f} SOL ({pnl_pct:+.1f}%)",
+        f"  Hold:   {hold_str}",
+        f"  Token:  {address[:8]}...",
+    ])
+
+    return "\n".join(lines)
 
 
 def format_trade_alert(position, side: str) -> str:

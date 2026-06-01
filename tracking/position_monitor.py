@@ -67,19 +67,25 @@ async def position_monitor(state, db, position_manager: PositionManager,
 
                 triggered = False
                 last_reason = ""
+                already_partial = bool(position.get("exit_reason")) and \
+                    position.get("exit_reason") in ("TP1", "TP2")
+
                 if current_price <= entry * (1 - stop_loss_pct / 100):
                     await executor.execute_sell(position, 100, "SL")
                     triggered = True
                     last_reason = "SL"
-                elif position.get("exit_reason") in (None, "", "TP1") and \
-                        current_price >= entry * tp1_mult:
+                elif not already_partial and current_price >= entry * tp1_mult:
                     await executor.execute_sell(position, tp1_pct, "TP1")
+                    position["exit_reason"] = "TP1"
+                    await position_manager.update_position(position)
                     triggered = True
                     last_reason = "TP1"
                 elif position.get("exit_reason") == "TP1" and \
                         current_price >= entry * tp2_mult:
                     remaining_pct = 100 - tp1_pct
                     await executor.execute_sell(position, remaining_pct, "TP2")
+                    position["exit_reason"] = "TP2"
+                    await position_manager.update_position(position)
                     triggered = True
                     last_reason = "TP2"
                 elif current_price <= peak * (1 - trailing_pct / 100):
@@ -100,7 +106,15 @@ async def position_monitor(state, db, position_manager: PositionManager,
                         f"peak={peak:.10f}, paper={is_paper}"
                     )
                     try:
-                        pnl_sol = (current_price - entry) * position.get("current_amount_token", 0)
+                        entry_tokens = position.get("entry_amount_token", 0) or 0
+                        current_tokens = position.get("current_amount_token", 0) or 0
+                        sold_pct = (
+                            ((entry_tokens - current_tokens) / entry_tokens * 100)
+                            if entry_tokens > 0 and last_reason in ("TP1", "TP2")
+                            else (100.0 if last_reason in ("SL", "TRAILING", "TIME") else 0.0)
+                        )
+                        sold_tokens = entry_tokens - current_tokens if last_reason in ("TP1", "TP2") else entry_tokens
+                        pnl_sol = (current_price - entry) * sold_tokens
                         pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0.0
                         exit_msg = format_exit_alert(
                             symbol=position["token_symbol"],
@@ -113,6 +127,11 @@ async def position_monitor(state, db, position_manager: PositionManager,
                             hold_seconds=(datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
                                 if position.get("entry_time") else 0,
                             paper=is_paper,
+                            position_size_sol=position.get("entry_amount_sol", 0) or 0,
+                            total_tokens=entry_tokens,
+                            sold_pct=sold_pct,
+                            sold_tokens=sold_tokens,
+                            remaining_tokens=current_tokens if last_reason in ("TP1", "TP2") else 0,
                         )
                         await dispatcher.send_alert(exit_msg)
                     except Exception as e:

@@ -503,12 +503,18 @@ def test_format_exit_alert_tp():
         entry_price=0.0001, exit_price=0.00015,
         pnl_sol=0.025, pnl_pct=50.0,
         reason="TP1", hold_seconds=300, paper=True,
+        position_size_sol=0.05, total_tokens=50000.0,
+        sold_pct=33.0, sold_tokens=16500.0, remaining_tokens=33500.0,
     )
     assert "TP1" in text
     assert "🎯" in text
     assert "5m 0s" in text
-    assert "📈" in text  # profit emoji
+    assert "📈" in text
     assert "+50.0%" in text
+    assert "0.0500 SOL" in text
+    assert "sold 33%" in text
+    assert "16,500 tokens" in text
+    assert "33,500 remain" in text
 
 
 def test_format_exit_alert_trailing():
@@ -536,3 +542,66 @@ def test_format_exit_alert_time():
     assert "TIME" in text
     assert "⏰" in text
     assert "30m 0s" in text
+
+
+# ============ TP1 spam prevention ============
+
+def test_position_monitor_tp1_logic_avoids_spam():
+    """The bug: condition was 'exit_reason in (None, "", "TP1")' which always matches.
+
+    Fix: check 'already_partial' separately. TP1 only fires when exit_reason
+    is None/empty AND price >= tp1_mult. After TP1, exit_reason becomes "TP1",
+    so the elif goes to TP2 branch.
+    """
+    def should_trigger_tp1(position, current_price, entry, tp1_mult):
+        already_partial = bool(position.get("exit_reason")) and \
+            position.get("exit_reason") in ("TP1", "TP2")
+        return not already_partial and current_price >= entry * tp1_mult
+
+    entry = 0.001
+    tp1_mult = 1.30
+
+    pos_clean = {"exit_reason": None}
+    pos_after_tp1 = {"exit_reason": "TP1"}
+    pos_after_tp2 = {"exit_reason": "TP2"}
+
+    price_above = 0.0014
+    price_below = 0.0011
+
+    assert should_trigger_tp1(pos_clean, price_above, entry, tp1_mult) is True
+    assert should_trigger_tp1(pos_clean, price_below, entry, tp1_mult) is False
+    assert should_trigger_tp1(pos_after_tp1, price_above, entry, tp1_mult) is False
+    assert should_trigger_tp1(pos_after_tp2, price_above, entry, tp1_mult) is False
+
+
+def test_format_exit_alert_tp1_size_math():
+    """TP1 alert with 50,000 token position, 33% sold should show 16,500 sold."""
+    from alerts.formatter import format_exit_alert
+    text = format_exit_alert(
+        symbol="BIG", address="BIGADDR",
+        entry_price=0.0001, exit_price=0.00015,
+        pnl_sol=0.0025, pnl_pct=50.0,
+        reason="TP1", hold_seconds=120, paper=True,
+        position_size_sol=0.10, total_tokens=100000.0,
+        sold_pct=33.0, sold_tokens=33000.0, remaining_tokens=67000.0,
+    )
+    assert "0.1000 SOL" in text
+    assert "sold 33%" in text
+    assert "33,000 tokens" in text
+    assert "67,000 remain" in text
+
+
+def test_format_exit_alert_sl_full_close():
+    """SL should show 'closed 100%' not 'sold X%'."""
+    from alerts.formatter import format_exit_alert
+    text = format_exit_alert(
+        symbol="LOST", address="LOSTADDR",
+        entry_price=0.001, exit_price=0.0007,
+        pnl_sol=-0.015, pnl_pct=-30.0,
+        reason="SL", hold_seconds=45, paper=True,
+        position_size_sol=0.05, total_tokens=50000.0,
+    )
+    assert "closed 100%" in text
+    assert "50,000 tokens" in text
+    assert "SL" in text
+    assert "🛑" in text
