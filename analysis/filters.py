@@ -280,6 +280,8 @@ def count_passed_filters(fv: FeatureVector) -> tuple[int, int, list[str]]:
         "funded_wallet_age": fv.funded_wallet_age,
         "rug_probability": fv.rug_probability,
         "holder_distribution": fv.holder_distribution,
+        "ath_drawdown": fv.ath_drawdown,
+        "social_narrative": fv.social_narrative,
     }
 
     passed = 0
