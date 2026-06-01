@@ -1,4 +1,5 @@
 import logging
+import re
 from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger("main")
@@ -9,6 +10,22 @@ BASE_URL = "https://api.fxtwitter.com"
 class TwitterClient:
     def __init__(self):
         self.host = BASE_URL
+
+    def _extract_handle(self, raw: str) -> str:
+        """Extract clean Twitter handle from URL or raw string."""
+        if not raw:
+            return ""
+        # Remove @ prefix
+        handle = raw.lstrip("@")
+        # Extract from URL: https://x.com/username or https://twitter.com/username
+        match = re.search(r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]+)", handle)
+        if match:
+            return match.group(1)
+        # Extract from path: username/status/...
+        match = re.match(r"^([A-Za-z0-9_]+)", handle)
+        if match:
+            return match.group(1)
+        return handle
 
     async def _get(self, path: str, params: dict = None) -> dict:
         try:
@@ -31,12 +48,18 @@ class TwitterClient:
             return {}
 
     async def get_profile(self, handle: str) -> dict:
-        data = await self._get(f"/2/profile/{handle}")
+        clean = self._extract_handle(handle)
+        if not clean:
+            return {}
+        data = await self._get(f"/2/profile/{clean}")
         return data.get("user", {})
 
     async def get_recent_tweets(self, handle: str, count: int = 3) -> list:
+        clean = self._extract_handle(handle)
+        if not clean:
+            return []
         data = await self._get(
-            f"/2/profile/{handle}/statuses",
+            f"/2/profile/{clean}/statuses",
             {"count": count},
         )
         return data.get("results", [])

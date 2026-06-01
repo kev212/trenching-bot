@@ -88,17 +88,13 @@ class GMGNClient:
 
     async def _post_form(self, path: str, body: dict = None) -> dict:
         try:
-            query = self._auth_params()
-            headers = {
-                "X-APIKEY": self.api_key,
-                "Content-Type": "application/x-www-form-urlencoded",
-            }
+            auth = self._auth_params()
+            full_body = {**(body or {}), **auth}
             async with AsyncSession(impersonate="chrome") as session:
                 resp = await session.post(
                     f"{self.host}{path}",
-                    params=query,
-                    data=body or {},
-                    headers=headers,
+                    json=full_body,
+                    headers=self._headers(),
                     proxies=self._proxy_dict(),
                     timeout=15,
                 )
