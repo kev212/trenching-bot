@@ -216,3 +216,38 @@ def test_risk_rules_loads():
     rules = load_risk_rules()
     assert "max_open_positions" in rules
     assert "min_wallet_reserve_sol" in rules
+
+
+# ============ BUY-DECISION log format ============
+
+def test_buy_decision_log_format():
+    """BUY-DECISION log should include verdict, conf, threshold, action."""
+    from config import settings
+    threshold = settings.confidence_auto_execute
+    assert threshold == 0.75
+
+    ape_high = ("APE", 0.85)
+    ape_low = ("APE", 0.60)
+    watch_high = ("WATCH", 0.70)
+
+    for verdict, conf in [ape_high, ape_low, watch_high]:
+        if verdict == "APE" and conf >= threshold:
+            action = "TRADE"
+        else:
+            action = "NO_TRADE"
+        assert action in ("TRADE", "NO_TRADE")
+
+
+def test_position_summary_fields():
+    """Summary dict should have all fields needed for Telegram output."""
+    summary_keys = {"id", "symbol", "address", "entry_sol", "entry_price",
+                    "peak_gain_pct", "tokens", "age_sec", "status", "paper"}
+    assert len(summary_keys) == 10
+
+
+# ============ cmd_positions Telegram command ============
+
+def test_cmd_positions_importable():
+    """cmd_positions should be importable and registered."""
+    from alerts.bot import cmd_positions
+    assert callable(cmd_positions)

@@ -68,5 +68,33 @@ class PositionManager:
     async def get_open_positions(self) -> list[dict]:
         return await self.db.get_open_positions()
 
+    async def get_open_positions_summary(self) -> list[dict]:
+        """Return compact view of open positions for logging/Telegram."""
+        positions = await self.db.get_open_positions()
+        summary = []
+        for p in positions:
+            entry = p.get("entry_price", 0) or 0
+            peak = p.get("peak_price", 0) or 0
+            if entry > 0 and peak > 0:
+                peak_gain_pct = (peak / entry - 1) * 100
+            else:
+                peak_gain_pct = 0.0
+            summary.append({
+                "id": p["id"],
+                "symbol": p["token_symbol"],
+                "address": p["token_address"][:8] + "...",
+                "entry_sol": p.get("entry_amount_sol", 0) or 0,
+                "entry_price": entry,
+                "peak_gain_pct": peak_gain_pct,
+                "tokens": p.get("current_amount_token", 0) or 0,
+                "age_sec": (
+                    (datetime.now(timezone.utc) - p["entry_time"]).total_seconds()
+                    if p.get("entry_time") else 0
+                ),
+                "status": p.get("status", "?"),
+                "paper": bool(p.get("paper", 1)),
+            })
+        return summary
+
     async def record_trade(self, trade) -> int:
         return await self.db.save_trade(trade)

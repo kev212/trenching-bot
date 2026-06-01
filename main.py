@@ -713,6 +713,18 @@ class TrenchingBot:
             # Trading hook (Phase 1 paper mode): auto-buy on high-confidence APE
             if decision.verdict == Verdict.APE and self.executor:
                 await self._try_buy(token, decision, filter_params_version=await self.state.get_filter_version())
+            else:
+                # Log why we didn't trade (WATCH/SKIP never trades; APE w/o executor)
+                logger.info(
+                    f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
+                    f"verdict={decision.verdict.value}, conf={decision.confidence:.2f}, "
+                    f"action=NO_TRADE "
+                    f"(only APE with conf>={settings.confidence_auto_execute} trades)"
+                )
+
+    async def get_open_positions_summary(self) -> list[dict]:
+        """Public accessor for open positions (used by Telegram /positions command)."""
+        return await self.position_manager.get_open_positions_summary()
 
     async def _try_buy(self, token: TokenData, decision, filter_params_version: int = 0):
         """Confidence-gated buy attempt. Returns silently if not allowed."""

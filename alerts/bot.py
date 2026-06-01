@@ -36,6 +36,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/stats - Performance metrics\n"
         "/status - Bot status & queue\n"
         "/active - Tracked calls\n"
+        "/positions - Open trading positions\n"
         "/filter - Current filter params\n"
         "/queue - Queue size\n"
         "/recent - Last 10 calls\n"
@@ -113,6 +114,51 @@ async def cmd_active(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"• {call.token_symbol} ({call.token_address[:6]}...)\n"
             f"  Score: {call.llm_score} | {call.llm_verdict}{age}\n"
             f"  Max gain: {gain_str}"
+        )
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show open trading positions (Phase 1 paper mode)."""
+    state = ctx.bot_data.get("state")
+    db = ctx.bot_data.get("db")
+    if not state or not db:
+        await update.message.reply_text("Bot not ready yet.")
+        return
+
+    try:
+        cursor = await db.db.execute(
+            "SELECT * FROM positions WHERE status = 'OPEN' ORDER BY entry_time DESC"
+        )
+        rows = await cursor.fetchall()
+    except Exception as e:
+        await update.message.reply_text(f"DB error: {e}")
+        return
+
+    if not rows:
+        await update.message.reply_text("No open positions.")
+        return
+
+    lines = [f"💼 OPEN POSITIONS ({len(rows)})\n"]
+    for r in rows[:10]:
+        entry_sol = r["entry_amount_sol"] or 0
+        entry_price = r["entry_price"] or 0
+        peak = r["peak_price"] or 0
+        peak_pct = ((peak / entry_price) - 1) * 100 if entry_price > 0 else 0
+        age_sec = 0
+        if r["entry_time"]:
+            try:
+                entry_dt = datetime.fromisoformat(r["entry_time"])
+                age_sec = (datetime.now(timezone.utc) - entry_dt).total_seconds()
+            except (ValueError, TypeError):
+                pass
+        paper_tag = " [PAPER]" if r["paper"] else " [LIVE]"
+        lines.append(
+            f"• {r['token_symbol']} ({r['token_address'][:8]}...){paper_tag}\n"
+            f"  Size: {entry_sol:.4f} SOL @ {entry_price:.10f}\n"
+            f"  Peak: {peak_pct:+.1f}% | Age: {age_sec/60:.1f}m\n"
+            f"  ID: {r['id']}"
         )
 
     await update.message.reply_text("\n".join(lines))
@@ -255,6 +301,7 @@ async def bot_handler(state, db):
     _bot_app.add_handler(CommandHandler("stats", cmd_stats))
     _bot_app.add_handler(CommandHandler("status", cmd_status))
     _bot_app.add_handler(CommandHandler("active", cmd_active))
+    _bot_app.add_handler(CommandHandler("positions", cmd_positions))
     _bot_app.add_handler(CommandHandler("filter", cmd_filter))
     _bot_app.add_handler(CommandHandler("queue", cmd_queue))
     _bot_app.add_handler(CommandHandler("recent", cmd_recent))
