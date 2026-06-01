@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import signal
+import time
 from datetime import datetime, timezone
 
 logger = logging.getLogger("main")
@@ -87,6 +88,7 @@ class TrenchingBot:
         self.llm_rate_limiter = RateLimiter(10, 60)  # LLM: 10 req/min
         self.tasks = {}
         self.workers = []
+        self.seen_trenches = set()
         self.shutdown_event = asyncio.Event()
 
     async def start(self):
@@ -114,6 +116,7 @@ class TrenchingBot:
 
         self.tasks = {
             "gmgn_poller": asyncio.create_task(self._gmgn_poller()),
+            "trenches_poller": asyncio.create_task(self._trenches_poller()),
             "worker_0": asyncio.create_task(self._token_worker(0)),
             "price_monitor": asyncio.create_task(self._run_forever("price_monitor", price_monitor)),
             "hourly_recap": asyncio.create_task(self._run_forever("hourly_recap", hourly_recap)),
@@ -148,19 +151,33 @@ class TrenchingBot:
         seen = set()
         poll_count = 0
         ban_count = 0
-        base_delay = 60  # 60 detik base delay
+        base_delay = 60
 
         while True:
             try:
                 tokens = await self.gmgn.get_trending(limit=20)
-                ban_count = 0  # Reset ban counter kalau sukses
+                ban_count = 0
                 new_count = 0
                 for token in tokens:
                     addr = token.get("address") or token.get("token_address")
-                    if addr and addr not in seen:
-                        seen.add(addr)
-                        await self.queue.put(token)
-                        new_count += 1
+                    if not addr:
+                        continue
+
+                    # Skip if already processed
+                    if addr in seen:
+                        continue
+
+                    # Skip if in retry queue and not ready
+                    if addr in self.state.retry_queue:
+                        retry_info = self.state.retry_queue[addr]
+                        if retry_info["retries"] >= 3:
+                            continue
+                        if time.time() - retry_info["timestamp"] < 300:
+                            continue
+
+                    seen.add(addr)
+                    await self.queue.put(token)
+                    new_count += 1
 
                 poll_count += 1
                 if new_count > 0:
@@ -175,11 +192,58 @@ class TrenchingBot:
                 err_str = str(e).upper()
                 if "429" in err_str or "RATE_LIMIT" in err_str or "BANNED" in err_str:
                     ban_count += 1
-                    wait_time = min(60 * (2 ** ban_count), 600)  # 60s, 120s, 240s, max 10min
+                    wait_time = min(60 * (2 ** ban_count), 600)
                     logger.warning(f"GMGN rate limited (ban #{ban_count}), waiting {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"GMGN poller error: {e}")
+                    await asyncio.sleep(base_delay)
+
+    async def _trenches_poller(self):
+        logger.info("Trenches Poller starting...")
+        poll_count = 0
+        ban_count = 0
+        base_delay = 30
+
+        while True:
+            try:
+                tokens = await self.gmgn.get_trenches(limit=20)
+                ban_count = 0
+                new_count = 0
+                for token in tokens:
+                    addr = token.get("address") or token.get("token_address")
+                    if not addr:
+                        continue
+                    if addr in self.seen_trenches:
+                        continue
+                    if addr in self.state.retry_queue:
+                        retry_info = self.state.retry_queue[addr]
+                        if retry_info["retries"] >= 3:
+                            continue
+                        if time.time() - retry_info["timestamp"] < 300:
+                            continue
+                    self.seen_trenches.add(addr)
+                    await self.queue.put(token)
+                    new_count += 1
+
+                poll_count += 1
+                if new_count > 0:
+                    logger.info(f"Trenches #{poll_count}: +{new_count} tokens (queue:{self.queue.qsize()})")
+
+                if len(self.seen_trenches) > 10000:
+                    self.seen_trenches.clear()
+
+                await asyncio.sleep(base_delay)
+
+            except Exception as e:
+                err_str = str(e).upper()
+                if "429" in err_str or "RATE_LIMIT" in err_str or "BANNED" in err_str:
+                    ban_count += 1
+                    wait_time = min(60 * (2 ** ban_count), 600)
+                    logger.warning(f"Trenches rate limited (ban #{ban_count}), waiting {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"Trenches poller error: {e}")
                     await asyncio.sleep(base_delay)
 
     async def _token_worker(self, worker_id: int):
@@ -192,14 +256,21 @@ class TrenchingBot:
                 addr = token_info.get("address") or token_info.get("token_address", "")
                 symbol = token_info.get("symbol", "?") or "?"
 
+                # Check if already processed (skip forever)
                 if await self.state.is_duplicate(addr):
                     continue
 
+                # Check if in retry queue and ready
+                is_retry = addr in self.state.retry_queue
+                if is_retry:
+                    if not await self.state.should_retry(addr):
+                        continue  # not ready or max retries
+
                 processed += 1
-                logger.info(f"[W{worker_id}] #{processed} {symbol} ({addr[:8]}...) q:{self.queue.qsize()}")
+                logger.info(f"[W{worker_id}] #{processed} {symbol} ({addr[:8]}...) retry:{is_retry} q:{self.queue.qsize()}")
 
                 await self._process_token(addr, token_info)
-                await asyncio.sleep(1)  # Jeda antar token
+                await asyncio.sleep(1)
 
             except asyncio.CancelledError:
                 break
@@ -339,8 +410,13 @@ class TrenchingBot:
 
         if all_passed:
             logger.info(f"[PASS] {token.symbol} ({address[:8]}): all filters passed")
+            await self.state.mark_processed(address)
+            await self.state.remove_retry(address)
         else:
-            logger.info(f"[SKIP] {token.symbol} ({address[:8]}): failed {len(failures)} filters: {failures}")
+            retry_info = await self.state.get_retry_info(address)
+            retries = retry_info.get("retries", 0)
+            logger.info(f"[RETRY {retries+1}/3] {token.symbol} ({address[:8]}): failed {len(failures)} filters: {failures}")
+            await self.state.add_retry(address)
             self.state.metrics.record_call("SKIP")
             return
 
@@ -504,10 +580,12 @@ class TrenchingBot:
         while True:
             await asyncio.sleep(300)
             m = self.state.metrics
+            retry_count = len(self.state.retry_queue)
             logger.info(
                 f"STATS | calls:{m.calls_total} ape:{m.calls_ape} watch:{m.calls_watch} skip:{m.calls_skip} | "
-                f"w/l:{m.wins}/{m.losses} alerts:{m.alerts_sent} q:{self.queue.qsize()} err:{m.errors}"
+                f"w/l:{m.wins}/{m.losses} alerts:{m.alerts_sent} q:{self.queue.qsize()} retry:{retry_count} err:{m.errors}"
             )
+            await self.state.cleanup_retry_queue()
 
     async def shutdown(self):
         logger.info("Shutdown initiated...")
