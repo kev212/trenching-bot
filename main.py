@@ -125,6 +125,7 @@ class TrenchingBot:
             "revert_monitor": asyncio.create_task(self._run_forever("revert_monitor", revert_monitor)),
             "bot_handler": asyncio.create_task(self._run_forever("bot_handler", bot_handler)),
             "metrics": asyncio.create_task(self._metrics_loop()),
+            "db_stats": asyncio.create_task(self._db_stats_loop()),
         }
 
         logger.info(f"Launched {len(self.tasks)} tasks")
@@ -804,6 +805,27 @@ class TrenchingBot:
                 f"w/l:{m.wins}/{m.losses} alerts:{m.alerts_sent} q:{self.queue.qsize()} retry:{retry_count} err:{m.errors}"
             )
             await self.state.cleanup_retry_queue()
+
+    async def _db_stats_loop(self):
+        """Phase E2-Alert: log row counts for the 3 new tables every 5 min."""
+        while True:
+            await asyncio.sleep(300)
+            try:
+                cur = await self.db.db.execute(
+                    "SELECT (SELECT COUNT(*) FROM filter_outcomes) as fo, "
+                    "(SELECT COUNT(*) FROM skip_decisions) as sd, "
+                    "(SELECT COUNT(*) FROM loss_analyses) as la"
+                )
+                row = await cur.fetchone()
+                fo_passed = await (await self.db.db.execute(
+                    "SELECT COUNT(*) as c FROM filter_outcomes WHERE passed = 1"
+                )).fetchone()
+                logger.info(
+                    f"DB-STATS | filter_outcomes:{row['fo']} (pass={fo_passed['c']}) "
+                    f"skip_decisions:{row['sd']} loss_analyses:{row['la']}"
+                )
+            except Exception as e:
+                logger.warning(f"DB stats error: {e}")
 
     async def shutdown(self):
         logger.info("Shutdown initiated...")
