@@ -106,7 +106,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
                     await position_manager.update_position(position)
                     triggered = True
                     last_reason = "TP2"
-                elif not in_warmup and position.get("exit_reason") == "TP1" and \
+                elif not in_warmup and position.get("exit_reason") in ("TP1", "TP2") and \
                         current_price <= peak * (1 - trailing_pct / 100):
                     await executor.execute_sell(position, 100, "TRAILING")
                     triggered = True

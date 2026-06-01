@@ -144,10 +144,14 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     lines = [f"💼 OPEN POSITIONS ({len(rows)})\n"]
     for r in rows[:10]:
-        entry_sol = r["entry_amount_sol"] or 0
         entry_price = r["entry_price"] or 0
+        entry_tokens = r["entry_amount_token"] or 0
+        remaining_tokens = r["current_amount_token"] or 0
+        remain_pct = (remaining_tokens / entry_tokens * 100) if entry_tokens > 0 else 100
+        remaining_sol = remaining_tokens * entry_price
         peak = r["peak_price"] or 0
         peak_pct = ((peak / entry_price) - 1) * 100 if entry_price > 0 else 0
+        exit_reason = r["exit_reason"] or ""
         age_sec = 0
         if r["entry_time"]:
             try:
@@ -156,11 +160,12 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except (ValueError, TypeError):
                 pass
         paper_tag = " [PAPER]" if r["paper"] else " [LIVE]"
+        tp_tag = f" | {exit_reason} taken" if exit_reason else ""
         lines.append(
             f"• {r['token_symbol']} ({r['token_address'][:8]}...){paper_tag}\n"
-            f"  Size: {entry_sol:.4f} SOL @ {entry_price:.10f}\n"
+            f"  Size: {remaining_sol:.4f} SOL ({remain_pct:.0f}% remain) @ {entry_price:.10f}\n"
             f"  Peak: {peak_pct:+.1f}% | Age: {age_sec/60:.1f}m\n"
-            f"  ID: {r['id']}"
+            f"  ID: {r['id']}{tp_tag}"
         )
 
     await update.message.reply_text("\n".join(lines))
@@ -189,7 +194,7 @@ async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0.0
 
         cursor = await db.db.execute(
-            "SELECT COUNT(*) as n, COALESCE(SUM(entry_amount_sol), 0) as deployed "
+            "SELECT COUNT(*) as n, COALESCE(SUM(current_amount_token * entry_price), 0) as deployed "
             "FROM positions WHERE status = 'OPEN'"
         )
         open_row = await cursor.fetchone()
