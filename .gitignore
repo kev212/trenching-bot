@@ -16,3 +16,5 @@ build/
 .vscode/
 bot.log
 buildEnrichment.md
+.rtk/
+PLAN_*.md

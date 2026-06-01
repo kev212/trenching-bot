@@ -102,6 +102,27 @@ class GMGNClient:
     async def get_token_holders(self, address: str) -> dict:
         return await self._get("/v1/market/token_top_holders", {"chain": "sol", "address": address})
 
+    async def get_token_ath(self, address: str) -> dict:
+        """Fetch 1d candles, return ATH price + timestamp from highest candle."""
+        now_ms = int(time.time() * 1000)
+        long_ago_ms = now_ms - (1000 * 24 * 60 * 60 * 1000)
+        data = await self._get("/v1/market/token_kline", {
+            "chain": "sol",
+            "address": address,
+            "resolution": "1d",
+            "from": long_ago_ms,
+            "to": now_ms,
+        })
+        candles = data.get("list", []) if isinstance(data, dict) else []
+        if not candles:
+            return {}
+        ath_candle = max(candles, key=lambda c: float(c.get("high", 0) or 0))
+        return {
+            "ath_price": float(ath_candle.get("high", 0) or 0),
+            "ath_timestamp": int(ath_candle.get("time", 0) or 0) // 1000,
+            "candles_checked": len(candles),
+        }
+
     async def get_trenches(self, limit: int = 20) -> list:
         query = {"chain": "sol"}
         body = {

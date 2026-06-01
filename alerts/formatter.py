@@ -19,10 +19,16 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict) -> str:
         "funded_wallet_age": "👛 Wallet Age",
         "rug_probability": "🛡️ Rug Risk",
         "holder_distribution": "👥 Holders",
+        "ath_drawdown": "📉 ATH Drawdown",
     }
     for key, label in filter_names.items():
         f = fv_dict.get(key, {})
-        status = "✅" if f.get("passed", False) else "❌"
+        if not f.get("enabled", True):
+            status = "ℹ️"
+        elif f.get("passed", False):
+            status = "✅"
+        else:
+            status = "❌"
         note = f.get("note", "")
         filters_text += f"  {status} {label}: {note}\n"
 

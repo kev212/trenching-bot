@@ -1,15 +1,15 @@
 {
   "influencers": {
-    "elonmusk": {"name": "Elon Musk", "weight": 40},
-    "aeyakovenko": {"name": "Toly (Solana)", "weight": 30},
-    "sama": {"name": "Sam Altman", "weight": 20},
-    "VitalikButerin": {"name": "Vitalik", "weight": 15},
-    "jack": {"name": "Jack Dorsey", "weight": 15},
-    "CryptoHayes": {"name": "Arthur Hayes", "weight": 10},
-    "inversebrah": {"name": "Inversebrah", "weight": 10},
-    "blknoiz01": {"name": "Ansem", "weight": 10},
-    "DeFiTracer": {"name": "DeFi Tracer", "weight": 5},
-    "cobaborat": {"name": "Coba Borat", "weight": 5},
-    "solana_maxi": {"name": "Solana Maxi", "weight": 5}
+    "elonmusk": {"name": "Elon Musk", "weight": 30},
+    "aeyakovenko": {"name": "Toly (Solana)", "weight": 20},
+    "sama": {"name": "Sam Altman", "weight": 15},
+    "VitalikButerin": {"name": "Vitalik", "weight": 12},
+    "jack": {"name": "Jack Dorsey", "weight": 10},
+    "CryptoHayes": {"name": "Arthur Hayes", "weight": 8},
+    "inversebrah": {"name": "Inversebrah", "weight": 8},
+    "blknoiz01": {"name": "Ansem", "weight": 6},
+    "DeFiTracer": {"name": "DeFi Tracer", "weight": 4},
+    "cobaborat": {"name": "Coba Borat", "weight": 3},
+    "solana_maxi": {"name": "Solana Maxi", "weight": 3}
   }
 }

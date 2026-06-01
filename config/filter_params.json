@@ -43,9 +43,10 @@
       "weight": 0.10
     },
     "rug_probability": {
-      "enabled": true,
+      "enabled": false,
       "max_rug_prob": 0.40,
-      "weight": 0.10
+      "weight": 0.10,
+      "note": "Informational only, passed to LLM as context"
     },
     "holder_distribution": {
       "enabled": true,
@@ -55,6 +56,11 @@
     "social_narrative": {
       "enabled": true,
       "weight": 0.05
+    },
+    "ath_drawdown": {
+      "enabled": true,
+      "max_drawdown_pct": -50.0,
+      "weight": 0.10
     }
   }
 }

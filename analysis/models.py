@@ -33,6 +33,9 @@ class TokenData:
     funded_wallet_new_pct: float = 0.0
     top_holder_balance_sol: float = 0.0
     fee_collected: float = 0.0
+    ath_price: float = 0.0
+    ath_timestamp: int = 0
+    drawdown_from_ath_pct: float = 0.0
     total_volume: float = 0.0
     dex_paid: bool = False
     is_wash_trading: bool = False
@@ -56,17 +59,20 @@ class TokenData:
     
     # Influencer detection
     influencer_mentions: list = field(default_factory=list)
+    organic_mentions: list = field(default_factory=list)
     has_elon_tweet: bool = False
     has_toly_tweet: bool = False
     has_community: bool = False
-    
+
     # Website content
     website_text: str = ""
-    
+
     # Social narrative scoring
     social_narrative_score: float = 0.0
     social_narrative_text: str = ""
     project_type: str = ""
+    catalyst_match: bool = False
+    catalyst_description: str = ""
 
 
 @dataclass
@@ -82,6 +88,7 @@ class FeatureVector:
     min_holders: dict = field(default_factory=dict)
     min_total_fee: dict = field(default_factory=dict)
     social_narrative: dict = field(default_factory=dict)
+    ath_drawdown: dict = field(default_factory=dict)
     token_data: Optional[TokenData] = None
 
     def to_dict(self) -> dict:
@@ -97,6 +104,7 @@ class FeatureVector:
             "min_holders": self.min_holders,
             "min_total_fee": self.min_total_fee,
             "social_narrative": self.social_narrative,
+            "ath_drawdown": self.ath_drawdown,
         }
 
 

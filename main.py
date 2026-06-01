@@ -34,26 +34,60 @@ logger = setup_logger("main")
 MIN_FILTERS_FOR_LLM = 6
 
 
+def _safe_float(val, default=0.0) -> float:
+    if val is None or val == "":
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
 def _calculate_rug_score(security: dict) -> float:
-    """Calculate rug probability from GMGN security fields."""
+    """Use GMGN's rug_ratio (ML-computed) with manual fallback."""
     if not security:
         return 0.0
 
-    score = 0.0
+    # Primary: GMGN's own rug_ratio
+    rug_ratio = security.get("rug_ratio")
+    if rug_ratio is not None and rug_ratio != "":
+        try:
+            return min(max(float(rug_ratio), 0.0), 1.0)
+        except (TypeError, ValueError):
+            pass
 
-    if security.get("blacklist", 0):
+    # Fallback: manual calc
+    score = 0.0
+    if security.get("honeypot") in (1, True, "1"):
+        score += 0.4
+    if security.get("blacklist") in (1, True, "1"):
         score += 0.3
-    if security.get("honeypot", 0):
-        score += 0.5
-    if not security.get("renounced_freeze_account", True):
+    if security.get("renounced_mint") in (False, 0, "0"):
         score += 0.1
-    if not security.get("renounced_mint", True):
+    if security.get("renounced_freeze_account") in (False, 0, "0"):
         score += 0.1
-    if float(security.get("buy_tax", 0) or 0) > 0.1:
+
+    buy_tax = _safe_float(security.get("buy_tax"))
+    sell_tax = _safe_float(security.get("sell_tax"))
+    if buy_tax > 0.1 or sell_tax > 0.1:
         score += 0.2
-    if float(security.get("sell_tax", 0) or 0) > 0.2:
+
+    burn = _safe_float(security.get("burn_ratio"), default=1.0)
+    if burn < 0.5:
+        score += 0.1
+
+    if security.get("is_wash_trading") in (True, "true", 1):
         score += 0.2
-    if float(security.get("burn_ratio", 1) or 1) < 0.5:
+    lock = security.get("lock_summary", {}) or {}
+    if not lock.get("is_locked"):
+        score += 0.15
+    if _safe_float(security.get("top_10_holder_rate")) > 0.5:
+        score += 0.2
+    if _safe_float(security.get("rat_trader_amount_rate")) > 0.3:
+        score += 0.2
+    if _safe_float(security.get("bundler_trader_amount_rate")) > 0.5:
+        score += 0.15
+    if int(security.get("sniper_count", 0) or 0) > 5:
         score += 0.1
 
     return min(score, 1.0)
@@ -125,6 +159,7 @@ class TrenchingBot:
             "revert_monitor": asyncio.create_task(self._run_forever("revert_monitor", revert_monitor)),
             "bot_handler": asyncio.create_task(self._run_forever("bot_handler", bot_handler)),
             "metrics": asyncio.create_task(self._metrics_loop()),
+            "db_stats": asyncio.create_task(self._db_stats_loop()),
         }
 
         logger.info(f"Launched {len(self.tasks)} tasks")
@@ -365,32 +400,34 @@ class TrenchingBot:
                 self.state.metrics.record_call("SKIP")
                 return
 
-        # Acquire rate limit slot + fetch data sequentially (no burst)
+        # Acquire 1 rate limit slot (4 parallel calls = 1 budget slot)
         await self.rate_limiter.acquire()
 
+        # Phase B: parallel fetch — info + security + holders + ath in one round-trip
+        # Pre-filter at lines 341-366 already screens ~80% of tokens before this
         try:
-            info = await self.gmgn.get_token_info(address)
+            results = await asyncio.gather(
+                self.gmgn.get_token_info(address),
+                self.gmgn.get_token_security(address),
+                self.gmgn.get_token_holders(address),
+                self.gmgn.get_token_ath(address),
+                return_exceptions=True,
+            )
+            info, security, holders, ath_data = [
+                r if not isinstance(r, Exception) else {} for r in results
+            ]
+            if isinstance(results[1], Exception):
+                logger.warning(f"GMGN security error for {address[:10]}: {results[1]}")
+            if isinstance(results[2], Exception):
+                logger.warning(f"GMGN holders error for {address[:10]}: {results[2]}")
+            if isinstance(results[3], Exception):
+                logger.warning(f"GMGN ath error for {address[:10]}: {results[3]}")
         except Exception as e:
-            logger.warning(f"GMGN info error for {address[:10]}: {e}")
-            info = {}
+            logger.warning(f"GMGN gather error for {address[:10]}: {e}")
+            info, security, holders, ath_data = {}, {}, {}, {}
 
-        await asyncio.sleep(2)
-        await self.rate_limiter.acquire()
-
-        try:
-            security = await self.gmgn.get_token_security(address)
-        except Exception as e:
-            logger.warning(f"GMGN security error for {address[:10]}: {e}")
-            security = {}
-
-        await asyncio.sleep(2)
-        await self.rate_limiter.acquire()
-
-        try:
-            holders = await self.gmgn.get_token_holders(address)
-        except Exception as e:
-            logger.warning(f"GMGN holders error for {address[:10]}: {e}")
-            holders = {}
+        if not security:
+            logger.warning(f"[SECURITY-EMPTY] {symbol} ({address[:8]}): rug_score will be 0")
 
         if not info:
             logger.info(f"[SKIP] {symbol} ({address[:8]}): no data")
@@ -407,6 +444,17 @@ class TrenchingBot:
         current_price = float(price_obj.get("price", 0) or 0)
         total_supply = float(info.get("total_supply", 0) or 0)
         market_cap = current_price * total_supply
+
+        # Phase B: compute drawdown from ATH (0 if no ATH data — fresh tokens)
+        ath_price_val = ath_data.get("ath_price", 0.0) if ath_data else 0.0
+        if ath_price_val > 0 and current_price > 0:
+            drawdown = (current_price - ath_price_val) / ath_price_val * 100
+        else:
+            drawdown = 0.0
+        logger.info(
+            f"[ATH] {symbol} ({address[:8]}): drawdown={drawdown:.1f}%, "
+            f"ath=${ath_price_val:.8f}, current=${current_price:.8f}, candles={ath_data.get('candles_checked', 0) if ath_data else 0}"
+        )
 
         # Calculate holder stats from holders list
         if holders_list:
@@ -457,6 +505,9 @@ class TrenchingBot:
             open_timestamp=open_ts_from_info,
             migrated_timestamp=migrated_ts,
             raw_gmgn=info,
+            ath_price=ath_price_val,
+            ath_timestamp=ath_data.get("ath_timestamp", 0) if ath_data else 0,
+            drawdown_from_ath_pct=drawdown,
         )
 
         # Run filters
@@ -465,6 +516,42 @@ class TrenchingBot:
 
         # Hard gate: ALL filters must pass
         all_passed, failures = check_hard_gate(fv)
+
+        # Phase E2-Alert: log every hard-gate outcome (pass or fail) for retro-tuning
+        try:
+            retry_info_for_log = await self.state.get_retry_info(address)
+            retry_count_for_log = retry_info_for_log.get("retries", 0)
+            age_min_for_log = (
+                (time.time() * 1000 - max(token.creation_timestamp or 0, token.open_timestamp or 0)) / 60000
+                if (token.creation_timestamp or token.open_timestamp) else 0.0
+            )
+            filter_results_dict = {
+                name: {
+                    "passed": bool(getattr(fv, name, {}).get("passed", False)) if hasattr(fv, name) else False,
+                    "value": getattr(fv, name, {}).get("note", "") if hasattr(fv, name) else "",
+                }
+                for name in [
+                    "funded_wallet_age", "min_market_cap", "max_market_cap",
+                    "insider_concentration", "fee_tier", "rug_probability",
+                    "holder_distribution", "token_age", "min_holders", "min_total_fee",
+                ]
+            }
+            await self.db.save_filter_outcome(
+                token_address=address,
+                token_name=token.name,
+                token_symbol=token.symbol,
+                market_cap=token.market_cap,
+                holders_count=token.holders_count,
+                age_minutes=age_min_for_log,
+                filter_results=filter_results_dict,
+                passed=all_passed,
+                failed_filters=failures,
+                was_retried=is_retry,
+                retry_count=retry_count_for_log,
+                filter_params_version=await self.state.get_filter_version(),
+            )
+        except Exception as e:
+            logger.debug(f"filter_outcome save failed for {address[:8]}: {e}")
 
         if all_passed:
             logger.info(f"[PASS] {token.symbol} ({address[:8]}): all filters passed")
@@ -516,6 +603,31 @@ class TrenchingBot:
         if decision.key_factors:
             logger.info(f"[LLM-FACTORS] {token.symbol}: {decision.key_factors}")
         self.state.metrics.record_call(decision.verdict.value)
+
+        # Phase E2-Alert: log every SKIP from LLM #2 for retro-tuning
+        if decision.verdict == Verdict.SKIP:
+            try:
+                age_min_skip = (
+                    (time.time() * 1000 - max(token.creation_timestamp or 0, token.open_timestamp or 0)) / 60000
+                    if (token.creation_timestamp or token.open_timestamp) else 0.0
+                )
+                social_score_skip = float(fv.social_narrative.get("score", 0)) if hasattr(fv, "social_narrative") else 0.0
+                await self.db.save_skip_decision(
+                    token_address=address,
+                    token_name=token.name,
+                    token_symbol=token.symbol,
+                    llm_score=decision.score,
+                    llm_reasoning=decision.reasoning,
+                    llm_key_factors=decision.key_factors,
+                    market_cap=token.market_cap,
+                    holders_count=token.holders_count,
+                    age_minutes=age_min_skip,
+                    top10_pct=token.top10_hold_pct,
+                    social_score=social_score_skip,
+                    feature_vector=fv_dict,
+                )
+            except Exception as e:
+                logger.debug(f"skip_decision save failed for {address[:8]}: {e}")
 
         # Alert if APE or WATCH
         if decision.verdict in (Verdict.APE, Verdict.WATCH):
@@ -628,9 +740,14 @@ class TrenchingBot:
             try:
                 search_results = await self.twitter.search_by_contract(token.address, 10)
 
-                # 4. Influencer detection (direct, no LLM)
+                # 4. Influencer + organic mention detection (direct, no LLM)
                 for tweet in search_results:
                     author = tweet.get("author", {}).get("screen_name", "").lower()
+                    if not author:
+                        continue
+                    created_ts = tweet.get("created_timestamp", 0)
+                    tweet_age_min = (time.time() - created_ts) / 60 if created_ts else 0
+
                     if author in self.influencers:
                         influencer_mentions.append({
                             "handle": author,
@@ -638,11 +755,20 @@ class TrenchingBot:
                             "weight": self.influencers[author]["weight"],
                             "tweet_text": tweet.get("text", "")[:100],
                             "likes": tweet.get("likes", 0),
+                            "tweet_age_min": tweet_age_min,
                         })
                         if author == "elonmusk":
                             token.has_elon_tweet = True
                         elif author == "aeyakovenko":
                             token.has_toly_tweet = True
+                    else:
+                        token.organic_mentions.append({
+                            "handle": author,
+                            "followers": tweet.get("author", {}).get("followers", 0),
+                            "likes": tweet.get("likes", 0),
+                            "tweet_text": tweet.get("text", "")[:100],
+                            "tweet_age_min": tweet_age_min,
+                        })
             except Exception as e:
                 logger.warning(f"Twitter search error for {token.symbol}: {e}")
 
@@ -685,24 +811,33 @@ class TrenchingBot:
                     token.project_type = social_data.get("project_type", "unknown")
                     token.social_narrative_score = float(social_data.get("score", 0))
                     token.social_narrative_text = social_data.get("summary", "")
+                    token.catalyst_match = bool(social_data.get("has_catalyst", False))
+                    token.catalyst_description = social_data.get("catalyst_description", "")
                 except Exception as e:
                     logger.warning(f"Social analysis parse error for {token.symbol}: {e}")
                     token.project_type = "unknown"
                     token.social_narrative_score = 0
                     token.social_narrative_text = ""
+                    token.catalyst_match = False
+                    token.catalyst_description = ""
 
             # Score floor: tokens with basic social links get minimum 15pts
             has_basic_social = bool(token.twitter_username or token.website_url or token.telegram_url)
             if has_basic_social and token.social_narrative_score < 15:
                 token.social_narrative_score = 15
 
-            # Bonus for influencer/KOL mentions
-            if influencer_mentions:
-                max_influencer_weight = max(inf.get("weight", 0) for inf in influencer_mentions)
-                influencer_bonus = min(max_influencer_weight, 20)
-                token.social_narrative_score = min(100, token.social_narrative_score + influencer_bonus)
+            # Compute social signals bonus (replaces simple max(weight))
+            from llm.social_scoring import calculate_social_signals_bonus
+            signals = calculate_social_signals_bonus(token)
+            signals_bonus = signals["total_bonus"]
+            token.social_narrative_score = min(100, token.social_narrative_score + signals_bonus)
 
-            logger.info(f"[SOCIAL] {token.symbol} ({token.address[:8]}): score={token.social_narrative_score:.0f}/100, project={token.project_type}, social_links={has_basic_social}, influencers={len(influencer_mentions)}")
+            logger.info(
+                f"[SOCIAL] {token.symbol} ({token.address[:8]}): score={token.social_narrative_score:.0f}/100, "
+                f"project={token.project_type}, social_links={has_basic_social}, "
+                f"influencers={len(influencer_mentions)}, organic={len(token.organic_mentions)}, "
+                f"catalyst={token.catalyst_match}, signals_bonus=+{signals_bonus}"
+            )
 
         except Exception as e:
             logger.error(f"Social analysis error for {token.symbol}: {e}")
@@ -720,6 +855,27 @@ class TrenchingBot:
                 f"w/l:{m.wins}/{m.losses} alerts:{m.alerts_sent} q:{self.queue.qsize()} retry:{retry_count} err:{m.errors}"
             )
             await self.state.cleanup_retry_queue()
+
+    async def _db_stats_loop(self):
+        """Phase E2-Alert: log row counts for the 3 new tables every 5 min."""
+        while True:
+            await asyncio.sleep(300)
+            try:
+                cur = await self.db.db.execute(
+                    "SELECT (SELECT COUNT(*) FROM filter_outcomes) as fo, "
+                    "(SELECT COUNT(*) FROM skip_decisions) as sd, "
+                    "(SELECT COUNT(*) FROM loss_analyses) as la"
+                )
+                row = await cur.fetchone()
+                fo_passed = await (await self.db.db.execute(
+                    "SELECT COUNT(*) as c FROM filter_outcomes WHERE passed = 1"
+                )).fetchone()
+                logger.info(
+                    f"DB-STATS | filter_outcomes:{row['fo']} (pass={fo_passed['c']}) "
+                    f"skip_decisions:{row['sd']} loss_analyses:{row['la']}"
+                )
+            except Exception as e:
+                logger.warning(f"DB stats error: {e}")
 
     async def shutdown(self):
         logger.info("Shutdown initiated...")

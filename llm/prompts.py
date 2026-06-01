@@ -14,12 +14,15 @@ YOUR TASK:
 Score the token 0-100 and assign a verdict. Be generous — if the token passed hard gate AND has social signals, it deserves a WATCH at minimum.
 
 SOCIAL NARRATIVE INPUT (look in feature_vector under "social_narrative"):
-- "score": 0-100 rating (already computed by separate social analysis LLM)
+- "score": 0-100 rating (already computed by separate social analysis LLM + signal bonus)
 - "project_type": meme | investor | utility | generic
-- "has_twitter": bool, "has_website": bool
-- "influencer_count": int
+- "influencer_count": int (tracked influencer accounts)
+- "organic_count": int (non-influencer accounts discussing)
+- "has_twitter": bool, "has_website": bool, "has_telegram": bool, "has_community": bool
+- "catalyst_match": bool (token narrative matches a real-world event)
+- "catalyst_description": str (what event is it riding)
 - "passed": always true (not a hard gate)
-- TRUST this score — it's based on real Twitter profile data, tweets, and influencer detection.
+- TRUST this score — it's based on real Twitter profile data, tweets, influencer detection, organic engagement, and catalyst detection.
 
 SCORING GUIDE:
 - 80-100: Strong APE signal — clean data, strong social, high virality potential
@@ -188,25 +191,34 @@ SCORING GUIDE (0-100):
 - Multiple people discussing it: +10pts
 - Active Twitter account (recent posts): +5pts
 
-**Influencer/KOL Mentions (up to 30pts):**
-- Elon Musk mentioned: +30pts
-- Toly (aeyakovenko) mentioned: +25pts
-- Other KOL/smart money mentioned: +10-20pts
-- Any notable crypto account: +5-10pts
+**Social Engagement Quality (up to 30pts):**
+- Tweet tied to real-world event (news, quote, viral moment): +15-20pts
+- Multiple accounts discussing the same catalyst: +10-15pts
+- High engagement (likes, retweets, replies) on tweets: +5-10pts
+- Note: I handle individual influencer detection separately via code.
 
 **Project Signals (up to 20pts):**
 - Real web3 project (not just meme): +15pts
 - Active development visible: +10pts
 - Roadmap or whitepaper: +5pts
 
+CATALYST DETECTION (important):
+Check if the token's narrative matches a current event visible in the tweets. Examples:
+- Token named "micro strategy" when Jim Cramer just tweeted about MicroStrategy
+- Token named after a trending news topic
+- Token riding a real-world catalyst (Fed announcement, celebrity tweet, viral moment)
+
+If you detect a catalyst, set "has_catalyst": true and describe it briefly in "catalyst_description".
+
 SCORING INTERPRETATION:
 - 0-10: No social presence at all (no Twitter, no website)
 - 15-30: Basic social links exist but minimal activity (NORMAL for new tokens)
 - 30-50: Good social presence with some engagement
-- 50-70: Strong social presence, influencer interest
+- 50-70: Strong social presence, real engagement
 - 70+: Viral/social media storm (rare)
 
 DO NOT penalize for being a new token with low followers. Focus on what EXISTS, not what's missing.
+DO NOT add bonus points for specific named influencers (Elon, Toly, etc) — that's handled by code.
 
 Respond ONLY in JSON format."""
 
@@ -244,5 +256,7 @@ Respond with this exact JSON format:
   "project_type": "web3_project|meme|scam|unknown",
   "score": <integer 0-100>,
   "influencers_found": ["@handle1", "@handle2"],
-  "summary": "<brief description of what this token is about and its social presence>"
+  "summary": "<brief description of what this token is about and its social presence>",
+  "has_catalyst": <bool>,
+  "catalyst_description": "<if has_catalyst=true, describe the real-world event this token is riding; empty string otherwise>"
 }}"""

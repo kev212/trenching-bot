@@ -19,6 +19,7 @@ def run_all_filters(token: TokenData, filter_params: dict) -> FeatureVector:
     fv.rug_probability = _filter_rug_probability(token, filter_params.get("rug_probability", {}))
     fv.holder_distribution = _filter_holder_distribution(token, filter_params.get("holder_distribution", {}))
     fv.social_narrative = _filter_social_narrative(token, filter_params.get("social_narrative", {}))
+    fv.ath_drawdown = _filter_ath_drawdown(token, filter_params.get("ath_drawdown", {}))
 
     return fv
 
@@ -210,12 +211,11 @@ def _filter_rug_probability(token: TokenData, params: dict) -> dict:
     max_prob = params.get("max_rug_prob", 0.40)
     prob = token.rug_probability
 
-    passed = prob <= max_prob
     return {
         "probability": prob,
         "threshold": max_prob,
-        "passed": passed,
-        "enabled": True,
+        "passed": prob <= max_prob,
+        "enabled": params.get("enabled", True),
         "note": f"Rug probability: {prob:.0%} (max: {max_prob:.0%})",
     }
 
@@ -239,22 +239,28 @@ def _filter_social_narrative(token: TokenData, params: dict) -> dict:
     score = token.social_narrative_score
     project_type = token.project_type
     influencer_count = len(token.influencer_mentions)
+    organic_count = len(getattr(token, "organic_mentions", []))
     has_twitter = bool(token.twitter_username)
     has_website = bool(token.website_url)
     has_telegram = bool(token.telegram_url)
     has_community = bool(getattr(token, "has_community", False))
+    catalyst_match = bool(getattr(token, "catalyst_match", False))
+    catalyst_description = getattr(token, "catalyst_description", "")
 
     return {
         "score": score,
         "project_type": project_type,
         "influencer_count": influencer_count,
+        "organic_count": organic_count,
         "has_twitter": has_twitter,
         "has_website": has_website,
         "has_telegram": has_telegram,
         "has_community": has_community,
+        "catalyst_match": catalyst_match,
+        "catalyst_description": catalyst_description,
         "passed": True,  # Always passes (bonus, not hard gate)
         "enabled": True,
-        "note": f"Social: {score:.0f}/100 ({project_type}) {influencer_count} influencers",
+        "note": f"Social: {score:.0f}/100 ({project_type}) {influencer_count} inf / {organic_count} org / catalyst={catalyst_match}",
     }
 
 
@@ -274,6 +280,8 @@ def count_passed_filters(fv: FeatureVector) -> tuple[int, int, list[str]]:
         "funded_wallet_age": fv.funded_wallet_age,
         "rug_probability": fv.rug_probability,
         "holder_distribution": fv.holder_distribution,
+        "ath_drawdown": fv.ath_drawdown,
+        "social_narrative": fv.social_narrative,
     }
 
     passed = 0
@@ -296,3 +304,18 @@ def check_hard_gate(fv: FeatureVector) -> tuple[bool, list[str]]:
     """Hard gate: ALL filters must pass. Returns (passed, failures)."""
     _, _, failures = count_passed_filters(fv)
     return len(failures) == 0, failures
+
+
+def _filter_ath_drawdown(token: TokenData, params: dict) -> dict:
+    """Filter by max drawdown from ATH (all-time high price)."""
+    max_dd = params.get("max_drawdown_pct", -50.0)
+    dd = token.drawdown_from_ath_pct
+    passed = dd >= max_dd
+    return {
+        "drawdown_pct": dd,
+        "ath_price": token.ath_price,
+        "threshold": max_dd,
+        "passed": passed,
+        "enabled": params.get("enabled", True),
+        "note": f"Drawdown from ATH: {dd:.1f}% (max: {max_dd}%)",
+    }
