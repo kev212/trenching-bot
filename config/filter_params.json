@@ -20,7 +20,7 @@
     },
     "min_total_fee": {
       "enabled": true,
-      "min_fee_sol": 0.5,
+      "min_fee_sol": 5.0,
       "weight": 0.10
     },
     "fee_tier": {
