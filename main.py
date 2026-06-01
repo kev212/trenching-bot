@@ -23,11 +23,19 @@ from tracking.price_monitor import price_monitor
 from tracking.hourly_recap import hourly_recap
 from learning.daily_optimizer import daily_optimizer
 from learning.revert_monitor import revert_monitor
-from alerts.formatter import format_alert
+from alerts.formatter import format_alert, format_trade_alert
 from alerts.dispatcher import dispatcher
 from alerts.bot import bot_handler
 from utils.logger import setup_logger
 from utils.helpers import RateLimiter
+
+from core.wallet import Wallet
+from core.jupiter_client import JupiterClient
+from core.position_manager import PositionManager
+from core.risk_manager import RiskManager
+from core.trade_executor import TradeExecutor
+from tracking.position_monitor import position_monitor
+from config import load_trading_config, load_risk_rules
 
 logger = setup_logger("main")
 
@@ -125,6 +133,34 @@ class TrenchingBot:
         self.seen_trenches = set()
         self.shutdown_event = asyncio.Event()
 
+        # Trading components (Phase 1 paper mode)
+        self.trading_config = load_trading_config()
+        self.risk_rules = load_risk_rules()
+        self.paper_mode = self.trading_config.get("paper_mode", True)
+        self.wallet = Wallet(
+            paper=self.paper_mode,
+            starting_balance_sol=settings.paper_starting_balance_sol,
+        )
+        self.jupiter = JupiterClient(
+            proxy=settings.http_proxy,
+            rate_limiter=self.rate_limiter,
+        )
+        self.position_manager = PositionManager(self.db)
+        self.risk_manager = RiskManager(self.trading_config, db=self.db)
+        self.executor = TradeExecutor(
+            paper=self.paper_mode,
+            wallet=self.wallet,
+            jupiter=self.jupiter,
+            positions=self.position_manager,
+            risk=self.risk_manager,
+            config=self.trading_config,
+        )
+        logger.warning(
+            f"Trading: paper_mode={self.paper_mode}, "
+            f"balance={self.wallet.starting_balance} SOL, "
+            f"position_size={self.trading_config.get('position_size_sol')} SOL"
+        )
+
     async def start(self):
         logger.info("=" * 50)
         logger.info("TRENCHING BOT v3 - Starting...")
@@ -132,6 +168,7 @@ class TrenchingBot:
 
         await self.db.init()
         await self.state.load_filter_params()
+        await self.jupiter.init()
 
         # Test GMGN connection
         logger.info("Testing GMGN API...")
@@ -160,6 +197,7 @@ class TrenchingBot:
             "bot_handler": asyncio.create_task(self._run_forever("bot_handler", bot_handler)),
             "metrics": asyncio.create_task(self._metrics_loop()),
             "db_stats": asyncio.create_task(self._db_stats_loop()),
+            "position_monitor": asyncio.create_task(self._run_forever("position_monitor", position_monitor, self.position_manager, self.risk_manager, self.jupiter, self.executor, self.trading_config)),
         }
 
         logger.info(f"Launched {len(self.tasks)} tasks")
@@ -671,6 +709,53 @@ class TrenchingBot:
                 decision.reasoning, decision.confidence,
                 decision.key_factors, decision.processing_time_ms,
             )
+
+            # Trading hook (Phase 1 paper mode): auto-buy on high-confidence APE
+            if decision.verdict == Verdict.APE and self.executor:
+                await self._try_buy(token, decision, filter_params_version=await self.state.get_filter_version())
+
+    async def _try_buy(self, token: TokenData, decision, filter_params_version: int = 0):
+        """Confidence-gated buy attempt. Returns silently if not allowed."""
+        try:
+            can_trade, reason = self.risk_manager.can_trade()
+            if not can_trade:
+                logger.info(f"[BUY-SKIP] {token.symbol}: risk gate closed: {reason}")
+                return
+
+            open_positions = await self.position_manager.get_open_positions()
+            max_open = self.risk_rules.get("max_open_positions", 5)
+            if len(open_positions) >= max_open:
+                logger.info(
+                    f"[BUY-SKIP] {token.symbol}: max_open={max_open} reached"
+                )
+                return
+
+            auto_threshold = settings.confidence_auto_execute
+            if decision.confidence < auto_threshold:
+                logger.info(
+                    f"[BUY-SKIP] {token.symbol}: conf={decision.confidence:.2f} < "
+                    f"auto={auto_threshold}"
+                )
+                return
+
+            balance = await self.wallet.get_sol_balance()
+            size_sol = self.risk_manager.get_position_size(balance)
+            if size_sol <= 0:
+                logger.info(f"[BUY-SKIP] {token.symbol}: size=0 (balance={balance:.4f})")
+                return
+
+            position = await self.executor.execute_buy(
+                token, size_sol, filter_params_version=filter_params_version
+            )
+            if position:
+                trade_alert = format_trade_alert(position, "BUY")
+                await dispatcher.send_alert(trade_alert)
+                logger.info(
+                    f"[BUY] {token.symbol} paper={self.paper_mode} "
+                    f"size={size_sol:.4f} SOL conf={decision.confidence:.2f}"
+                )
+        except Exception as e:
+            logger.error(f"_try_buy error for {token.symbol}: {e}")
 
     async def _social_analysis(self, token: TokenData, info: dict):
         """Analyze social media presence for tokens that pass hard gate."""

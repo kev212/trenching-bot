@@ -121,3 +121,30 @@ def _score_bar(score: int) -> str:
     filled = score // 10
     empty = 10 - filled
     return "█" * filled + "░" * empty
+
+
+def format_trade_alert(position, side: str) -> str:
+    """Format a trade alert (BUY/SELL) for Telegram."""
+    emoji = "🟢" if side == "BUY" else "🔴"
+    pnl_sol = getattr(position, "pnl_sol", 0.0) or 0.0
+    pnl_pct = getattr(position, "pnl_pct", 0.0) or 0.0
+    paper_tag = " [PAPER]" if getattr(position, "paper", True) else " [LIVE]"
+
+    lines = [
+        f"{emoji} TRADE: {side} {position.token_symbol}{paper_tag}",
+        "",
+        f"  Token: {position.token_symbol} ({position.token_address[:8]}...)",
+        f"  Size: {position.entry_amount_sol:.4f} SOL",
+        f"  Tokens: {position.entry_amount_token:.2f}",
+        f"  Entry: {position.entry_price:.10f} SOL",
+    ]
+
+    if side == "BUY":
+        lines.append(f"  TX: `{position.entry_tx_sig[:16]}...`")
+    else:
+        exit_reason = getattr(position, "exit_reason", "") or ""
+        lines.append(f"  Exit: {position.exit_price:.10f} SOL ({exit_reason})")
+        pnl_emoji = "📈" if pnl_sol >= 0 else "📉"
+        lines.append(f"  PnL: {pnl_emoji} {pnl_sol:+.4f} SOL ({pnl_pct:+.1f}%)")
+
+    return "\n".join(lines)

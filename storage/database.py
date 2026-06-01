@@ -172,6 +172,74 @@ CREATE INDEX IF NOT EXISTS idx_skip_decisions_skipped_at ON skip_decisions(skipp
 CREATE INDEX IF NOT EXISTS idx_skip_decisions_llm_score ON skip_decisions(llm_score);
 CREATE INDEX IF NOT EXISTS idx_loss_analyses_call_id ON loss_analyses(call_id);
 CREATE INDEX IF NOT EXISTS idx_loss_analyses_analyzed_at ON loss_analyses(analyzed_at);
+
+-- Trading bot tables (Phase 1: paper mode)
+CREATE TABLE IF NOT EXISTS positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_address TEXT NOT NULL UNIQUE,
+    token_symbol TEXT,
+    side TEXT DEFAULT 'LONG',
+    entry_tx_sig TEXT,
+    entry_price REAL NOT NULL,
+    entry_amount_sol REAL NOT NULL,
+    entry_amount_token REAL NOT NULL,
+    entry_time TIMESTAMP NOT NULL,
+    peak_price REAL DEFAULT 0.0,
+    current_amount_token REAL NOT NULL,
+    status TEXT DEFAULT 'OPEN',
+    exit_tx_sig TEXT,
+    exit_price REAL,
+    exit_time TIMESTAMP,
+    pnl_sol REAL,
+    pnl_pct REAL,
+    hold_seconds INTEGER,
+    exit_reason TEXT,
+    filter_params_version INTEGER,
+    paper INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id INTEGER REFERENCES positions(id),
+    side TEXT NOT NULL,
+    tx_signature TEXT,
+    amount_in REAL NOT NULL,
+    amount_out REAL NOT NULL,
+    price REAL NOT NULL,
+    fee_sol REAL DEFAULT 0.0,
+    slippage_bps INTEGER DEFAULT 0,
+    priority_fee_sol REAL DEFAULT 0.0,
+    jito_tip_sol REAL DEFAULT 0.0,
+    slot INTEGER,
+    status TEXT DEFAULT 'PENDING',
+    error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS wallet_balances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    sol_balance REAL NOT NULL,
+    token_count INTEGER DEFAULT 0,
+    total_value_sol REAL,
+    unrealized_pnl_sol REAL DEFAULT 0.0,
+    paper INTEGER DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS risk_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    token_address TEXT,
+    details TEXT,
+    paper INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
+CREATE INDEX IF NOT EXISTS idx_positions_token ON positions(token_address);
+CREATE INDEX IF NOT EXISTS idx_trades_position ON trades(position_id);
+CREATE INDEX IF NOT EXISTS idx_risk_events_type ON risk_events(event_type);
 """
 
 
@@ -191,6 +259,10 @@ class Database:
     async def close(self):
         if self.db:
             await self.db.close()
+
+    async def commit(self):
+        if self.db:
+            await self.db.commit()
 
     async def save_call(self, call: CallRecord) -> int:
         cursor = await self.db.execute(
@@ -484,6 +556,109 @@ class Database:
                 "pass_rate": ((total - failed) / total * 100) if total > 0 else 0.0,
             }
         return out
+
+    # Phase 1: trading bot persistence (paper mode)
+
+    async def save_position(self, position) -> int:
+        """Save new position. Returns row id."""
+        cursor = await self.db.execute(
+            """INSERT INTO positions
+            (token_address, token_symbol, side, entry_tx_sig, entry_price,
+             entry_amount_sol, entry_amount_token, entry_time, peak_price,
+             current_amount_token, status, filter_params_version, paper)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                position.token_address, position.token_symbol, position.side,
+                position.entry_tx_sig, position.entry_price,
+                position.entry_amount_sol, position.entry_amount_token,
+                position.entry_time.isoformat() if position.entry_time else None,
+                position.peak_price, position.current_amount_token,
+                position.status, position.filter_params_version,
+                1 if position.paper else 0,
+            ),
+        )
+        await self.db.commit()
+        return cursor.lastrowid
+
+    async def update_position(self, position) -> None:
+        """Update mutable position fields (peak, current_amount, status, exit info)."""
+        await self.db.execute(
+            """UPDATE positions SET
+            peak_price = ?, current_amount_token = ?, status = ?,
+            exit_tx_sig = ?, exit_price = ?, exit_time = ?,
+            pnl_sol = ?, pnl_pct = ?, hold_seconds = ?, exit_reason = ?
+            WHERE id = ?""",
+            (
+                position.peak_price, position.current_amount_token, position.status,
+                position.exit_tx_sig, position.exit_price,
+                position.exit_time.isoformat() if position.exit_time else None,
+                position.pnl_sol, position.pnl_pct, position.hold_seconds,
+                position.exit_reason, position.id,
+            ),
+        )
+        await self.db.commit()
+
+    async def get_open_positions(self):
+        """Return all OPEN positions as list of dicts (caller maps to dataclass)."""
+        cursor = await self.db.execute(
+            "SELECT * FROM positions WHERE status = 'OPEN' ORDER BY entry_time DESC"
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_position(r) for r in rows]
+
+    async def save_trade(self, trade) -> int:
+        """Save a Trade (BUY or SELL). Returns row id."""
+        cursor = await self.db.execute(
+            """INSERT INTO trades
+            (position_id, side, tx_signature, amount_in, amount_out, price,
+             fee_sol, slippage_bps, priority_fee_sol, jito_tip_sol, slot, status, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                trade.position_id, trade.side, trade.tx_signature,
+                trade.amount_in, trade.amount_out, trade.price,
+                trade.fee_sol, trade.slippage_bps, trade.priority_fee_sol,
+                trade.jito_tip_sol, trade.slot, trade.status, trade.error,
+            ),
+        )
+        await self.db.commit()
+        return cursor.lastrowid
+
+    async def save_risk_event(self, event_type: str, token_address: str = "",
+                                details: str = "", paper: bool = True) -> int:
+        """Log a risk event (daily_loss, position_limit, etc)."""
+        cursor = await self.db.execute(
+            """INSERT INTO risk_events
+            (event_type, token_address, details, paper) VALUES (?, ?, ?, ?)""",
+            (event_type, token_address, details, 1 if paper else 0),
+        )
+        await self.db.commit()
+        return cursor.lastrowid
+
+    def _row_to_position(self, row) -> dict:
+        from datetime import datetime
+        return {
+            "id": row["id"],
+            "token_address": row["token_address"],
+            "token_symbol": row["token_symbol"],
+            "side": row["side"],
+            "entry_tx_sig": row["entry_tx_sig"] or "",
+            "entry_price": row["entry_price"] or 0.0,
+            "entry_amount_sol": row["entry_amount_sol"] or 0.0,
+            "entry_amount_token": row["entry_amount_token"] or 0.0,
+            "entry_time": datetime.fromisoformat(row["entry_time"]) if row["entry_time"] else None,
+            "peak_price": row["peak_price"] or 0.0,
+            "current_amount_token": row["current_amount_token"] or 0.0,
+            "status": row["status"],
+            "exit_tx_sig": row["exit_tx_sig"] or "",
+            "exit_price": row["exit_price"] or 0.0,
+            "exit_time": datetime.fromisoformat(row["exit_time"]) if row["exit_time"] else None,
+            "pnl_sol": row["pnl_sol"] or 0.0,
+            "pnl_pct": row["pnl_pct"] or 0.0,
+            "hold_seconds": row["hold_seconds"] or 0,
+            "exit_reason": row["exit_reason"] or "",
+            "filter_params_version": row["filter_params_version"] or 0,
+            "paper": bool(row["paper"]),
+        }
 
     def _row_to_call(self, row) -> CallRecord:
         return CallRecord(

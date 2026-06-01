@@ -160,3 +160,47 @@ class FilterAdjustment:
     new_value: float = 0.0
     reason: str = ""
     confidence: float = 0.0
+
+
+@dataclass
+class Position:
+    token_address: str = ""
+    token_symbol: str = ""
+    side: str = "BUY"
+    entry_tx_sig: str = ""
+    entry_price: float = 0.0
+    entry_amount_sol: float = 0.0
+    entry_amount_token: float = 0.0
+    entry_time: Optional[datetime] = None
+    peak_price: float = 0.0
+    current_amount_token: float = 0.0
+    status: str = "OPEN"
+    exit_tx_sig: str = ""
+    exit_price: float = 0.0
+    exit_time: Optional[datetime] = None
+    pnl_sol: float = 0.0
+    pnl_pct: float = 0.0
+    hold_seconds: int = 0
+    exit_reason: str = ""
+    filter_params_version: int = 0
+    paper: bool = True
+    id: int = 0
+
+
+@dataclass
+class Trade:
+    position_id: int = 0
+    side: str = "BUY"
+    tx_signature: str = ""
+    amount_in: float = 0.0
+    amount_out: float = 0.0
+    price: float = 0.0
+    fee_sol: float = 0.0
+    slippage_bps: int = 300
+    priority_fee_sol: float = 0.0
+    jito_tip_sol: float = 0.0
+    slot: int = 0
+    status: str = "PENDING"
+    error: str = ""
+    id: int = 0
+    created_at: Optional[datetime] = None
