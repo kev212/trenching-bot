@@ -253,3 +253,122 @@ def test_cmd_positions_importable():
     """cmd_positions should be importable and registered."""
     from alerts.bot import cmd_positions
     assert callable(cmd_positions)
+
+
+# ============ Paper mode (no Jupiter) ============
+
+def test_executor_paper_skips_jupiter_when_no_price():
+    """In paper mode, missing GMGN price should not call Jupiter."""
+    from core.trade_executor import TradeExecutor
+    from core.wallet import Wallet
+    from core.jupiter_client import JupiterClient
+    from core.position_manager import PositionManager
+    from core.risk_manager import RiskManager
+    from analysis.models import TokenData, Position
+
+    class FakeJupiter:
+        async def get_quote(self, *a, **k):
+            raise AssertionError("Jupiter should NOT be called in paper mode")
+        async def get_token_price_in_sol_with_retry(self, *a, **k):
+            raise AssertionError("Jupiter should NOT be called in paper mode")
+
+    async def go():
+        executor = TradeExecutor(
+            paper=True,
+            wallet=Wallet(paper=True, starting_balance_sol=10.0),
+            jupiter=FakeJupiter(),
+            positions=PositionManager(db=None),
+            risk=RiskManager({}),
+            config={},
+        )
+        token = TokenData(address="X", symbol="TST", name="Test")
+        token.raw_gmgn = {}
+        result = await executor.execute_buy(token, 0.05)
+        assert result is None
+    asyncio.run(go())
+
+
+def test_executor_paper_uses_gmgn_price():
+    """Paper buy with valid GMGN price should succeed and debit wallet."""
+    from core.trade_executor import TradeExecutor
+    from core.wallet import Wallet
+    from core.jupiter_client import JupiterClient
+    from core.position_manager import PositionManager
+    from core.risk_manager import RiskManager
+    from analysis.models import TokenData
+
+    class FakeJupiter:
+        async def get_quote(self, *a, **k): return {}
+        async def get_token_price_in_sol_with_retry(self, *a, **k): return 0.0
+
+    captured = {}
+
+    class FakePM:
+        db = None
+        async def open_position(self, p):
+            captured["position"] = p
+            return 1
+        async def record_trade(self, t):
+            captured["trade"] = t
+            return 1
+
+    async def go():
+        executor = TradeExecutor(
+            paper=True,
+            wallet=Wallet(paper=True, starting_balance_sol=10.0),
+            jupiter=FakeJupiter(),
+            positions=FakePM(),
+            risk=RiskManager({}),
+            config={},
+        )
+        token = TokenData(address="X", symbol="TST", name="Test")
+        token.raw_gmgn = {"price": {"price": 0.001}}
+        result = await executor.execute_buy(token, 0.05)
+        assert result is not None
+        assert captured["position"].entry_price == 0.001
+        assert captured["position"].entry_amount_token > 0
+        assert captured["position"].raw_gmgn_json != ""
+    asyncio.run(go())
+
+
+def test_executor_paper_simulated_slippage():
+    """Paper buy with GMGN price 0.001 should apply ~1% slippage."""
+    from core.trade_executor import TradeExecutor
+    from core.wallet import Wallet
+    from core.jupiter_client import JupiterClient
+    from core.position_manager import PositionManager
+    from core.risk_manager import RiskManager
+    from analysis.models import TokenData
+
+    class FakeJupiter:
+        async def get_quote(self, *a, **k): return {}
+        async def get_token_price_in_sol_with_retry(self, *a, **k): return 0.0
+
+    captured = {}
+
+    class FakePM:
+        db = None
+        async def open_position(self, p):
+            captured["position"] = p
+            return 1
+        async def record_trade(self, t):
+            captured["trade"] = t
+            return 1
+
+    async def go():
+        executor = TradeExecutor(
+            paper=True,
+            wallet=Wallet(paper=True, starting_balance_sol=10.0),
+            jupiter=FakeJupiter(),
+            positions=FakePM(),
+            risk=RiskManager({}),
+            config={},
+        )
+        token = TokenData(address="X", symbol="TST", name="Test")
+        token.raw_gmgn = {"price": {"price": 0.001}}
+        await executor.execute_buy(token, 0.05)
+        effective_price = 0.001 * 1.01
+        expected_tokens = 0.05 / effective_price
+        actual_tokens = captured["position"].entry_amount_token
+        assert abs(actual_tokens - expected_tokens) < 0.01
+    asyncio.run(go())

@@ -184,6 +184,7 @@ class Position:
     exit_reason: str = ""
     filter_params_version: int = 0
     paper: bool = True
+    raw_gmgn_json: str = ""
     id: int = 0
 
 

@@ -18,7 +18,11 @@ logger = logging.getLogger("position_monitor")
 async def position_monitor(state, db, position_manager: PositionManager,
                             risk: RiskManager, jupiter: JupiterClient,
                             executor: TradeExecutor, config: dict):
-    """High-frequency position state machine. Runs 4×/sec."""
+    """High-frequency position state machine. Runs 4×/sec.
+
+    Paper mode: re-fetches GMGN price for the token to evaluate triggers.
+    Live mode: uses Jupiter (with retry) for real prices.
+    """
     logger.info("Position monitor started")
     check_interval = 0.25
 
@@ -28,6 +32,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
     tp2_mult = config.get("tp2_multiplier", 1.50)
     trailing_pct = config.get("trailing_stop_pct", 15)
     time_limit = config.get("time_limit_seconds", 1800)
+    is_paper = config.get("paper_mode", True)
 
     while True:
         await asyncio.sleep(check_interval)
@@ -38,7 +43,16 @@ async def position_monitor(state, db, position_manager: PositionManager,
 
             for position in open_positions:
                 token_address = position["token_address"]
-                current_price = await jupiter.get_token_price_in_sol_with_retry(token_address)
+
+                if is_paper:
+                    current_price = await executor._simulate_paper_price_walk(
+                        position, "monitor"
+                    )
+                else:
+                    current_price = await jupiter.get_token_price_in_sol_with_retry(
+                        token_address
+                    )
+
                 if current_price <= 0:
                     continue
 
@@ -74,7 +88,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
                     logger.info(
                         f"[POS-MON] {position['token_symbol']} exit: "
                         f"price={current_price:.10f}, entry={entry:.10f}, "
-                        f"peak={peak:.10f}"
+                        f"peak={peak:.10f}, paper={is_paper}"
                     )
 
         except Exception as e:

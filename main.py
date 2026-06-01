@@ -154,6 +154,7 @@ class TrenchingBot:
             positions=self.position_manager,
             risk=self.risk_manager,
             config=self.trading_config,
+            gmgn=self.gmgn,
         )
         logger.warning(
             f"Trading: paper_mode={self.paper_mode}, "

@@ -196,6 +196,7 @@ CREATE TABLE IF NOT EXISTS positions (
     exit_reason TEXT,
     filter_params_version INTEGER,
     paper INTEGER DEFAULT 1,
+    raw_gmgn_json TEXT DEFAULT '',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -254,7 +255,22 @@ class Database:
         await self.db.execute("PRAGMA journal_mode=WAL")
         await self.db.execute("PRAGMA busy_timeout=5000")
         await self.db.executescript(DB_SCHEMA)
+        await self._migrate()
         await self.db.commit()
+
+    async def _migrate(self):
+        """Lightweight ALTER TABLE migrations for existing DBs."""
+        migrations = [
+            ("positions", "raw_gmgn_json", "TEXT DEFAULT ''"),
+        ]
+        for table, column, typedef in migrations:
+            try:
+                await self.db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {typedef}"
+                )
+                logger.info(f"[DB-MIGRATE] Added {table}.{column}")
+            except Exception:
+                pass
 
     async def close(self):
         if self.db:
@@ -565,8 +581,9 @@ class Database:
             """INSERT INTO positions
             (token_address, token_symbol, side, entry_tx_sig, entry_price,
              entry_amount_sol, entry_amount_token, entry_time, peak_price,
-             current_amount_token, status, filter_params_version, paper)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             current_amount_token, status, filter_params_version, paper,
+             raw_gmgn_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 position.token_address, position.token_symbol, position.side,
                 position.entry_tx_sig, position.entry_price,
@@ -575,6 +592,7 @@ class Database:
                 position.peak_price, position.current_amount_token,
                 position.status, position.filter_params_version,
                 1 if position.paper else 0,
+                getattr(position, "raw_gmgn_json", "") or "",
             ),
         )
         await self.db.commit()
@@ -657,6 +675,7 @@ class Database:
             "hold_seconds": row["hold_seconds"] or 0,
             "exit_reason": row["exit_reason"] or "",
             "filter_params_version": row["filter_params_version"] or 0,
+            "raw_gmgn_json": row["raw_gmgn_json"] or "",
             "paper": bool(row["paper"]),
         }
 
