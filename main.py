@@ -490,16 +490,18 @@ class TrenchingBot:
             token.website_url = link.get("website", "")
             token.telegram_url = link.get("telegram", "")
 
-            # Extract clean Twitter handle
-            clean_handle = self.twitter._extract_handle(raw_twitter)
-            token.twitter_username = clean_handle
+            # Parse Twitter input into structured data
+            parsed = self.twitter.parse_twitter_input(raw_twitter)
+            token.twitter_username = parsed["handle"]
 
             influencer_mentions = []
 
-            # 1. Twitter profile + recent tweets (only if valid handle)
-            if clean_handle:
+            logger.info(f"[SOCIAL] {token.symbol}: twitter parsed={parsed}")
+
+            # 1. Profile + recent tweets (if valid handle)
+            if parsed["handle"]:
                 try:
-                    profile = await self.twitter.get_profile(clean_handle)
+                    profile = await self.twitter.get_profile(parsed["handle"])
                     if profile:
                         token.twitter_followers = profile.get("followers", 0)
                         token.twitter_verified = profile.get("verification", {}).get("verified", False)
@@ -508,14 +510,41 @@ class TrenchingBot:
                     logger.warning(f"Twitter profile error for {token.symbol}: {e}")
 
                 try:
-                    tweets = await self.twitter.get_recent_tweets(clean_handle, 3)
+                    tweets = await self.twitter.get_recent_tweets(parsed["handle"], 3)
                     token.recent_tweets = tweets
                 except Exception as e:
                     logger.warning(f"Twitter tweets error for {token.symbol}: {e}")
-            else:
-                logger.info(f"[SOCIAL] {token.symbol}: no valid twitter handle (raw: {raw_twitter})")
 
-            # 2. Website scraping
+            # 2. Specific tweet (if tweet URL)
+            if parsed["tweet_id"]:
+                try:
+                    tweet = await self.twitter.get_tweet(parsed["tweet_id"])
+                    if tweet:
+                        # Add to recent_tweets if not already there
+                        if not token.recent_tweets:
+                            token.recent_tweets = [tweet]
+                        else:
+                            token.recent_tweets.insert(0, tweet)
+                        # Check if tweet author is influencer
+                        author = tweet.get("author", {}).get("screen_name", "").lower()
+                        if author in self.influencers:
+                            influencer_mentions.append({
+                                "handle": author,
+                                "name": self.influencers[author]["name"],
+                                "weight": self.influencers[author]["weight"],
+                                "tweet_text": tweet.get("text", "")[:100],
+                                "likes": tweet.get("likes", 0),
+                            })
+                        logger.info(f"[SOCIAL] {token.symbol}: fetched tweet {parsed['tweet_id']} by @{author}")
+                except Exception as e:
+                    logger.warning(f"Twitter tweet fetch error for {token.symbol}: {e}")
+
+            # 3. Community (if community URL)
+            if parsed["community_id"]:
+                token.has_community = True
+                logger.info(f"[SOCIAL] {token.symbol}: has community {parsed['community_id']}")
+
+            # 4. Website scraping
             if token.website_url:
                 try:
                     token.website_text = await self.scraper.scrape_text(token.website_url)

@@ -58,6 +58,7 @@ class TokenData:
     influencer_mentions: list = field(default_factory=list)
     has_elon_tweet: bool = False
     has_toly_tweet: bool = False
+    has_community: bool = False
     
     # Website content
     website_text: str = ""

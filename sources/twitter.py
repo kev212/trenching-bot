@@ -11,32 +11,60 @@ class TwitterClient:
     def __init__(self):
         self.host = BASE_URL
 
-    INVALID_PATHS = {"i", "status", "statuses", "search", "home", "notifications", "messages", "explore", "settings", "lists", "communities"}
+    INVALID_PATHS = {"i", "status", "statuses", "search", "home", "notifications", "messages", "explore", "settings", "lists"}
 
-    def _extract_handle(self, raw: str) -> str:
-        """Extract clean Twitter handle from URL or raw string."""
+    def parse_twitter_input(self, raw: str) -> dict:
+        """Parse raw Twitter input into structured data.
+        Returns: {handle, tweet_id, community_id, raw_type}
+        """
         if not raw:
-            return ""
+            return {"handle": "", "tweet_id": "", "community_id": "", "raw_type": "empty"}
+
         handle = raw.lstrip("@")
-        
-        # Full URL: https://x.com/username or https://twitter.com/username
+
+        # Full URL: https://x.com/username/status/123456
+        match = re.search(r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]+)/status/(\d+)", handle)
+        if match:
+            candidate = match.group(1)
+            if candidate.lower() not in self.INVALID_PATHS:
+                return {"handle": candidate, "tweet_id": match.group(2), "community_id": "", "raw_type": "tweet_url"}
+            # x.com/i/status/123456 → no handle, but we have tweet ID
+            return {"handle": "", "tweet_id": match.group(2), "community_id": "", "raw_type": "tweet_url"}
+
+        # Full URL: https://x.com/i/communities/123456
+        match = re.search(r"(?:twitter\.com|x\.com)/i/communities/(\d+)", handle)
+        if match:
+            return {"handle": "", "tweet_id": "", "community_id": match.group(1), "raw_type": "community_url"}
+
+        # Full URL: https://x.com/username
         match = re.search(r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]+)(?:/|$)", handle)
         if match:
             candidate = match.group(1)
-            # Skip invalid paths: x.com/i/..., x.com/search, etc.
-            if candidate.lower() in self.INVALID_PATHS:
-                return ""
-            return candidate
-        
-        # Partial path: username/status/... or i/communities/...
-        match = re.match(r"^([A-Za-z0-9_]+)(?:/|$)", handle)
+            if candidate.lower() not in self.INVALID_PATHS:
+                return {"handle": candidate, "tweet_id": "", "community_id": "", "raw_type": "profile_url"}
+            return {"handle": "", "tweet_id": "", "community_id": "", "raw_type": "invalid"}
+
+        # Partial path: username/status/123456
+        match = re.match(r"^([A-Za-z0-9_]+)/status/(\d+)", handle)
         if match:
             candidate = match.group(1)
-            if candidate.lower() in self.INVALID_PATHS:
-                return ""
-            return candidate
-        
-        return ""
+            if candidate.lower() not in self.INVALID_PATHS:
+                return {"handle": candidate, "tweet_id": match.group(2), "community_id": "", "raw_type": "tweet_path"}
+            return {"handle": "", "tweet_id": match.group(2), "community_id": "", "raw_type": "tweet_path"}
+
+        # Partial path: i/communities/123456
+        match = re.match(r"^i/communities/(\d+)", handle)
+        if match:
+            return {"handle": "", "tweet_id": "", "community_id": match.group(1), "raw_type": "community_path"}
+
+        # Plain handle
+        match = re.match(r"^([A-Za-z0-9_]+)$", handle)
+        if match:
+            candidate = match.group(1)
+            if candidate.lower() not in self.INVALID_PATHS:
+                return {"handle": candidate, "tweet_id": "", "community_id": "", "raw_type": "handle"}
+
+        return {"handle": "", "tweet_id": "", "community_id": "", "raw_type": "unknown"}
 
     async def _get(self, path: str, params: dict = None) -> dict:
         try:
@@ -59,18 +87,12 @@ class TwitterClient:
             return {}
 
     async def get_profile(self, handle: str) -> dict:
-        clean = self._extract_handle(handle)
-        if not clean:
-            return {}
-        data = await self._get(f"/2/profile/{clean}")
+        data = await self._get(f"/2/profile/{handle}")
         return data.get("user", {})
 
     async def get_recent_tweets(self, handle: str, count: int = 3) -> list:
-        clean = self._extract_handle(handle)
-        if not clean:
-            return []
         data = await self._get(
-            f"/2/profile/{clean}/statuses",
+            f"/2/profile/{handle}/statuses",
             {"count": count},
         )
         return data.get("results", [])

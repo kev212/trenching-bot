@@ -33,13 +33,15 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict) -> str:
     links.append(f"  • Solscan: https://solscan.io/token/{token.address}")
 
     social_text = ""
-    if token.twitter_username or token.website_url or token.influencer_mentions:
+    if token.twitter_username or token.website_url or token.influencer_mentions or token.has_community:
         social_text = "\n🐦 Social Analysis:\n"
         if token.twitter_username:
             verified = "✓" if token.twitter_verified else ""
             social_text += f"  • Twitter: @{token.twitter_username} ({token.twitter_followers:,} followers {verified})\n"
         if token.website_url:
             social_text += f"  • Website: {token.website_url}\n"
+        if token.has_community:
+            social_text += f"  • Community: Yes\n"
         if token.influencer_mentions:
             for inf in token.influencer_mentions[:3]:
                 social_text += f"  • 🔥 @{inf['handle']} tweeted ({inf['likes']:,} likes)\n"
