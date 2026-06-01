@@ -117,6 +117,7 @@ class TrenchingBot:
         self.tasks = {
             "gmgn_poller": asyncio.create_task(self._gmgn_poller()),
             "trenches_poller": asyncio.create_task(self._trenches_poller()),
+            "retry_scheduler": asyncio.create_task(self._retry_scheduler()),
             "worker_0": asyncio.create_task(self._token_worker(0)),
             "price_monitor": asyncio.create_task(self._run_forever("price_monitor", price_monitor)),
             "hourly_recap": asyncio.create_task(self._run_forever("hourly_recap", hourly_recap)),
@@ -163,16 +164,15 @@ class TrenchingBot:
                     if not addr:
                         continue
 
-                    # Skip if already processed
                     if addr in seen:
                         continue
 
-                    # Skip if in retry queue and not ready
+                    if await self.state.is_duplicate(addr):
+                        continue
+
                     if addr in self.state.retry_queue:
                         retry_info = self.state.retry_queue[addr]
                         if retry_info["retries"] >= 3:
-                            continue
-                        if time.time() - retry_info["timestamp"] < 300:
                             continue
 
                     seen.add(addr)
@@ -216,11 +216,11 @@ class TrenchingBot:
                         continue
                     if addr in self.seen_trenches:
                         continue
+                    if await self.state.is_duplicate(addr):
+                        continue
                     if addr in self.state.retry_queue:
                         retry_info = self.state.retry_queue[addr]
                         if retry_info["retries"] >= 3:
-                            continue
-                        if time.time() - retry_info["timestamp"] < 300:
                             continue
                     self.seen_trenches.add(addr)
                     await self.queue.put(token)
@@ -246,6 +246,53 @@ class TrenchingBot:
                     logger.error(f"Trenches poller error: {e}")
                     await asyncio.sleep(base_delay)
 
+    async def _retry_scheduler(self):
+        """Periodically re-queue tokens whose retry delay has expired.
+
+        Without this, tokens marked for retry sit forever — pollers skip them
+        (in their local `seen` set), and nothing wakes them up.
+        """
+        logger.info("Retry scheduler started")
+        scan_interval = 30  # seconds
+
+        while True:
+            try:
+                now = time.time()
+                requeued = 0
+                expired = []
+
+                async with self.state._lock:
+                    for addr, info in list(self.state.retry_queue.items()):
+                        if info["retries"] >= 3:
+                            continue
+                        if await self.state.is_duplicate(addr):
+                            expired.append(addr)
+                            continue
+                        if now - info["timestamp"] < 300:
+                            continue
+                        # Re-queue this token; do NOT update timestamp here —
+                        # `should_retry` in worker checks `now - timestamp >= 300`,
+                        # and `add_retry` will reset timestamp when it fails again.
+                        await self.queue.put({"address": addr, "_retry": True, "retries": info["retries"]})
+                        requeued += 1
+
+                    for addr in expired:
+                        self.state.retry_queue.pop(addr, None)
+
+                if requeued > 0 or expired:
+                    logger.info(
+                        f"[RETRY-SCHED] requeued={requeued} expired={len(expired)} queue={self.queue.qsize()}"
+                    )
+
+                await self.state.cleanup_retry_queue()
+                await asyncio.sleep(scan_interval)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Retry scheduler error: {e}")
+                await asyncio.sleep(scan_interval)
+
     async def _token_worker(self, worker_id: int):
         logger.info(f"Worker {worker_id} started")
         processed = 0
@@ -255,19 +302,27 @@ class TrenchingBot:
                 token_info = await self.queue.get()
                 addr = token_info.get("address") or token_info.get("token_address", "")
                 symbol = token_info.get("symbol", "?") or "?"
+                is_retry = bool(token_info.get("_retry"))
 
-                # Check if already processed (skip forever)
+                if not addr:
+                    continue
+
                 if await self.state.is_duplicate(addr):
                     continue
 
-                # Check if in retry queue and ready
-                is_retry = addr in self.state.retry_queue
                 if is_retry:
                     if not await self.state.should_retry(addr):
-                        continue  # not ready or max retries
+                        # Lost race — put back at end of queue, skip for now
+                        await self.queue.put(token_info)
+                        await asyncio.sleep(0.1)
+                        continue
 
                 processed += 1
-                logger.info(f"[W{worker_id}] #{processed} {symbol} ({addr[:8]}...) retry:{is_retry} q:{self.queue.qsize()}")
+                retry_count = (await self.state.get_retry_info(addr)).get("retries", 0)
+                logger.info(
+                    f"[W{worker_id}] #{processed} {symbol} ({addr[:8]}...) "
+                    f"retry:{is_retry} ({retry_count}/3) q:{self.queue.qsize()}"
+                )
 
                 await self._process_token(addr, token_info)
                 await asyncio.sleep(1)
@@ -280,32 +335,35 @@ class TrenchingBot:
                 await asyncio.sleep(1)
 
     async def _process_token(self, address: str, token_info: dict):
-        # Quick pre-filter from trending data (no API call needed)
-        mc = token_info.get("market_cap", 0) or 0
-        holder_count = token_info.get("holder_count", 0) or 0
-        is_wash = token_info.get("is_wash_trading", False)
+        is_retry = token_info.get("_retry", False)
         symbol = token_info.get("symbol", "?") or "?"
 
-        if mc <= 0:
-            logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=0")
-            self.state.metrics.record_call("SKIP")
-            return
-        if mc < 7000:
-            logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=${mc:,.0f} < $7K")
-            self.state.metrics.record_call("SKIP")
-            return
-        if mc > 200000:
-            logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=${mc:,.0f} > $200K")
-            self.state.metrics.record_call("SKIP")
-            return
-        if holder_count < 100:
-            logger.info(f"[SKIP] {symbol} ({address[:8]}): holders={holder_count} < 100")
-            self.state.metrics.record_call("SKIP")
-            return
-        if is_wash:
-            logger.info(f"[SKIP] {symbol} ({address[:8]}): wash_trading=True")
-            self.state.metrics.record_call("SKIP")
-            return
+        if not is_retry:
+            # Quick pre-filter from trending data (no API call needed)
+            mc = token_info.get("market_cap", 0) or 0
+            holder_count = token_info.get("holder_count", 0) or 0
+            is_wash = token_info.get("is_wash_trading", False)
+
+            if mc <= 0:
+                logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=0")
+                self.state.metrics.record_call("SKIP")
+                return
+            if mc < 7000:
+                logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=${mc:,.0f} < $7K")
+                self.state.metrics.record_call("SKIP")
+                return
+            if mc > 200000:
+                logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=${mc:,.0f} > $200K")
+                self.state.metrics.record_call("SKIP")
+                return
+            if holder_count < 100:
+                logger.info(f"[SKIP] {symbol} ({address[:8]}): holders={holder_count} < 100")
+                self.state.metrics.record_call("SKIP")
+                return
+            if is_wash:
+                logger.info(f"[SKIP] {symbol} ({address[:8]}): wash_trading=True")
+                self.state.metrics.record_call("SKIP")
+                return
 
         # Acquire rate limit slot + fetch data sequentially (no burst)
         await self.rate_limiter.acquire()
