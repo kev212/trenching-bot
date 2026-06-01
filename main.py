@@ -576,14 +576,29 @@ class TrenchingBot:
             token.influencer_mentions = influencer_mentions
 
             # 5. LLM #1: Social analysis
+            # Calculate age description
+            if token.creation_timestamp > 0:
+                age_min = (datetime.now(timezone.utc).timestamp() - token.creation_timestamp) / 60
+                if age_min < 60:
+                    age_description = f"{age_min:.0f} minutes ago"
+                else:
+                    age_description = f"{age_min/60:.1f} hours ago"
+            else:
+                age_description = "unknown"
+
             social_prompt = SOCIAL_ANALYSIS_USER.format(
+                token_name=token.name,
+                token_symbol=token.symbol,
+                market_cap=token.market_cap,
+                age_description=age_description,
+                holders_count=token.holders_count,
                 twitter_username=token.twitter_username or "none",
                 twitter_followers=token.twitter_followers,
                 twitter_verified="Yes" if token.twitter_verified else "No",
                 twitter_description=token.twitter_description[:200] or "No description",
-                recent_tweets=json.dumps(token.recent_tweets[:3], indent=2) if token.recent_tweets else "No tweets found",
+                recent_tweets=json.dumps(token.recent_tweets[:3], indent=2) if token.recent_tweets else "No tweets from this account yet",
                 website_text=token.website_text[:500] or "No website content",
-                search_results=json.dumps(search_results[:5], indent=2) if search_results else "No search results",
+                search_results=json.dumps(search_results[:5], indent=2) if search_results else "No search results yet",
                 influencer_mentions=json.dumps(influencer_mentions, indent=2) if influencer_mentions else "No influencer mentions",
             )
 
@@ -603,7 +618,18 @@ class TrenchingBot:
                     token.social_narrative_score = 0
                     token.social_narrative_text = ""
 
-            logger.info(f"[SOCIAL] {token.symbol} ({token.address[:8]}): score={token.social_narrative_score:.0f}/100, project={token.project_type}")
+            # Score floor: tokens with basic social links get minimum 15pts
+            has_basic_social = bool(token.twitter_username or token.website_url or token.telegram_url)
+            if has_basic_social and token.social_narrative_score < 15:
+                token.social_narrative_score = 15
+
+            # Bonus for influencer/KOL mentions
+            if influencer_mentions:
+                max_influencer_weight = max(inf.get("weight", 0) for inf in influencer_mentions)
+                influencer_bonus = min(max_influencer_weight, 20)
+                token.social_narrative_score = min(100, token.social_narrative_score + influencer_bonus)
+
+            logger.info(f"[SOCIAL] {token.symbol} ({token.address[:8]}): score={token.social_narrative_score:.0f}/100, project={token.project_type}, social_links={has_basic_social}, influencers={len(influencer_mentions)}")
 
         except Exception as e:
             logger.error(f"Social analysis error for {token.symbol}: {e}")

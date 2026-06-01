@@ -148,21 +148,57 @@ Respond with JSON array:
   {{"token": "<symbol>", "reason": "<1-sentence reason>"}}
 ]"""
 
-SOCIAL_ANALYSIS_SYSTEM = """You are a crypto social analyst. Analyze the social media data of a Solana token and provide insights.
+SOCIAL_ANALYSIS_SYSTEM = """You are a crypto social analyst. Analyze the social media data of a Solana meme token and provide a fair assessment.
 
-Your task is to determine:
-1. What kind of project is this? (web3_project, meme, scam, or unknown)
-2. What's the context of the social media presence?
-3. How strong is the social narrative?
+IMPORTANT CONTEXT: This is typically a NEW meme token (hours old). Most new tokens have minimal social presence. This is NORMAL.
 
 SCORING GUIDE (0-100):
-- Influencer mentions: elon=40pts, toly=30pts, others=5-20pts
-- Project quality: real project=20pts, active dev=10pts, roadmap=5pts
-- Engagement: followers>100K=5pts, likes>1K=5pts, verified=5pts
+**Basic Presence (up to 25pts):**
+- Has Twitter account: +15pts
+- Has website: +10pts
+- Has Telegram: +5pts
+
+**Twitter Quality (up to 25pts):**
+- Followers > 100: +5pts
+- Followers > 1,000: +10pts
+- Followers > 10,000: +15pts
+- Verified account: +10pts
+
+**Community Activity (up to 20pts):**
+- Recent tweets about this token (search results): +10pts
+- Multiple people discussing it: +10pts
+- Active Twitter account (recent posts): +5pts
+
+**Influencer/KOL Mentions (up to 30pts):**
+- Elon Musk mentioned: +30pts
+- Toly (aeyakovenko) mentioned: +25pts
+- Other KOL/smart money mentioned: +10-20pts
+- Any notable crypto account: +5-10pts
+
+**Project Signals (up to 20pts):**
+- Real web3 project (not just meme): +15pts
+- Active development visible: +10pts
+- Roadmap or whitepaper: +5pts
+
+SCORING INTERPRETATION:
+- 0-10: No social presence at all (no Twitter, no website)
+- 15-30: Basic social links exist but minimal activity (NORMAL for new tokens)
+- 30-50: Good social presence with some engagement
+- 50-70: Strong social presence, influencer interest
+- 70+: Viral/social media storm (rare)
+
+DO NOT penalize for being a new token with low followers. Focus on what EXISTS, not what's missing.
 
 Respond ONLY in JSON format."""
 
-SOCIAL_ANALYSIS_USER = """Analyze this Solana token's social media presence:
+SOCIAL_ANALYSIS_USER = """Analyze this Solana meme token's social media presence:
+
+TOKEN CONTEXT:
+- Name: {token_name}
+- Symbol: {token_symbol}
+- Market Cap: ${market_cap:,.0f}
+- Created: {age_description}
+- Holders: {holders_count}
 
 Twitter: @{twitter_username}
 Followers: {twitter_followers}
@@ -181,7 +217,8 @@ Search Results (by contract address):
 Influencer Mentions:
 {influencer_mentions}
 
-What is this token? Is it a real web3 project or just a meme? Who is talking about it? What's the context?
+IMPORTANT: This is a NEW meme token. A score of 15-30 is NORMAL if basic social links exist.
+Focus on what social presence EXISTS and whether there's any community activity around this token.
 
 Respond with this exact JSON format:
 {{
