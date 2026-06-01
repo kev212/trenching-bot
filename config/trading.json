@@ -14,7 +14,6 @@
   "tp1_multiplier": 1.30,
   "tp1_sell_pct": 33,
   "tp2_multiplier": 1.50,
-  "tp2_sell_pct": 33,
   "trailing_stop_pct": 15,
   "time_limit_seconds": 1800,
   "daily_loss_limit_sol": 0.5,
