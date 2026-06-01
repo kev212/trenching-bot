@@ -147,6 +147,12 @@ class TrenchingBot:
         )
         self.position_manager = PositionManager(self.db)
         self.risk_manager = RiskManager(self.trading_config, db=self.db)
+        from core.price_oracle import PriceOracle
+        self.price_oracle = PriceOracle(
+            gmgn=self.gmgn,
+            jupiter=self.jupiter,
+            proxy=settings.http_proxy,
+        )
         self.executor = TradeExecutor(
             paper=self.paper_mode,
             wallet=self.wallet,
@@ -155,6 +161,7 @@ class TrenchingBot:
             risk=self.risk_manager,
             config=self.trading_config,
             gmgn=self.gmgn,
+            price_oracle=self.price_oracle,
         )
         logger.warning(
             f"Trading: paper_mode={self.paper_mode}, "
@@ -170,6 +177,7 @@ class TrenchingBot:
         await self.db.init()
         await self.state.load_filter_params()
         await self.jupiter.init()
+        await self.price_oracle.init()
 
         # Test GMGN connection
         logger.info("Testing GMGN API...")
@@ -990,6 +998,7 @@ class TrenchingBot:
         for task in self.tasks.values():
             task.cancel()
         await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        await self.price_oracle.close()
         await self.db.close()
         await dispatcher.close()
         logger.info("Shutdown complete")

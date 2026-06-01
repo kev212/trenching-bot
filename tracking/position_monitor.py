@@ -37,6 +37,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
     time_limit = config.get("time_limit_seconds", 1800)
     is_paper = config.get("paper_mode", True)
     min_hold_seconds = config.get("min_hold_seconds", 30)
+    extreme_tp_mult = config.get("extreme_tp_mult", 2.0)
 
     while True:
         await asyncio.sleep(check_interval)
@@ -77,18 +78,28 @@ async def position_monitor(state, db, position_manager: PositionManager,
                 )
                 in_warmup = held_so_far < min_hold_seconds
 
+                tp1_fire_price = entry * tp1_mult
+                tp2_fire_price = entry * tp2_mult
+                extreme_tp_price = entry * extreme_tp_mult
+
                 if current_price <= entry * (1 - stop_loss_pct / 100):
                     await executor.execute_sell(position, 100, "SL")
                     triggered = True
                     last_reason = "SL"
-                elif not in_warmup and not already_partial and current_price >= entry * tp1_mult:
+                elif not already_partial and current_price >= extreme_tp_price:
+                    await executor.execute_sell(position, tp1_pct, "TP1-EXTREME")
+                    position["exit_reason"] = "TP1"
+                    await position_manager.update_position(position)
+                    triggered = True
+                    last_reason = "TP1"
+                elif not in_warmup and not already_partial and current_price >= tp1_fire_price:
                     await executor.execute_sell(position, tp1_pct, "TP1")
                     position["exit_reason"] = "TP1"
                     await position_manager.update_position(position)
                     triggered = True
                     last_reason = "TP1"
                 elif not in_warmup and position.get("exit_reason") == "TP1" and \
-                        current_price >= entry * tp2_mult:
+                        current_price >= tp2_fire_price:
                     remaining_pct = 100 - tp1_pct
                     await executor.execute_sell(position, remaining_pct, "TP2")
                     position["exit_reason"] = "TP2"

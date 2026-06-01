@@ -676,3 +676,186 @@ def test_paper_buy_warms_price_cache():
         assert cached["price"] == 0.0000806914
         assert (time.time() - cached["ts"]) < 1.0
     asyncio.run(go())
+
+
+# ============ Extreme TP (during warmup) ============
+
+def test_extreme_tp_fires_during_warmup():
+    """TP1 should fire during 30s warmup if price >= 2x entry (extreme move).
+
+    Bug: previously only SL could fire during warmup, so an instant 2x pump
+    would be missed and we'd sell too late. The new 'extreme_tp_mult' gate
+    allows early TP-fire for outsized moves.
+    """
+    def should_trigger_extreme_tp(position, current_price, entry, tp1_mult, extreme_tp_mult):
+        already_partial = bool(position.get("exit_reason")) and \
+            position.get("exit_reason") in ("TP1", "TP2")
+        return not already_partial and current_price >= entry * extreme_tp_mult
+
+    entry = 0.0001
+    tp1_mult = 1.30
+    extreme_tp_mult = 2.0
+    pos_clean = {"exit_reason": None}
+
+    price_3x = 0.0003
+    price_1_5x = 0.00015
+    price_1_2x = 0.00012
+
+    assert should_trigger_extreme_tp(pos_clean, price_3x, entry, tp1_mult, extreme_tp_mult) is True
+    assert should_trigger_extreme_tp(pos_clean, price_1_5x, entry, tp1_mult, extreme_tp_mult) is False
+    assert should_trigger_extreme_tp(pos_clean, price_1_2x, entry, tp1_mult, extreme_tp_mult) is False
+
+    pos_after_tp1 = {"exit_reason": "TP1"}
+    assert should_trigger_extreme_tp(pos_after_tp1, price_3x, entry, tp1_mult, extreme_tp_mult) is False
+
+
+def test_trading_config_has_extreme_tp_mult():
+    """Config should expose extreme_tp_mult (default 2.0)."""
+    import json
+    with open("/Users/khezuma/workspace/trenching/config/trading.json") as f:
+        cfg = json.load(f)
+    assert "extreme_tp_mult" in cfg
+    assert cfg["extreme_tp_mult"] == 2.0
+
+
+# ============ Price Oracle ============
+
+def test_price_oracle_median_of_two():
+    """When 2 of 3 sources return prices, oracle returns median of those."""
+    from core.price_oracle import PriceOracle
+
+    class FakeResp:
+        def __init__(self, data, status=200):
+            self.data = data
+            self.status = status
+        async def json(self):
+            return self.data
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+
+    class FakeSession:
+        def get(self, url, **kwargs):
+            params = kwargs.get("params") or {}
+            ids = params.get("ids", "")
+            if "dexscreener" in url:
+                return FakeResp({
+                    "pairs": [{"priceNative": "0.0001", "liquidity": {"usd": 5000}}]
+                })
+            if "price.jup.ag" in url:
+                if "So111" in str(ids):
+                    return FakeResp({"data": {"So11111111111111111111111111111111111111112": {"price": "150.0"}}})
+                return FakeResp({"data": {"ADDR123": {"price": "0.015"}}})
+            return FakeResp({}, status=404)
+
+    class FakeGmgn:
+        async def get_token_info(self, addr): return {}
+
+    async def go():
+        oracle = PriceOracle(gmgn=FakeGmgn(), proxy="", timeout=5)
+        oracle._session = FakeSession()
+        sol_usd = await oracle.get_sol_price_usd()
+        assert sol_usd == 150.0
+        price = await oracle.get_price_in_sol("ADDR123")
+        assert price > 0
+    asyncio.run(go())
+
+
+def test_price_oracle_cache_ttl():
+    """3s cache: second call within 3s should not refetch."""
+    from core.price_oracle import PriceOracle, CACHE_TTL
+    from unittest.mock import AsyncMock
+
+    oracle = PriceOracle(proxy="", timeout=5)
+    oracle._session = AsyncMock()
+    oracle._cache["ADDR"] = {"ts": __import__("time").time(), "price": 0.0001}
+    import asyncio
+    price = asyncio.run(oracle.get_price_in_sol("ADDR"))
+    assert price == 0.0001
+    assert CACHE_TTL == 3.0
+
+
+def test_paper_price_walk_uses_oracle_first():
+    """_simulate_paper_price_walk should prefer oracle over GMGN."""
+    from core.trade_executor import TradeExecutor
+    from core.wallet import Wallet
+    from core.jupiter_client import JupiterClient
+    from core.position_manager import PositionManager
+    from core.risk_manager import RiskManager
+
+    class FakeJupiter:
+        async def get_quote(self, *a, **k): return {}
+        async def get_token_price_in_sol_with_retry(self, *a, **k): return 0.0
+
+    class FakePM:
+        db = None
+        async def open_position(self, p): return 1
+        async def record_trade(self, t): return 1
+
+    class FakeOracle:
+        async def get_price_in_sol(self, addr): return 0.0005
+
+    class FakeGmgn:
+        async def get_token_info(self, addr):
+            return {"price": {"price": 0.00001}}
+
+    async def go():
+        executor = TradeExecutor(
+            paper=True,
+            wallet=Wallet(paper=True, starting_balance_sol=10.0),
+            jupiter=FakeJupiter(),
+            positions=FakePM(),
+            risk=RiskManager({}),
+            config={},
+            gmgn=FakeGmgn(),
+            price_oracle=FakeOracle(),
+        )
+        position = {
+            "token_address": "X1",
+            "entry_price": 0.0001,
+            "current_amount_token": 1000.0,
+            "raw_gmgn_json": "",
+        }
+        price = await executor._simulate_paper_price_walk(position, "test")
+        assert price == 0.0005
+    asyncio.run(go())
+
+
+def test_executor_buy_uses_oracle_first():
+    """execute_buy should use oracle price when available."""
+    from core.trade_executor import TradeExecutor
+    from core.wallet import Wallet
+    from core.jupiter_client import JupiterClient
+    from core.position_manager import PositionManager
+    from core.risk_manager import RiskManager
+    from analysis.models import TokenData
+
+    class FakeJupiter:
+        async def get_quote(self, *a, **k): return {}
+        async def get_token_price_in_sol_with_retry(self, *a, **k): return 0.0
+
+    class FakePM:
+        db = None
+        async def open_position(self, p): return 1
+        async def record_trade(self, t): return 1
+
+    class FakeOracle:
+        async def get_price_in_sol(self, addr): return 0.001
+
+    async def go():
+        executor = TradeExecutor(
+            paper=True,
+            wallet=Wallet(paper=True, starting_balance_sol=10.0),
+            jupiter=FakeJupiter(),
+            positions=FakePM(),
+            risk=RiskManager({}),
+            config={},
+            price_oracle=FakeOracle(),
+        )
+        token = TokenData(address="Z1", symbol="T", name="n")
+        token.raw_gmgn = {"price": {"price": 0.00001}}
+        position = await executor.execute_buy(token, 0.05)
+        assert position is not None
+        assert abs(position.entry_price - 0.001) < 1e-9
+        expected_tokens = 0.05 / (0.001 * 1.01)
+        assert abs(position.entry_amount_token - expected_tokens) < 1e-6
+    asyncio.run(go())

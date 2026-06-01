@@ -27,7 +27,7 @@ class TradeExecutor:
 
     def __init__(self, paper: bool, wallet: Wallet, jupiter: JupiterClient,
                  positions: PositionManager, risk: RiskManager, config: dict,
-                 gmgn=None):
+                 gmgn=None, price_oracle=None):
         self.paper = paper
         self.wallet = wallet
         self.jupiter = jupiter
@@ -35,6 +35,7 @@ class TradeExecutor:
         self.risk = risk
         self.config = config
         self.gmgn = gmgn
+        self.price_oracle = price_oracle
         self.max_price_impact_pct = config.get("max_price_impact_pct", 5.0)
         self.slippage_bps = config.get("slippage_bps", DEFAULT_SLIPPAGE_BPS)
         self._paper_price_cache: dict = {}
@@ -57,7 +58,14 @@ class TradeExecutor:
         price_impact = 0.0
 
         if self.paper:
-            entry_price = self._gmgn_price_in_sol(token)
+            entry_price = 0.0
+            if self.price_oracle:
+                try:
+                    entry_price = await self.price_oracle.get_price_in_sol(token.address)
+                except Exception as e:
+                    logger.debug(f"[EXEC] oracle buy price error: {e}")
+            if entry_price <= 0:
+                entry_price = self._gmgn_price_in_sol(token)
             if entry_price <= 0:
                 logger.warning(
                     f"[EXEC] TRADE-SKIPPED {token.symbol} ({token.address[:8]}): "
@@ -195,8 +203,8 @@ class TradeExecutor:
     async def _simulate_paper_price_walk(self, position: dict, reason: str) -> float:
         """Get current token price for paper mode with 5s cache.
 
-        Caches price per token_address to avoid hammering GMGN at 4×/sec.
-        Falls back to stored entry-time price if GMGN is unavailable.
+        Priority: oracle (3-source median) > GMGN info > raw_gmgn_json > entry_price.
+        Caches price per token_address to avoid hammering sources at 4×/sec.
         """
         import time
         token_address = position.get("token_address", "")
@@ -206,7 +214,14 @@ class TradeExecutor:
             return cached["price"]
 
         price = 0.0
-        if self.gmgn:
+
+        if self.price_oracle:
+            try:
+                price = await self.price_oracle.get_price_in_sol(token_address)
+            except Exception as e:
+                logger.debug(f"[EXEC] oracle paper price error: {e}")
+
+        if price <= 0 and self.gmgn:
             try:
                 info = await self.gmgn.get_token_info(token_address)
                 price_obj = info.get("price", {}) if isinstance(info.get("price"), dict) else {}
