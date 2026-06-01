@@ -62,13 +62,14 @@ class GMGNClient:
             logger.error(f"GMGN {path} error: {e}")
             return {}
 
-    async def _post(self, path: str, body: dict = None) -> dict:
+    async def _post(self, path: str, query: dict = None, body: dict = None) -> dict:
         try:
-            query = self._auth_params()
+            auth = self._auth_params()
+            full_query = {**(query or {}), **auth}
             async with AsyncSession(impersonate="chrome") as session:
                 resp = await session.post(
                     f"{self.host}{path}",
-                    params=query,
+                    params=full_query,
                     json=body or {},
                     headers=self._headers(),
                     proxies=self._proxy_dict(),
@@ -102,13 +103,13 @@ class GMGNClient:
         return await self._get("/v1/market/token_top_holders", {"chain": "sol", "address": address})
 
     async def get_trenches(self, limit: int = 20) -> list:
+        query = {"chain": "sol"}
         body = {
-            "chain": "sol",
             "types": ["new_creation"],
             "platforms": ["Pump.fun"],
             "limit": limit,
         }
-        data = await self._post("/v1/trenches", body)
+        data = await self._post("/v1/trenches", query, body)
         if isinstance(data, list):
             return data
         return data.get("items", []) if isinstance(data, dict) else []
