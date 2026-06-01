@@ -466,6 +466,42 @@ class TrenchingBot:
         # Hard gate: ALL filters must pass
         all_passed, failures = check_hard_gate(fv)
 
+        # Phase E2-Alert: log every hard-gate outcome (pass or fail) for retro-tuning
+        try:
+            retry_info_for_log = await self.state.get_retry_info(address)
+            retry_count_for_log = retry_info_for_log.get("retries", 0)
+            age_min_for_log = (
+                (time.time() * 1000 - max(token.creation_timestamp or 0, token.open_timestamp or 0)) / 60000
+                if (token.creation_timestamp or token.open_timestamp) else 0.0
+            )
+            filter_results_dict = {
+                name: {
+                    "passed": bool(getattr(fv, name, {}).get("passed", False)) if hasattr(fv, name) else False,
+                    "value": getattr(fv, name, {}).get("note", "") if hasattr(fv, name) else "",
+                }
+                for name in [
+                    "funded_wallet_age", "min_market_cap", "max_market_cap",
+                    "insider_concentration", "fee_tier", "rug_probability",
+                    "holder_distribution", "token_age", "min_holders", "min_total_fee",
+                ]
+            }
+            await self.db.save_filter_outcome(
+                token_address=address,
+                token_name=token.name,
+                token_symbol=token.symbol,
+                market_cap=token.market_cap,
+                holders_count=token.holders_count,
+                age_minutes=age_min_for_log,
+                filter_results=filter_results_dict,
+                passed=all_passed,
+                failed_filters=failures,
+                was_retried=is_retry,
+                retry_count=retry_count_for_log,
+                filter_params_version=await self.state.get_filter_version(),
+            )
+        except Exception as e:
+            logger.debug(f"filter_outcome save failed for {address[:8]}: {e}")
+
         if all_passed:
             logger.info(f"[PASS] {token.symbol} ({address[:8]}): all filters passed")
             await self.state.mark_processed(address)
@@ -516,6 +552,31 @@ class TrenchingBot:
         if decision.key_factors:
             logger.info(f"[LLM-FACTORS] {token.symbol}: {decision.key_factors}")
         self.state.metrics.record_call(decision.verdict.value)
+
+        # Phase E2-Alert: log every SKIP from LLM #2 for retro-tuning
+        if decision.verdict == Verdict.SKIP:
+            try:
+                age_min_skip = (
+                    (time.time() * 1000 - max(token.creation_timestamp or 0, token.open_timestamp or 0)) / 60000
+                    if (token.creation_timestamp or token.open_timestamp) else 0.0
+                )
+                social_score_skip = float(fv.social_narrative.get("score", 0)) if hasattr(fv, "social_narrative") else 0.0
+                await self.db.save_skip_decision(
+                    token_address=address,
+                    token_name=token.name,
+                    token_symbol=token.symbol,
+                    llm_score=decision.score,
+                    llm_reasoning=decision.reasoning,
+                    llm_key_factors=decision.key_factors,
+                    market_cap=token.market_cap,
+                    holders_count=token.holders_count,
+                    age_minutes=age_min_skip,
+                    top10_pct=token.top10_hold_pct,
+                    social_score=social_score_skip,
+                    feature_vector=fv_dict,
+                )
+            except Exception as e:
+                logger.debug(f"skip_decision save failed for {address[:8]}: {e}")
 
         # Alert if APE or WATCH
         if decision.verdict in (Verdict.APE, Verdict.WATCH):

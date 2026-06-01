@@ -79,6 +79,27 @@ async def _run_optimization(state, db, mimo: MiMoClient):
 
         filter_perf = _calculate_filter_performance(calls, current_params.get("filters", {}))
 
+        # Phase E2-Alert: enrich with filter_outcomes pass rates (from data, not theory)
+        try:
+            real_filter_perf = await db.get_filter_performance_since(
+                datetime.now(timezone.utc) - timedelta(hours=24)
+            )
+            for fname, stats in real_filter_perf.items():
+                if fname in filter_perf:
+                    filter_perf[fname].update(stats)
+                else:
+                    filter_perf[fname] = stats
+        except Exception as e:
+            logger.warning(f"Could not load filter_outcomes for perf analysis: {e}")
+
+        # Phase E2-Alert: pull actual saved loss analyses (LLM #3 root causes)
+        try:
+            real_loss_analyses = await _get_recent_loss_analyses(db, limit=10)
+            if real_loss_analyses:
+                loss_data = real_loss_analyses
+        except Exception as e:
+            logger.warning(f"Could not load loss_analyses: {e}")
+
         prompt = OPTIMIZER_USER.format(
             total_calls=len(calls),
             wins=len(wins),
@@ -139,6 +160,31 @@ def _calculate_filter_performance(calls: list, filters: dict) -> dict:
     for name in filters:
         perf[name] = {"enabled": filters[name].get("enabled", True)}
     return perf
+
+
+async def _get_recent_loss_analyses(db, limit: int = 10) -> list:
+    """Pull recent LLM #3 loss analyses from DB (Phase E2-Alert)."""
+    cursor = await db.db.execute(
+        """SELECT token_symbol, root_cause, wrong_filter, suggestion, pattern,
+                  confidence, max_gain
+           FROM loss_analyses
+           ORDER BY analyzed_at DESC
+           LIMIT ?""",
+        (limit,),
+    )
+    rows = await cursor.fetchall()
+    return [
+        {
+            "token": row["token_symbol"],
+            "root_cause": row["root_cause"],
+            "wrong_filter": row["wrong_filter"],
+            "suggestion": row["suggestion"],
+            "pattern": row["pattern"],
+            "confidence": row["confidence"],
+            "max_gain": row["max_gain"],
+        }
+        for row in rows
+    ]
 
 
 def _validate_adjustments(suggestions: list, rules: dict, current_filters: dict) -> list:

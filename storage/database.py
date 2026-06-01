@@ -113,6 +113,65 @@ CREATE INDEX IF NOT EXISTS idx_calls_call_time ON calls(call_time);
 CREATE INDEX IF NOT EXISTS idx_calls_token_address ON calls(token_address);
 CREATE INDEX IF NOT EXISTS idx_snapshots_call_id ON price_snapshots(call_id);
 CREATE INDEX IF NOT EXISTS idx_adjustments_applied ON filter_adjustments(applied_at);
+
+-- Phase E2-Alert: data persistence for loss learning
+CREATE TABLE IF NOT EXISTS filter_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_address TEXT NOT NULL,
+    token_name TEXT,
+    token_symbol TEXT,
+    market_cap REAL,
+    holders_count INTEGER,
+    age_minutes REAL,
+    filter_results TEXT NOT NULL,  -- JSON: {filter_name: {passed, value, threshold}}
+    passed BOOLEAN NOT NULL,
+    failed_filters TEXT,           -- JSON: list of failed filter names
+    was_retried BOOLEAN DEFAULT FALSE,
+    retry_count INTEGER DEFAULT 0,
+    filter_params_version INTEGER,
+    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS skip_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_address TEXT NOT NULL,
+    token_name TEXT,
+    token_symbol TEXT,
+    llm_score INTEGER,
+    llm_reasoning TEXT,
+    llm_key_factors TEXT,          -- JSON: list of strings
+    market_cap REAL,
+    holders_count INTEGER,
+    age_minutes REAL,
+    top10_pct REAL,
+    social_score REAL,
+    feature_vector TEXT,           -- JSON: full fv
+    skipped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS loss_analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id INTEGER REFERENCES calls(id),
+    token_address TEXT NOT NULL,
+    token_symbol TEXT,
+    root_cause TEXT,
+    wrong_filter TEXT,
+    suggestion TEXT,
+    pattern TEXT,
+    confidence REAL,
+    llm_raw TEXT,                  -- Full LLM #3 response
+    max_gain REAL,
+    elapsed_seconds REAL,
+    analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_filter_outcomes_passed ON filter_outcomes(passed);
+CREATE INDEX IF NOT EXISTS idx_filter_outcomes_processed_at ON filter_outcomes(processed_at);
+CREATE INDEX IF NOT EXISTS idx_filter_outcomes_token ON filter_outcomes(token_address);
+CREATE INDEX IF NOT EXISTS idx_skip_decisions_skipped_at ON skip_decisions(skipped_at);
+CREATE INDEX IF NOT EXISTS idx_skip_decisions_llm_score ON skip_decisions(llm_score);
+CREATE INDEX IF NOT EXISTS idx_loss_analyses_call_id ON loss_analyses(call_id);
+CREATE INDEX IF NOT EXISTS idx_loss_analyses_analyzed_at ON loss_analyses(analyzed_at);
 """
 
 
@@ -290,6 +349,141 @@ class Database:
             ),
         )
         await self.db.commit()
+
+    # Phase E2-Alert: filter_outcomes (per-token audit trail)
+
+    async def save_filter_outcome(
+        self,
+        token_address: str,
+        token_name: str,
+        token_symbol: str,
+        market_cap: float,
+        holders_count: int,
+        age_minutes: float,
+        filter_results: dict,
+        passed: bool,
+        failed_filters: list,
+        was_retried: bool = False,
+        retry_count: int = 0,
+        filter_params_version: int = 1,
+    ):
+        """Save outcome of hard-gate filter check for every token seen (pass or fail)."""
+        import json as _json
+        await self.db.execute(
+            """INSERT INTO filter_outcomes
+            (token_address, token_name, token_symbol, market_cap, holders_count, age_minutes,
+             filter_results, passed, failed_filters, was_retried, retry_count, filter_params_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                token_address, token_name, token_symbol, market_cap, holders_count, age_minutes,
+                _json.dumps(filter_results), passed, _json.dumps(failed_filters),
+                was_retried, retry_count, filter_params_version,
+            ),
+        )
+        await self.db.commit()
+
+    async def save_skip_decision(
+        self,
+        token_address: str,
+        token_name: str,
+        token_symbol: str,
+        llm_score: int,
+        llm_reasoning: str,
+        llm_key_factors: list,
+        market_cap: float,
+        holders_count: int,
+        age_minutes: float,
+        top10_pct: float,
+        social_score: float,
+        feature_vector: dict,
+    ):
+        """Save every LLM #2 SKIP verdict for retro-tuning analysis."""
+        import json as _json
+        await self.db.execute(
+            """INSERT INTO skip_decisions
+            (token_address, token_name, token_symbol, llm_score, llm_reasoning, llm_key_factors,
+             market_cap, holders_count, age_minutes, top10_pct, social_score, feature_vector)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                token_address, token_name, token_symbol, llm_score, llm_reasoning,
+                _json.dumps(llm_key_factors), market_cap, holders_count, age_minutes,
+                top10_pct, social_score, _json.dumps(feature_vector),
+            ),
+        )
+        await self.db.commit()
+
+    async def save_loss_analysis(
+        self,
+        call_id: int,
+        token_address: str,
+        token_symbol: str,
+        root_cause: str,
+        wrong_filter: str,
+        suggestion: str,
+        pattern: str,
+        confidence: float,
+        llm_raw: str,
+        max_gain: float,
+        elapsed_seconds: float,
+    ):
+        """Save LLM #3 root-cause analysis for a LOSS call."""
+        await self.db.execute(
+            """INSERT INTO loss_analyses
+            (call_id, token_address, token_symbol, root_cause, wrong_filter, suggestion,
+             pattern, confidence, llm_raw, max_gain, elapsed_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                call_id, token_address, token_symbol, root_cause, wrong_filter, suggestion,
+                pattern, confidence, llm_raw, max_gain, elapsed_seconds,
+            ),
+        )
+        await self.db.commit()
+
+    async def get_filter_performance_since(self, since: datetime) -> dict:
+        """Compute per-filter pass/fail rates from filter_outcomes.
+
+        Returns:
+            {filter_name: {"total": N, "failed": N, "fail_rate": 0.0-1.0, "top_failure_reasons": [...]}}
+        """
+        import json as _json
+        # Normalize `since` to SQLite-compatible format (YYYY-MM-DD HH:MM:SS)
+        if since.tzinfo is not None:
+            since_naive = since.replace(tzinfo=None)
+        else:
+            since_naive = since
+        since_str = since_naive.strftime("%Y-%m-%d %H:%M:%S")
+        cursor = await self.db.execute(
+            """SELECT filter_results, failed_filters FROM filter_outcomes
+            WHERE processed_at >= ?""",
+            (since_str,),
+        )
+        rows = await cursor.fetchall()
+
+        per_filter = {}  # name -> {"total": N, "failed": N}
+        for row in rows:
+            try:
+                results = _json.loads(row["filter_results"]) if row["filter_results"] else {}
+                failed = _json.loads(row["failed_filters"]) if row["failed_filters"] else []
+            except Exception:
+                continue
+
+            for fname, fres in results.items():
+                if fname not in per_filter:
+                    per_filter[fname] = {"total": 0, "failed": 0}
+                per_filter[fname]["total"] += 1
+                if fname in failed:
+                    per_filter[fname]["failed"] += 1
+
+        out = {}
+        for fname, counts in per_filter.items():
+            total = counts["total"]
+            failed = counts["failed"]
+            out[fname] = {
+                "total": total,
+                "failed": failed,
+                "pass_rate": ((total - failed) / total * 100) if total > 0 else 0.0,
+            }
+        return out
 
     def _row_to_call(self, row) -> CallRecord:
         return CallRecord(

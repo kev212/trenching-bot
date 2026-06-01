@@ -107,5 +107,24 @@ async def _analyze_loss(call, final_gain: float, elapsed: float, mimo: MiMoClien
 
         logger.info(f"Loss analysis for {call.token_symbol}: {analysis.get('root_cause', 'N/A')}")
 
+        # Phase E2-Alert: persist loss analysis for optimizer + retroactive review
+        try:
+            import json as _json
+            await db.save_loss_analysis(
+                call_id=call.id,
+                token_address=call.token_address,
+                token_symbol=call.token_symbol,
+                root_cause=analysis.get("root_cause", ""),
+                wrong_filter=analysis.get("wrong_filter", ""),
+                suggestion=analysis.get("suggestion", ""),
+                pattern=analysis.get("pattern", ""),
+                confidence=analysis.get("confidence", 0.0),
+                llm_raw=_json.dumps(result) if result else "",
+                max_gain=final_gain,
+                elapsed_seconds=elapsed,
+            )
+        except Exception as e:
+            logger.error(f"loss_analysis save failed for {call.token_symbol}: {e}")
+
     except Exception as e:
         logger.error(f"Loss analysis error for {call.token_symbol}: {e}")
