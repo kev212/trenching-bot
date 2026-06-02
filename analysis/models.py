@@ -174,6 +174,7 @@ class Position:
     entry_time: Optional[datetime] = None
     peak_price: float = 0.0
     current_amount_token: float = 0.0
+    total_sold_sol: float = 0.0
     status: str = "OPEN"
     exit_tx_sig: str = ""
     exit_price: float = 0.0

@@ -287,6 +287,7 @@ class TradeExecutor:
 
         sell_amount_token = position["current_amount_token"] * (sell_pct / 100)
         sol_received = sell_amount_token * current_price
+        position["total_sold_sol"] = position.get("total_sold_sol", 0.0) + sol_received
 
         tx_sig = self.wallet.generate_paper_signature() if self.paper else ""
         trade = Trade(
@@ -304,8 +305,10 @@ class TradeExecutor:
         await self.wallet.credit(sol_received, f"SELL {position['token_symbol']} ({reason})")
 
         if sell_pct >= 100 or position["current_amount_token"] - sell_amount_token < 0.001:
-            pnl_sol = sol_received - position["entry_amount_sol"]
-            pnl_pct = (current_price / position["entry_price"] - 1) * 100 if position["entry_price"] > 0 else 0.0
+            entry_sol = position.get("entry_amount_sol", 0.0) or 0.0
+            total_sold = position.get("total_sold_sol", 0.0) or 0.0
+            pnl_sol = total_sold - entry_sol
+            pnl_pct = ((total_sold / entry_sol) - 1) * 100 if entry_sol > 0 else 0.0
             await self.positions.close_position(position, reason, current_price, pnl_sol, pnl_pct)
             self.risk.record_trade_result(pnl_sol)
         else:

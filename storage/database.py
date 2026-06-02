@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS positions (
     entry_time TIMESTAMP NOT NULL,
     peak_price REAL DEFAULT 0.0,
     current_amount_token REAL NOT NULL,
+    total_sold_sol REAL DEFAULT 0.0,
     status TEXT DEFAULT 'OPEN',
     exit_tx_sig TEXT,
     exit_price REAL,
@@ -262,6 +263,7 @@ class Database:
         """Lightweight ALTER TABLE migrations for existing DBs."""
         migrations = [
             ("positions", "raw_gmgn_json", "TEXT DEFAULT ''"),
+            ("positions", "total_sold_sol", "REAL DEFAULT 0.0"),
         ]
         for table, column, typedef in migrations:
             try:
@@ -581,15 +583,16 @@ class Database:
             """INSERT INTO positions
             (token_address, token_symbol, side, entry_tx_sig, entry_price,
              entry_amount_sol, entry_amount_token, entry_time, peak_price,
-             current_amount_token, status, filter_params_version, paper,
+             current_amount_token, total_sold_sol, status, filter_params_version, paper,
              raw_gmgn_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 position.token_address, position.token_symbol, position.side,
                 position.entry_tx_sig, position.entry_price,
                 position.entry_amount_sol, position.entry_amount_token,
                 position.entry_time.isoformat() if position.entry_time else None,
                 position.peak_price, position.current_amount_token,
+                position.total_sold_sol,
                 position.status, position.filter_params_version,
                 1 if position.paper else 0,
                 getattr(position, "raw_gmgn_json", "") or "",
@@ -607,12 +610,13 @@ class Database:
         exit_time = _g("exit_time")
         await self.db.execute(
             """UPDATE positions SET
-            peak_price = ?, current_amount_token = ?, status = ?,
+            peak_price = ?, current_amount_token = ?, total_sold_sol = ?, status = ?,
             exit_tx_sig = ?, exit_price = ?, exit_time = ?,
             pnl_sol = ?, pnl_pct = ?, hold_seconds = ?, exit_reason = ?
             WHERE id = ?""",
             (
-                _g("peak_price", 0), _g("current_amount_token", 0), _g("status", "OPEN"),
+                _g("peak_price", 0), _g("current_amount_token", 0),
+                _g("total_sold_sol", 0), _g("status", "OPEN"),
                 _g("exit_tx_sig", ""), _g("exit_price", 0),
                 exit_time.isoformat() if exit_time else None,
                 _g("pnl_sol", 0), _g("pnl_pct", 0), _g("hold_seconds", 0),
@@ -671,6 +675,7 @@ class Database:
             "entry_time": datetime.fromisoformat(row["entry_time"]) if row["entry_time"] else None,
             "peak_price": row["peak_price"] or 0.0,
             "current_amount_token": row["current_amount_token"] or 0.0,
+            "total_sold_sol": row["total_sold_sol"] if row["total_sold_sol"] is not None else 0.0,
             "status": row["status"],
             "exit_tx_sig": row["exit_tx_sig"] or "",
             "exit_price": row["exit_price"] or 0.0,

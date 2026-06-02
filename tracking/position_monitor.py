@@ -130,11 +130,19 @@ async def position_monitor(state, db, position_manager: PositionManager,
                             pre_sell_tokens = entry_tokens
                             sold_tokens = entry_tokens - current_tokens
                             sold_pct = (sold_tokens / pre_sell_tokens * 100) if pre_sell_tokens > 0 else 0
+                            pnl_sol = (current_price - entry) * sold_tokens
+                            pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0.0
                         elif last_reason == "TP2":
                             pre_sell_tokens = current_tokens
                             sold_tokens = pre_sell_tokens - (position.get("current_amount_token", 0) or 0)
                             sold_pct = (sold_tokens / pre_sell_tokens * 100) if pre_sell_tokens > 0 else 0
+                            pnl_sol = (current_price - entry) * sold_tokens
+                            pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0.0
                         elif last_reason in ("SL", "TRAILING", "TIME"):
+                            total_sold = position.get("total_sold_sol", 0.0) or 0.0
+                            entry_sol = position.get("entry_amount_sol", 0.0) or 0.0
+                            pnl_sol = total_sold - entry_sol
+                            pnl_pct = ((total_sold / entry_sol) - 1) * 100 if entry_sol > 0 else 0.0
                             pre_sell_tokens = entry_tokens
                             sold_tokens = entry_tokens
                             sold_pct = 100.0
@@ -142,8 +150,8 @@ async def position_monitor(state, db, position_manager: PositionManager,
                             pre_sell_tokens = 0
                             sold_tokens = 0
                             sold_pct = 0.0
-                        pnl_sol = (current_price - entry) * sold_tokens
-                        pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0.0
+                            pnl_sol = 0.0
+                            pnl_pct = 0.0
                         exit_msg = format_exit_alert(
                             symbol=position["token_symbol"],
                             address=position["token_address"],
