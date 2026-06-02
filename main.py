@@ -239,6 +239,20 @@ class TrenchingBot:
 
         while True:
             try:
+                # Backpressure: slow down or skip when queue is deep
+                qsize = self.queue.qsize()
+                if qsize >= 500:
+                    sleep_time = min(120, base_delay * 4)
+                    logger.warning(f"[TRENDING] backpressure: queue={qsize}, sleeping {sleep_time}s")
+                    await asyncio.sleep(sleep_time)
+                    continue
+                elif qsize >= 200:
+                    delay = min(base_delay * 3, 120)
+                elif qsize >= 100:
+                    delay = base_delay * 2
+                else:
+                    delay = base_delay
+
                 # Route through rate limiter — trending is 1 GMGN call
                 await self.rate_limiter.acquire(1)
                 tokens = await self.gmgn.get_trending(limit=20)
@@ -255,10 +269,9 @@ class TrenchingBot:
                     if await self.state.is_duplicate(addr):
                         continue
 
+                    # Skip ALL tokens currently in retry — retry scheduler handles them
                     if addr in self.state.retry_queue:
-                        retry_info = self.state.retry_queue[addr]
-                        if retry_info["retries"] >= 3:
-                            continue
+                        continue
 
                     seen.add(addr)
 
@@ -279,7 +292,7 @@ class TrenchingBot:
                 if len(seen) > 10000:
                     seen.clear()
 
-                await asyncio.sleep(base_delay)
+                await asyncio.sleep(delay)
 
             except Exception as e:
                 err_str = str(e).upper()
@@ -303,6 +316,20 @@ class TrenchingBot:
 
         while True:
             try:
+                # Backpressure: slow down or skip when queue is deep
+                qsize = self.queue.qsize()
+                if qsize >= 500:
+                    sleep_time = min(120, base_delay * 6)
+                    logger.warning(f"[TRENCHES] backpressure: queue={qsize}, sleeping {sleep_time}s")
+                    await asyncio.sleep(sleep_time)
+                    continue
+                elif qsize >= 200:
+                    delay = min(base_delay * 4, 120)
+                elif qsize >= 100:
+                    delay = base_delay * 2
+                else:
+                    delay = base_delay
+
                 # Route through rate limiter — trenches is 1 GMGN call
                 await self.rate_limiter.acquire(1)
                 tokens = await self.gmgn.get_trenches(limit=20)
@@ -316,10 +343,9 @@ class TrenchingBot:
                         continue
                     if await self.state.is_duplicate(addr):
                         continue
+                    # Skip ALL tokens currently in retry — retry scheduler handles them
                     if addr in self.state.retry_queue:
-                        retry_info = self.state.retry_queue[addr]
-                        if retry_info["retries"] >= 3:
-                            continue
+                        continue
                     self.seen_trenches.add(addr)
 
                     if not self._passes_prefilter(token):
@@ -339,7 +365,7 @@ class TrenchingBot:
                 if len(self.seen_trenches) > 10000:
                     self.seen_trenches.clear()
 
-                await asyncio.sleep(base_delay)
+                await asyncio.sleep(delay)
 
             except Exception as e:
                 err_str = str(e).upper()
@@ -355,39 +381,53 @@ class TrenchingBot:
     async def _retry_scheduler(self):
         """Periodically re-queue tokens whose retry delay has expired.
 
-        Without this, tokens marked for retry sit forever — pollers skip them
-        (in their local `seen` set), and nothing wakes them up.
+        Uses exponential backoff: retry 1 → 60s, retry 2 → 180s, retry 3 → 300s.
+        Tokens that exhaust MAX_RETRIES (3) are dead-lettered (logged only).
         """
+        from storage.cache import get_retry_delay, MAX_RETRIES
         logger.info("Retry scheduler started")
-        scan_interval = 30  # seconds
+        scan_interval = 30
 
         while True:
             try:
                 now = time.time()
                 requeued = 0
+                dead_letter = 0
                 expired = []
 
                 async with self.state._lock:
                     for addr, info in list(self.state.retry_queue.items()):
-                        if info["retries"] >= 3:
+                        if info["retries"] >= MAX_RETRIES:
+                            dead_letter += 1
+                            expired.append(addr)
                             continue
                         if await self.state.is_duplicate(addr):
                             expired.append(addr)
                             continue
-                        if now - info["timestamp"] < 300:
+                        delay = get_retry_delay(info["retries"])
+                        if now - info["timestamp"] < delay:
                             continue
-                        # Re-queue this token; do NOT update timestamp here —
-                        # `should_retry` in worker checks `now - timestamp >= 300`,
-                        # and `add_retry` will reset timestamp when it fails again.
-                        await self.queue.put({"address": addr, "_retry": True, "retries": info["retries"]})
+                        symbol = info.get("symbol", "?")
+                        name = info.get("name", "?")
+                        await self.queue.put({
+                            "address": addr,
+                            "symbol": symbol,
+                            "name": name,
+                            "_retry": True,
+                            "retries": info["retries"],
+                        })
                         requeued += 1
 
                     for addr in expired:
-                        self.state.retry_queue.pop(addr, None)
+                        dead = self.state.retry_queue.pop(addr, None)
+                        if dead and dead.get("retries", 0) >= MAX_RETRIES:
+                            dsym = dead.get("symbol", "?")
+                            logger.info(f"[DEAD-LETTER] {dsym} ({addr[:8]}): exhausted {MAX_RETRIES} retries")
 
-                if requeued > 0 or expired:
+                if requeued > 0 or dead_letter > 0:
                     logger.info(
-                        f"[RETRY-SCHED] requeued={requeued} expired={len(expired)} queue={self.queue.qsize()}"
+                        f"[RETRY-SCHED] requeued={requeued} dead={dead_letter} "
+                        f"queue={self.queue.qsize()}"
                     )
 
                 await self.state.cleanup_retry_queue()
@@ -679,7 +719,7 @@ class TrenchingBot:
             retry_info = await self.state.get_retry_info(address)
             retries = retry_info.get("retries", 0)
             logger.info(f"[RETRY {retries+1}/3] {token.symbol} ({address[:8]}): failed {len(failures)} filters: {failures}")
-            await self.state.add_retry(address)
+            await self.state.add_retry(address, symbol=token.symbol, name=token.name)
             self.state.metrics.record_call("SKIP")
             return
 

@@ -1,0 +1,238 @@
+"""Unit tests for storage/cache.py retry backoff + dead-letter logic.
+
+Run: .venv/bin/python -m pytest tests/test_cache_retry.py -v
+"""
+import asyncio
+import sys
+import time as time_module
+from pathlib import Path
+from unittest.mock import MagicMock
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from storage.cache import (
+    RETRY_BACKOFF,
+    MAX_RETRIES,
+    get_retry_delay,
+    SharedState,
+)
+
+# ── get_retry_delay ──────────────────────────────────────────────────────────
+
+
+def test_retry_0_returns_60():
+    assert get_retry_delay(0) == 60
+
+
+def test_retry_1_returns_180():
+    assert get_retry_delay(1) == 180
+
+
+def test_retry_2_returns_300():
+    assert get_retry_delay(2) == 300
+
+
+def test_retry_3_fallback_300():
+    assert get_retry_delay(3) == 300
+
+
+def test_retry_unknown_fallback_300():
+    assert get_retry_delay(99) == 300
+
+
+def test_backoff_dict_keys():
+    assert set(RETRY_BACKOFF.keys()) == {0, 1, 2}
+
+
+def test_max_retries_is_3():
+    assert MAX_RETRIES == 3
+
+
+# ── SharedState requires event loop for asyncio.Lock in __init__ ──────────────
+
+
+async def _make_state():
+    state = SharedState()
+    state.metrics = MagicMock()
+    return state
+
+
+# ── add_retry ────────────────────────────────────────────────────────────────
+
+
+def test_add_retry_creates_entry():
+    async def go():
+        state = await _make_state()
+        await state.add_retry("abc", symbol="TEST", name="Test Token")
+        info = state.retry_queue.get("abc")
+        assert info is not None
+        assert info["symbol"] == "TEST"
+        assert info["name"] == "Test Token"
+        assert info["retries"] == 0
+        assert "timestamp" in info
+    asyncio.run(go())
+
+
+def test_add_retry_increments():
+    async def go():
+        state = await _make_state()
+        await state.add_retry("abc", symbol="A")
+        await state.add_retry("abc", symbol="A")
+        assert state.retry_queue["abc"]["retries"] == 1
+    asyncio.run(go())
+
+
+def test_add_retry_updates_timestamp():
+    async def go():
+        state = await _make_state()
+        await state.add_retry("abc", symbol="A")
+        old_ts = state.retry_queue["abc"]["timestamp"]
+        await asyncio.sleep(0.01)
+        await state.add_retry("abc", symbol="A")
+        new_ts = state.retry_queue["abc"]["timestamp"]
+        assert new_ts > old_ts
+    asyncio.run(go())
+
+
+def test_add_retry_preserves_symbol():
+    async def go():
+        state = await _make_state()
+        await state.add_retry("abc", symbol="TEST")
+        info = state.retry_queue["abc"]
+        assert info["symbol"] == "TEST"
+        await state.add_retry("abc", symbol="TEST")
+        assert state.retry_queue["abc"]["symbol"] == "TEST"
+    asyncio.run(go())
+
+
+def test_add_retry_defaults():
+    async def go():
+        state = await _make_state()
+        await state.add_retry("abc")
+        info = state.retry_queue["abc"]
+        assert info["symbol"] == "?"
+        assert info["name"] == "?"
+    asyncio.run(go())
+
+
+# ── should_retry ─────────────────────────────────────────────────────────────
+
+
+def test_should_retry_not_in_queue():
+    async def go():
+        state = await _make_state()
+        assert await state.should_retry("nonexistent") is False
+    asyncio.run(go())
+
+
+def test_should_retry_exhausted():
+    async def go():
+        state = await _make_state()
+        state.retry_queue["abc"] = {"timestamp": 0, "retries": 3, "symbol": "T"}
+        assert await state.should_retry("abc") is False
+    asyncio.run(go())
+
+
+def test_should_retry_too_soon():
+    async def go():
+        state = await _make_state()
+        state.retry_queue["abc"] = {"timestamp": time_module.time(), "retries": 0, "symbol": "T"}
+        assert await state.should_retry("abc") is False
+    asyncio.run(go())
+
+
+def test_should_retry_ready():
+    async def go():
+        state = await _make_state()
+        state.retry_queue["abc"] = {"timestamp": time_module.time() - 120, "retries": 0, "symbol": "T"}
+        assert await state.should_retry("abc") is True
+    asyncio.run(go())
+
+
+def test_should_retry_retry1_needs_180():
+    async def go():
+        state = await _make_state()
+        state.retry_queue["abc"] = {"timestamp": time_module.time() - 120, "retries": 1, "symbol": "T"}
+        assert await state.should_retry("abc") is False
+    asyncio.run(go())
+
+
+def test_should_retry_retry2_needs_300():
+    async def go():
+        state = await _make_state()
+        state.retry_queue["abc"] = {"timestamp": time_module.time() - 400, "retries": 2, "symbol": "T"}
+        assert await state.should_retry("abc") is True
+    asyncio.run(go())
+
+
+def test_should_retry_respects_retry1_after_180():
+    async def go():
+        state = await _make_state()
+        state.retry_queue["abc"] = {"timestamp": time_module.time() - 200, "retries": 1, "symbol": "T"}
+        assert await state.should_retry("abc") is True
+    asyncio.run(go())
+
+
+# ── cleanup_retry_queue ──────────────────────────────────────────────────────
+
+
+def test_cleanup_removes_exhausted():
+    async def go():
+        state = await _make_state()
+        now = time_module.time()
+        state.retry_queue["abc"] = {"timestamp": now, "retries": 3, "symbol": "T"}
+        state.retry_queue["def"] = {"timestamp": now, "retries": 2, "symbol": "T2"}
+        await state.cleanup_retry_queue()
+        assert "abc" not in state.retry_queue
+        assert "def" in state.retry_queue
+    asyncio.run(go())
+
+
+def test_cleanup_removes_stale():
+    async def go():
+        state = await _make_state()
+        very_old = time_module.time() - 1200  # > max_stale (600)
+        state.retry_queue["abc"] = {"timestamp": very_old, "retries": 0, "symbol": "T"}
+        await state.cleanup_retry_queue()
+        assert "abc" not in state.retry_queue
+    asyncio.run(go())
+
+
+# ── get_retry_info ───────────────────────────────────────────────────────────
+
+
+def test_get_retry_info_new():
+    async def go():
+        state = await _make_state()
+        assert await state.get_retry_info("nonexistent") == {}
+    asyncio.run(go())
+
+
+def test_get_retry_info_full():
+    async def go():
+        state = await _make_state()
+        state.retry_queue["abc"] = {"timestamp": 100, "retries": 1, "symbol": "T", "name": "Test"}
+        info = await state.get_retry_info("abc")
+        assert info["retries"] == 1
+        assert info["symbol"] == "T"
+        assert info["name"] == "Test"
+    asyncio.run(go())
+
+
+# ── remove_retry ─────────────────────────────────────────────────────────────
+
+
+def test_remove_retry():
+    async def go():
+        state = await _make_state()
+        state.retry_queue["abc"] = {"timestamp": 0, "retries": 0}
+        await state.remove_retry("abc")
+        assert "abc" not in state.retry_queue
+    asyncio.run(go())
+
+
+def test_remove_retry_missing():
+    async def go():
+        state = await _make_state()
+        await state.remove_retry("nonexistent")
+    asyncio.run(go())

@@ -49,8 +49,12 @@ class LRUCache:
         return len(self._cache)
 
 
-RETRY_DELAY = 300  # 5 minutes
+RETRY_BACKOFF = {0: 60, 1: 180, 2: 300}  # retry index -> delay in seconds
 MAX_RETRIES = 3
+
+
+def get_retry_delay(retries: int) -> int:
+    return RETRY_BACKOFF.get(retries, 300)
 
 
 class SharedState:
@@ -70,13 +74,13 @@ class SharedState:
     async def mark_processed(self, address: str):
         await self.processed_cache.set(address, True)
 
-    async def add_retry(self, address: str):
+    async def add_retry(self, address: str, symbol: str = "?", name: str = "?"):
         async with self._lock:
             if address in self.retry_queue:
                 self.retry_queue[address]["retries"] += 1
                 self.retry_queue[address]["timestamp"] = time.time()
             else:
-                self.retry_queue[address] = {"timestamp": time.time(), "retries": 0}
+                self.retry_queue[address] = {"timestamp": time.time(), "retries": 0, "symbol": symbol, "name": name}
 
     async def should_retry(self, address: str) -> bool:
         async with self._lock:
@@ -85,7 +89,8 @@ class SharedState:
             info = self.retry_queue[address]
             if info["retries"] >= MAX_RETRIES:
                 return False
-            if time.time() - info["timestamp"] < RETRY_DELAY:
+            delay = get_retry_delay(info["retries"])
+            if time.time() - info["timestamp"] < delay:
                 return False
             return True
 
@@ -100,8 +105,9 @@ class SharedState:
     async def cleanup_retry_queue(self):
         async with self._lock:
             now = time.time()
+            max_stale = get_retry_delay(MAX_RETRIES - 1) * 2
             expired = [k for k, v in self.retry_queue.items()
-                       if v["retries"] >= MAX_RETRIES or now - v["timestamp"] > RETRY_DELAY * MAX_RETRIES]
+                       if v["retries"] >= MAX_RETRIES or now - v["timestamp"] > max_stale]
             for k in expired:
                 del self.retry_queue[k]
 
