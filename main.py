@@ -383,17 +383,30 @@ class TrenchingBot:
 
         Uses exponential backoff: retry 1 → 60s, retry 2 → 180s, retry 3 → 300s.
         Tokens that exhaust MAX_RETRIES (3) are dead-lettered (logged only).
+        Respects queue backpressure: pauses re-queue when queue is deep.
         """
         from storage.cache import get_retry_delay, MAX_RETRIES
         logger.info("Retry scheduler started")
-        scan_interval = 30
+        base_interval = 30
 
         while True:
             try:
                 now = time.time()
                 requeued = 0
+                skipped = 0
                 dead_letter = 0
                 expired = []
+
+                qsize = self.queue.qsize()
+                # Backpressure: slow or skip when queue is deep
+                if qsize >= 300:
+                    scan_interval = 120
+                    await asyncio.sleep(scan_interval)
+                    continue
+                elif qsize >= 150:
+                    scan_interval = 60
+                else:
+                    scan_interval = base_interval
 
                 async with self.state._lock:
                     for addr, info in list(self.state.retry_queue.items()):
@@ -407,16 +420,22 @@ class TrenchingBot:
                         delay = get_retry_delay(info["retries"])
                         if now - info["timestamp"] < delay:
                             continue
+                        if qsize >= 200:
+                            skipped += 1
+                            continue
                         symbol = info.get("symbol", "?")
                         name = info.get("name", "?")
-                        await self.queue.put({
-                            "address": addr,
-                            "symbol": symbol,
-                            "name": name,
-                            "_retry": True,
-                            "retries": info["retries"],
-                        })
-                        requeued += 1
+                        try:
+                            self.queue.put_nowait({
+                                "address": addr,
+                                "symbol": symbol,
+                                "name": name,
+                                "_retry": True,
+                                "retries": info["retries"],
+                            })
+                            requeued += 1
+                        except asyncio.QueueFull:
+                            skipped += 1
 
                     for addr in expired:
                         dead = self.state.retry_queue.pop(addr, None)
@@ -424,10 +443,10 @@ class TrenchingBot:
                             dsym = dead.get("symbol", "?")
                             logger.info(f"[DEAD-LETTER] {dsym} ({addr[:8]}): exhausted {MAX_RETRIES} retries")
 
-                if requeued > 0 or dead_letter > 0:
+                if requeued > 0 or dead_letter > 0 or skipped > 0:
                     logger.info(
-                        f"[RETRY-SCHED] requeued={requeued} dead={dead_letter} "
-                        f"queue={self.queue.qsize()}"
+                        f"[RETRY-SCHED] requeued={requeued} skipped={skipped} dead={dead_letter} "
+                        f"queue={qsize}"
                     )
 
                 await self.state.cleanup_retry_queue()
@@ -437,7 +456,7 @@ class TrenchingBot:
                 break
             except Exception as e:
                 logger.error(f"Retry scheduler error: {e}")
-                await asyncio.sleep(scan_interval)
+                await asyncio.sleep(base_interval)
 
     async def _token_worker(self, worker_id: int):
         logger.info(f"Worker {worker_id} started")
