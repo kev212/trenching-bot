@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     db_path: str = "trenching.db"
     max_queue_size: int = 1000
-    min_workers: int = 3
+    min_workers: int = 2
     max_workers: int = 5
     worker_scale_up_threshold: int = 50
     worker_scale_down_threshold: int = 10
