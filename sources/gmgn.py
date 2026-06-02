@@ -123,20 +123,41 @@ class GMGNClient:
             "candles_checked": len(candles),
         }
 
-    async def get_trenches(self, limit: int = 20) -> list:
-        """Fetch trenches (new token creations).
+    LAUNCHPADS = [
+        "Pump.fun", "pump_mayhem", "pump_mayhem_agent", "pump_agent",
+        "letsbonk", "bonkers", "bags", "memoo", "liquid", "bankr",
+        "zora", "surge", "anoncoin", "moonshot_app", "wendotdev",
+        "heaven", "sugar", "token_mill", "believe", "trendsfun",
+        "trends_fun", "jup_studio", "Moonshot", "boop",
+        "ray_launchpad", "meteora_virtual_curve", "xstocks",
+    ]
+    QUOTE_TYPES = [4, 5, 3, 1, 13, 0]
 
-        NOTE: GMGN /v1/trenches requires sufficient trading volume on
-        GMGN to return data — free API tier gets empty results. This
-        poller is disabled by default (see enable_trenches_poller).
+    async def get_trenches(
+        self,
+        limit: int = 20,
+        min_smart_degen: int = 0,
+        category: str = "near_completion",
+    ) -> list:
+        """Fetch trenches (v2 API — GMGN account needs trading volume).
+
+        Category options:
+          - near_completion  tokens nearing 100% bonding curve (has SM)
+          - new_creation     freshly created tokens, very early
+          - completed        tokens that already graduated
         """
-        query = {"chain": "sol"}
-        body = {"limit": limit}
-        data = await self._post("/v1/trenches", query, body)
-        if isinstance(data, list):
-            return data
+        body = {
+            "version": "v2",
+            category: {
+                "filters": ["offchain", "onchain"],
+                "launchpad_platform": self.LAUNCHPADS,
+                "quote_address_type": self.QUOTE_TYPES,
+                "launchpad_platform_v2": True,
+                "limit": limit,
+                "min_smart_degen_count": min_smart_degen,
+            },
+        }
+        data = await self._post("/v1/trenches", {"chain": "sol"}, body)
         if isinstance(data, dict):
-            for key in ["new_creation", "pump", "completed"]:
-                if key in data and data[key]:
-                    return data[key]
+            return data.get("pump") or data.get("new_creation") or data.get("completed") or []
         return []

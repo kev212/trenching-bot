@@ -289,7 +289,7 @@ class TrenchingBot:
 
     async def _trenches_poller(self):
         if not settings.enable_trenches_poller:
-            logger.info("[TRENCHES] Poller disabled (set ENABLE_TRENCHES_POLLER=true to enable)")
+            logger.info("[TRENCHES] Poller disabled (set ENABLE_TRENCHES_POLLER=true to override)")
             return
         logger.info("[TRENCHES] Poller starting...")
         poll_count = 0
