@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "updated_at": "2026-06-01T00:00:00Z",
+  "version": 2,
+  "updated_at": "2026-06-02T00:00:00Z",
   "caps": {
     "mega": 12,
     "major": 8,
@@ -31,5 +31,11 @@
     "aging_multiplier": 0.5,
     "stale_multiplier": 0.25
   },
-  "max_total_bonus": 40
+  "max_total_bonus": 40,
+  "multiplier": {
+    "max_boost_pct": 40,
+    "max_penalty_pct": 30,
+    "floor": 0.5,
+    "ceiling": 1.5
+  }
 }

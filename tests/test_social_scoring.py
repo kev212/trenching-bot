@@ -209,6 +209,112 @@ def test_rabbi_with_2_organic():
     print(f"✓ rabbi_with_2_organic: bonus=5 (expected 5)")
 
 
+# ============ Multiplier Architecture Tests (Stage 2) ============
+
+from llm.social_scoring import compute_social_multiplier
+
+
+def test_multiplier_no_signals():
+    """No signals → multiplier 1.0 (LLM passes through unchanged)."""
+    token = make_token()
+    result = compute_social_multiplier(token, "test")
+    assert abs(result["multiplier"] - 1.0) < 0.001, f"Expected 1.0, got {result['multiplier']}"
+    assert result["signals_bonus"] == 0
+    assert result["negative_penalty"] == 0
+    print(f"✓ multiplier_no_signals: mult=1.00 (expected 1.00)")
+
+
+def test_multiplier_elon_only():
+    """Elon (signals=12) → multiplier 1.12."""
+    token = make_token(influencer_mentions=[
+        {"handle": "elonmusk", "weight": 30, "tweet_age_min": 30},
+    ])
+    result = compute_social_multiplier(token, "test")
+    assert abs(result["multiplier"] - 1.12) < 0.001, f"Expected 1.12, got {result['multiplier']}"
+    assert result["signals_bonus"] == 12
+    print(f"✓ multiplier_elon_only: mult=1.12 (expected 1.12)")
+
+
+def test_multiplier_max_viral():
+    """Elon + 15 organic + catalyst (signals=40) → multiplier 1.40 (ceiling)."""
+    mentions = [{"handle": f"user{i}", "likes": 600, "tweet_age_min": 30,
+                 "tweet_text": f"buy test token abc"} for i in range(15)]
+    token = make_token(
+        influencer_mentions=[{"handle": "elonmusk", "weight": 30, "tweet_age_min": 30}],
+        organic_mentions=mentions,
+        catalyst_match=True,
+    )
+    result = compute_social_multiplier(token, "test")
+    assert abs(result["multiplier"] - 1.40) < 0.001, f"Expected 1.40, got {result['multiplier']}"
+    assert result["signals_bonus"] == 40
+    print(f"✓ multiplier_max_viral: mult=1.40 (ceiling, expected 1.40)")
+
+
+def test_multiplier_max_penalty():
+    """Penalty=30, no signals → multiplier 0.70."""
+    token = make_token()
+    result = compute_social_multiplier(token, "test", negative_penalty=30)
+    assert abs(result["multiplier"] - 0.70) < 0.001, f"Expected 0.70, got {result['multiplier']}"
+    assert result["negative_penalty"] == 30
+    print(f"✓ multiplier_max_penalty: mult=0.70 (expected 0.70)")
+
+
+def test_multiplier_elon_vs_penalty():
+    """Elon (12) vs max penalty (30) → net -18 → multiplier 0.82."""
+    token = make_token(influencer_mentions=[
+        {"handle": "elonmusk", "weight": 30, "tweet_age_min": 30},
+    ])
+    result = compute_social_multiplier(token, "test", negative_penalty=30)
+    # 12 - 30 = -18, multiplier = 1 - 0.18 = 0.82
+    assert abs(result["multiplier"] - 0.82) < 0.001, f"Expected 0.82, got {result['multiplier']}"
+    print(f"✓ multiplier_elon_vs_penalty: mult=0.82 (signals 12 vs penalty 30)")
+
+
+def test_multiplier_penalty_capped_at_30():
+    """Penalty=50 should cap at 30 (max)."""
+    token = make_token()
+    result = compute_social_multiplier(token, "test", negative_penalty=50)
+    assert result["negative_penalty"] == 30, f"Expected 30, got {result['negative_penalty']}"
+    assert abs(result["multiplier"] - 0.70) < 0.001
+    print(f"✓ multiplier_penalty_capped: penalty capped at 30, mult=0.70")
+
+
+def test_multiplier_floor_protection():
+    """Combined negative signals hit floor (multiplier min 0.5)."""
+    token = make_token()
+    # Even with massive penalty beyond cap, floor is 0.5
+    result = compute_social_multiplier(token, "test", negative_penalty=100)
+    assert result["multiplier"] >= 0.5, f"Expected floor 0.5, got {result['multiplier']}"
+    print(f"✓ multiplier_floor_protection: mult={result['multiplier']:.2f} (≥0.5 floor)")
+
+
+def test_llm_zero_stays_zero_after_multiplier():
+    """LLM scored 0 (scam) must stay 0 even with 1.4x multiplier."""
+    llm_score = 0
+    mult = 1.4
+    final = llm_score * mult
+    assert final == 0, f"LLM 0 should stay 0, got {final}"
+    print(f"✓ llm_zero_stays_zero: 0 × 1.4 = 0 (LLM veto respected)")
+
+
+def test_llm_50_boosted_to_70():
+    """LLM 50 × 1.4 multiplier = 70 (boost scenario)."""
+    llm_score = 50
+    mult = 1.4
+    final = llm_score * mult
+    assert final == 70, f"Expected 70, got {final}"
+    print(f"✓ llm_50_boosted: 50 × 1.4 = 70")
+
+
+def test_llm_50_penalized_to_35():
+    """LLM 50 × 0.7 multiplier = 35 (penalty scenario)."""
+    llm_score = 50
+    mult = 0.7
+    final = llm_score * mult
+    assert final == 35, f"Expected 35, got {final}"
+    print(f"✓ llm_50_penalized: 50 × 0.7 = 35")
+
+
 if __name__ == "__main__":
     print("Loading config:", load_social_scoring_config())
     print()
@@ -227,4 +333,16 @@ if __name__ == "__main__":
     test_max_cap()
     test_rabbi_scenario()
     test_rabbi_with_2_organic()
+    print()
+    print("--- Multiplier Architecture ---")
+    test_multiplier_no_signals()
+    test_multiplier_elon_only()
+    test_multiplier_max_viral()
+    test_multiplier_max_penalty()
+    test_multiplier_elon_vs_penalty()
+    test_multiplier_penalty_capped_at_30()
+    test_multiplier_floor_protection()
+    test_llm_zero_stays_zero_after_multiplier()
+    test_llm_50_boosted_to_70()
+    test_llm_50_penalized_to_35()
     print("\n✅ All tests passed!")

@@ -967,17 +967,22 @@ class TrenchingBot:
             if has_basic_social and token.social_narrative_score < 15:
                 token.social_narrative_score = 15
 
-            # Compute social signals bonus (replaces simple max(weight))
-            from llm.social_scoring import calculate_social_signals_bonus
-            signals = calculate_social_signals_bonus(token, token.address)
-            signals_bonus = signals["total_bonus"]
-            token.social_narrative_score = min(100, token.social_narrative_score + signals_bonus)
+            # Compute social multiplier (replaces additive bonus)
+            # LLM is the FLOOR; signals only amplify (multiplicative, max 1.4x).
+            from llm.social_scoring import compute_social_multiplier
+            mult = compute_social_multiplier(token, token.address)
+            volume_multiplier = mult["multiplier"]
+            signals_bonus = mult["signals_bonus"]
+            pre_mult_score = token.social_narrative_score
+            token.social_narrative_score = min(100, max(0, pre_mult_score * volume_multiplier))
 
             logger.info(
-                f"[SOCIAL] {token.symbol} ({token.address[:8]}): score={token.social_narrative_score:.0f}/100, "
+                f"[SOCIAL] {token.symbol} ({token.address[:8]}): "
+                f"llm={pre_mult_score:.0f} × {volume_multiplier:.2f} = {token.social_narrative_score:.0f}/100, "
                 f"project={token.project_type}, social_links={has_basic_social}, "
                 f"influencers={len(influencer_mentions)}, organic={len(token.organic_mentions)}, "
-                f"catalyst={token.catalyst_match}, signals_bonus=+{signals_bonus}"
+                f"catalyst={token.catalyst_match}, signals_bonus=+{signals_bonus}, "
+                f"breakdown={mult['breakdown']}"
             )
 
         except Exception as e:

@@ -59,6 +59,12 @@ def _default_config() -> dict:
             "stale_multiplier": 0.25,
         },
         "max_total_bonus": 40,
+        "multiplier": {
+            "max_boost_pct": 40,
+            "max_penalty_pct": 30,
+            "floor": 0.5,
+            "ceiling": 1.5,
+        },
     }
 
 
@@ -224,4 +230,60 @@ def calculate_social_signals_bonus(token, token_address: str = "") -> dict:
     return {
         "total_bonus": capped_total,
         "breakdown": breakdown,
+    }
+
+
+def compute_social_multiplier(token, token_address: str = "",
+                                negative_penalty: int = 0) -> dict:
+    """Compute a multiplicative boost/penalty factor for the LLM's social score.
+
+    Architecture: LLM provides the FLOOR (its quality judgment is respected).
+    Code provides AMPLIFICATION (signals boost, penalties reduce).
+    Formula:
+        volume_delta = signals_bonus - negative_penalty  # -30 to +40
+        multiplier = 1.0 + (volume_delta / 100)
+        multiplier = clamp(multiplier, floor=0.5, ceiling=1.5)
+
+    Then in main.py:
+        final_social = llm_social_score * multiplier
+        final_social = clamp(final_social, 0, 100)
+
+    Args:
+        token: TokenData with social fields
+        token_address: Contract address for CA filtering
+        negative_penalty: 0-30 from trench_signals (Stage 3). Defaults to 0.
+
+    Returns:
+        {
+            "multiplier": float in [0.5, 1.5],
+            "signals_bonus": int 0-40 (raw, before penalty subtraction),
+            "negative_penalty": int 0-30,
+            "breakdown": {same as calculate_social_signals_bonus}
+        }
+    """
+    cfg = load_social_scoring_config()
+    mult_cfg = cfg.get("multiplier", {
+        "max_boost_pct": 40,
+        "max_penalty_pct": 30,
+        "floor": 0.5,
+        "ceiling": 1.5,
+    })
+
+    signals = calculate_social_signals_bonus(token, token_address)
+    signals_bonus = signals["total_bonus"]
+    capped_penalty = min(negative_penalty, mult_cfg["max_penalty_pct"])
+
+    volume_delta = signals_bonus - capped_penalty
+    volume_delta = min(volume_delta, mult_cfg["max_boost_pct"])
+    volume_delta = max(volume_delta, -mult_cfg["max_penalty_pct"])
+
+    multiplier = 1.0 + (volume_delta / 100.0)
+    multiplier = max(mult_cfg["floor"], min(mult_cfg["ceiling"], multiplier))
+
+    return {
+        "multiplier": multiplier,
+        "signals_bonus": signals_bonus,
+        "negative_penalty": capped_penalty,
+        "volume_delta": volume_delta,
+        "breakdown": signals["breakdown"],
     }
