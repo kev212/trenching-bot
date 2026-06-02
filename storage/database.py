@@ -419,7 +419,7 @@ class Database:
             await self.db.execute(
                 """INSERT INTO llm_decisions
                 (call_id, score, verdict, reasoning, confidence, key_factors, processing_time_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (call_id, score, verdict, reasoning, confidence, json.dumps(key_factors), processing_time_ms),
             )
             await self.db.commit()
