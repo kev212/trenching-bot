@@ -550,6 +550,9 @@ class TrenchingBot:
         # Acquire 4 rate limit slots — one per parallel GMGN call.
         # Without this, 1 acquire + 4 parallel calls = 4x the budget.
         await self.rate_limiter.acquire(4)
+        # Stagger workers to prevent GMGN per-second rate limit
+        # (2 workers × 4 parallel calls = 8 req burst < 1s).
+        await asyncio.sleep(0.3)
 
         # Phase B: parallel fetch — info + security + holders + ath in one round-trip
         # Pre-filter at lines 341-366 already screens ~80% of tokens before this
