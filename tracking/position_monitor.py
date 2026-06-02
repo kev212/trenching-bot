@@ -112,7 +112,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
                     triggered = True
                     last_reason = "TRAILING"
                 else:
-                    if held_so_far > time_limit:
+                    if time_limit > 0 and held_so_far > time_limit:
                         await executor.execute_sell(position, 100, "TIME")
                         triggered = True
                         last_reason = "TIME"
