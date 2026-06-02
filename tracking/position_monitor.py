@@ -126,12 +126,22 @@ async def position_monitor(state, db, position_manager: PositionManager,
                     try:
                         entry_tokens = position.get("entry_amount_token", 0) or 0
                         current_tokens = position.get("current_amount_token", 0) or 0
-                        sold_pct = (
-                            ((entry_tokens - current_tokens) / entry_tokens * 100)
-                            if entry_tokens > 0 and last_reason in ("TP1", "TP2")
-                            else (100.0 if last_reason in ("SL", "TRAILING", "TIME") else 0.0)
-                        )
-                        sold_tokens = entry_tokens - current_tokens if last_reason in ("TP1", "TP2") else entry_tokens
+                        if last_reason == "TP1":
+                            pre_sell_tokens = entry_tokens
+                            sold_tokens = entry_tokens - current_tokens
+                            sold_pct = (sold_tokens / pre_sell_tokens * 100) if pre_sell_tokens > 0 else 0
+                        elif last_reason == "TP2":
+                            pre_sell_tokens = current_tokens
+                            sold_tokens = pre_sell_tokens - (position.get("current_amount_token", 0) or 0)
+                            sold_pct = (sold_tokens / pre_sell_tokens * 100) if pre_sell_tokens > 0 else 0
+                        elif last_reason in ("SL", "TRAILING", "TIME"):
+                            pre_sell_tokens = entry_tokens
+                            sold_tokens = entry_tokens
+                            sold_pct = 100.0
+                        else:
+                            pre_sell_tokens = 0
+                            sold_tokens = 0
+                            sold_pct = 0.0
                         pnl_sol = (current_price - entry) * sold_tokens
                         pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0.0
                         exit_msg = format_exit_alert(
