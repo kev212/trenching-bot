@@ -126,8 +126,6 @@ class GMGNClient:
     async def get_trenches(self, limit: int = 20) -> list:
         query = {"chain": "sol"}
         body = {
-            "types": ["new_creation"],
-            "platforms": ["Pump.fun"],
             "limit": limit,
         }
         data = await self._post("/v1/trenches", query, body)
@@ -136,7 +134,7 @@ class GMGNClient:
         if isinstance(data, dict):
             import json
             logger.info(f"[GMGN-API] get_trenches keys={list(data.keys())} data={json.dumps(data, default=str)[:500]}")
-            for key in body.get("types", []):
-                if key in data:
+            for key in ["new_creation", "pump", "completed"]:
+                if key in data and data[key]:
                     return data[key]
         return []
