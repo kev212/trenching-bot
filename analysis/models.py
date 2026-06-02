@@ -63,6 +63,7 @@ class TokenData:
     has_elon_tweet: bool = False
     has_toly_tweet: bool = False
     has_community: bool = False
+    community_id: str = ""
 
     # Website content
     website_text: str = ""

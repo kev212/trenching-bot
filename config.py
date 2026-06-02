@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     mimo_api_key: str = ""
     mimo_base_url: str = "https://api.xiaomimimo.com/v1"
-    mimo_model: str = "mimo-v2-5-pro"
+    mimo_model: str = "mimo-v2.5-pro"
     gmgn_api_key: str = ""
     http_proxy: str = ""
     log_level: str = "INFO"

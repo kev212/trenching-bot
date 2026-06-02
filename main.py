@@ -867,6 +867,7 @@ class TrenchingBot:
             # 3. Community (if community URL)
             if parsed["community_id"]:
                 token.has_community = True
+                token.community_id = parsed["community_id"]
                 logger.info(f"[SOCIAL] {token.symbol}: has community {parsed['community_id']}")
 
             # 4. Website scraping
@@ -935,7 +936,7 @@ class TrenchingBot:
                 twitter_followers=token.twitter_followers,
                 twitter_verified="Yes" if token.twitter_verified else "No",
                 twitter_description=token.twitter_description[:200] or "No description",
-                twitter_community=token.has_community or "No",
+                twitter_community=f"Yes (community/{token.community_id})" if token.has_community else "No",
                 recent_tweets=json.dumps(token.recent_tweets[:3], indent=2) if token.recent_tweets else "No tweets from this account yet",
                 website_text=token.website_text[:500] or "No website content",
                 search_results=json.dumps(search_results[:5], indent=2) if search_results else "No search results yet",
