@@ -124,16 +124,18 @@ class GMGNClient:
         }
 
     async def get_trenches(self, limit: int = 20) -> list:
+        """Fetch trenches (new token creations).
+
+        NOTE: GMGN /v1/trenches requires sufficient trading volume on
+        GMGN to return data — free API tier gets empty results. This
+        poller is disabled by default (see enable_trenches_poller).
+        """
         query = {"chain": "sol"}
-        body = {
-            "limit": limit,
-        }
+        body = {"limit": limit}
         data = await self._post("/v1/trenches", query, body)
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
-            import json
-            logger.info(f"[GMGN-API] get_trenches keys={list(data.keys())} data={json.dumps(data, default=str)[:500]}")
             for key in ["new_creation", "pump", "completed"]:
                 if key in data and data[key]:
                     return data[key]

@@ -270,8 +270,6 @@ class TrenchingBot:
                 poll_count += 1
                 if new_count > 0:
                     logger.info(f"[TRENDING] #{poll_count}: +{new_count} tokens (queue:{self.queue.qsize()})")
-                else:
-                    logger.info(f"[TRENDING] #{poll_count}: 0 new tokens (queue:{self.queue.qsize()})")
 
                 if len(seen) > 10000:
                     seen.clear()
@@ -290,6 +288,9 @@ class TrenchingBot:
                     await asyncio.sleep(base_delay)
 
     async def _trenches_poller(self):
+        if not settings.enable_trenches_poller:
+            logger.info("[TRENCHES] Poller disabled (set ENABLE_TRENCHES_POLLER=true to enable)")
+            return
         logger.info("[TRENCHES] Poller starting...")
         poll_count = 0
         ban_count = 0
@@ -325,8 +326,6 @@ class TrenchingBot:
                 poll_count += 1
                 if new_count > 0:
                     logger.info(f"[TRENCHES] #{poll_count}: +{new_count} tokens (queue:{self.queue.qsize()})")
-                else:
-                    logger.info(f"[TRENCHES] #{poll_count}: 0 new tokens (queue:{self.queue.qsize()})")
 
                 if len(self.seen_trenches) > 10000:
                     self.seen_trenches.clear()
