@@ -260,8 +260,12 @@ class TrenchingBot:
                             continue
 
                     seen.add(addr)
-                    await self.queue.put(token)
-                    new_count += 1
+                    try:
+                        self.queue.put_nowait(token)
+                        new_count += 1
+                    except asyncio.QueueFull:
+                        logger.warning(f"GMGN poller: queue full ({self.queue.qsize()}), dropping new token {addr[:8]}")
+                        break
 
                 poll_count += 1
                 if new_count > 0:
@@ -309,8 +313,12 @@ class TrenchingBot:
                         if retry_info["retries"] >= 3:
                             continue
                     self.seen_trenches.add(addr)
-                    await self.queue.put(token)
-                    new_count += 1
+                    try:
+                        self.queue.put_nowait(token)
+                        new_count += 1
+                    except asyncio.QueueFull:
+                        logger.warning(f"Trenches poller: queue full ({self.queue.qsize()}), dropping new token {addr[:8]}")
+                        break
 
                 poll_count += 1
                 if new_count > 0:
@@ -399,8 +407,16 @@ class TrenchingBot:
                 if is_retry:
                     if not await self.state.should_retry(addr):
                         # Lost race — put back at end of queue, skip for now
-                        await self.queue.put(token_info)
-                        await asyncio.sleep(0.1)
+                        # Block briefly waiting for space; if queue stays full
+                        # too long, drop and log (item already dequeued once)
+                        for _ in range(50):
+                            try:
+                                self.queue.put_nowait(token_info)
+                                break
+                            except asyncio.QueueFull:
+                                await asyncio.sleep(0.1)
+                        else:
+                            logger.warning(f"Worker {worker_id}: queue full on retry-back, dropped {addr[:8]}")
                         continue
 
                 processed += 1
