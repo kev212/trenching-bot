@@ -970,7 +970,9 @@ class TrenchingBot:
             # Compute social multiplier (replaces additive bonus)
             # LLM is the FLOOR; signals only amplify (multiplicative, max 1.4x).
             from llm.social_scoring import compute_social_multiplier
-            mult = compute_social_multiplier(token, token.address)
+            from core.trench_signals import detect_negative_signals
+            negative_penalty = detect_negative_signals(token)
+            mult = compute_social_multiplier(token, token.address, negative_penalty=negative_penalty)
             volume_multiplier = mult["multiplier"]
             signals_bonus = mult["signals_bonus"]
             pre_mult_score = token.social_narrative_score
@@ -982,7 +984,7 @@ class TrenchingBot:
                 f"project={token.project_type}, social_links={has_basic_social}, "
                 f"influencers={len(influencer_mentions)}, organic={len(token.organic_mentions)}, "
                 f"catalyst={token.catalyst_match}, signals_bonus=+{signals_bonus}, "
-                f"breakdown={mult['breakdown']}"
+                f"penalty=-{negative_penalty}, breakdown={mult['breakdown']}"
             )
 
         except Exception as e:
