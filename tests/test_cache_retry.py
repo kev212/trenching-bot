@@ -51,10 +51,109 @@ def test_max_retries_is_3():
 # ── SharedState requires event loop for asyncio.Lock in __init__ ──────────────
 
 
-async def _make_state():
+async def _make_state(real_metrics: bool = False):
     state = SharedState()
-    state.metrics = MagicMock()
+    if not real_metrics:
+        state.metrics = MagicMock()
     return state
+
+
+# ── PERMANENT_FILTERS ─────────────────────────────────────────────────────────
+
+
+def test_permanent_filters_includes_min_total_fee():
+    from analysis.filters import PERMANENT_FILTERS
+    assert "min_total_fee" in PERMANENT_FILTERS
+
+
+def test_permanent_filters_includes_mc_bounds():
+    from analysis.filters import PERMANENT_FILTERS
+    assert "min_market_cap" in PERMANENT_FILTERS
+    assert "max_market_cap" in PERMANENT_FILTERS
+
+
+def test_permanent_filters_includes_min_holders():
+    from analysis.filters import PERMANENT_FILTERS
+    assert "min_holders" in PERMANENT_FILTERS
+
+
+def test_permanent_filters_excludes_dynamic():
+    from analysis.filters import PERMANENT_FILTERS
+    assert "token_age" not in PERMANENT_FILTERS
+    assert "fee_tier" not in PERMANENT_FILTERS
+    assert "holder_distribution" not in PERMANENT_FILTERS
+    assert "rug_probability" not in PERMANENT_FILTERS
+    assert "ath_drawdown" not in PERMANENT_FILTERS
+
+
+def test_is_permanent_failure_true():
+    from analysis.filters import is_permanent_failure
+    assert is_permanent_failure(["min_total_fee"]) is True
+    assert is_permanent_failure(["min_market_cap"]) is True
+    assert is_permanent_failure(["min_total_fee", "token_age"]) is True
+
+
+def test_is_permanent_failure_false():
+    from analysis.filters import is_permanent_failure
+    assert is_permanent_failure([]) is False
+    assert is_permanent_failure(["token_age"]) is False
+    assert is_permanent_failure(["fee_tier", "holder_distribution"]) is False
+
+
+# ── Metrics ────────────────────────────────────────────────────────────────────
+
+
+def test_metrics_skip_permanent_increments():
+    async def go():
+        state = await _make_state(real_metrics=True)
+        assert state.metrics.calls_skip_permanent == 0
+        state.metrics.record_call("SKIP_PERMANENT")
+        assert state.metrics.calls_skip_permanent == 1
+        assert state.metrics.calls_total == 1
+    asyncio.run(go())
+
+
+def test_metrics_retry_passes():
+    async def go():
+        state = await _make_state(real_metrics=True)
+        state.metrics.record_retry(passed=True)
+        assert state.metrics.retry_attempts == 1
+        assert state.metrics.retry_passes == 1
+        assert state.metrics.retry_fails == 0
+    asyncio.run(go())
+
+
+def test_metrics_retry_fails():
+    async def go():
+        state = await _make_state(real_metrics=True)
+        state.metrics.record_retry(passed=False)
+        assert state.metrics.retry_attempts == 1
+        assert state.metrics.retry_passes == 0
+        assert state.metrics.retry_fails == 1
+    asyncio.run(go())
+
+
+def test_metrics_retry_success_rate():
+    async def go():
+        state = await _make_state(real_metrics=True)
+        assert state.metrics.retry_success_rate == 0.0
+        state.metrics.record_retry(passed=True)
+        state.metrics.record_retry(passed=False)
+        state.metrics.record_retry(passed=False)
+        assert abs(state.metrics.retry_success_rate - 33.3333) < 0.01
+    asyncio.run(go())
+
+
+def test_retry_to_dict_includes_new_fields():
+    async def go():
+        state = await _make_state(real_metrics=True)
+        d = state.metrics.to_dict()
+        assert "calls_skip_permanent" in d
+        assert "retry_attempts" in d
+        assert "retry_passes" in d
+        assert "retry_fails" in d
+        assert "retry_success_rate" in d
+    asyncio.run(go())
 
 
 # ── add_retry ────────────────────────────────────────────────────────────────
@@ -69,7 +168,28 @@ def test_add_retry_creates_entry():
         assert info["symbol"] == "TEST"
         assert info["name"] == "Test Token"
         assert info["retries"] == 0
+        assert info.get("failed_filters") == []
         assert "timestamp" in info
+    asyncio.run(go())
+
+
+def test_add_retry_with_failed_filters():
+    async def go():
+        state = await _make_state()
+        await state.add_retry("abc", symbol="T", name="T", failed_filters=["min_total_fee", "token_age"])
+        info = state.retry_queue["abc"]
+        assert info["failed_filters"] == ["min_total_fee", "token_age"]
+    asyncio.run(go())
+
+
+def test_add_retry_with_failed_filters_increment():
+    async def go():
+        state = await _make_state()
+        await state.add_retry("abc", symbol="T", name="T", failed_filters=["min_total_fee"])
+        await state.add_retry("abc", symbol="T", name="T", failed_filters=["min_total_fee"])
+        # Second call increments retries but keeps first failed_filters
+        assert state.retry_queue["abc"]["retries"] == 1
+        assert "failed_filters" in state.retry_queue["abc"]
     asyncio.run(go())
 
 
@@ -195,6 +315,20 @@ def test_cleanup_removes_stale():
         state.retry_queue["abc"] = {"timestamp": very_old, "retries": 0, "symbol": "T"}
         await state.cleanup_retry_queue()
         assert "abc" not in state.retry_queue
+    asyncio.run(go())
+
+
+def test_cleanup_removes_permanent_filter():
+    async def go():
+        state = await _make_state()
+        now = time_module.time()
+        state.retry_queue["perm"] = {"timestamp": now, "retries": 0, "symbol": "P",
+                                      "failed_filters": ["min_total_fee"]}
+        state.retry_queue["dyn"] = {"timestamp": now, "retries": 0, "symbol": "D",
+                                     "failed_filters": ["token_age"]}
+        await state.cleanup_retry_queue()
+        assert "perm" not in state.retry_queue
+        assert "dyn" in state.retry_queue
     asyncio.run(go())
 
 

@@ -4,6 +4,21 @@ from analysis.models import TokenData, FeatureVector
 
 logger = logging.getLogger(__name__)
 
+# Filters whose value will NOT change in the retry window (60-300s).
+# Tokens that fail these filters should NOT be retried — they'll
+# fail again at the same value, wasting rate-limit budget.
+PERMANENT_FILTERS = frozenset({
+    "min_market_cap",
+    "max_market_cap",
+    "min_holders",
+    "min_total_fee",
+})
+
+
+def is_permanent_failure(failures: list[str]) -> bool:
+    """True if any of the failures is a permanent filter."""
+    return any(f in PERMANENT_FILTERS for f in failures)
+
 
 def run_all_filters(token: TokenData, filter_params: dict) -> FeatureVector:
     fv = FeatureVector(token_data=token)

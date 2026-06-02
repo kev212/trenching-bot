@@ -382,10 +382,12 @@ class TrenchingBot:
         """Periodically re-queue tokens whose retry delay has expired.
 
         Uses exponential backoff: retry 1 → 60s, retry 2 → 180s, retry 3 → 300s.
-        Tokens that exhaust MAX_RETRIES (3) are dead-lettered (logged only).
+        Tokens with permanent filter failures (min_total_fee, market_cap bounds,
+        min_holders) are dead-lettered immediately — they'll never pass.
         Respects queue backpressure: pauses re-queue when queue is deep.
         """
         from storage.cache import get_retry_delay, MAX_RETRIES
+        from analysis.filters import is_permanent_failure
         logger.info("Retry scheduler started")
         base_interval = 30
 
@@ -398,7 +400,6 @@ class TrenchingBot:
                 expired = []
 
                 qsize = self.queue.qsize()
-                # Backpressure: slow or skip when queue is deep
                 if qsize >= 300:
                     scan_interval = 120
                     await asyncio.sleep(scan_interval)
@@ -416,6 +417,12 @@ class TrenchingBot:
                             continue
                         if await self.state.is_duplicate(addr):
                             expired.append(addr)
+                            continue
+                        if is_permanent_failure(info.get("failed_filters", [])):
+                            dead_letter += 1
+                            expired.append(addr)
+                            dsym = info.get("symbol", "?")
+                            logger.info(f"[DEAD-LETTER] {dsym} ({addr[:8]}): permanent filter, skipping retry")
                             continue
                         delay = get_retry_delay(info["retries"])
                         if now - info["timestamp"] < delay:
@@ -498,7 +505,7 @@ class TrenchingBot:
                 )
 
                 await self._process_token(addr, token_info)
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.1)
 
             except asyncio.CancelledError:
                 break
@@ -732,13 +739,33 @@ class TrenchingBot:
 
         if all_passed:
             logger.info(f"[PASS] {token.symbol} ({address[:8]}): all filters passed")
+            self.state.metrics.record_retry(passed=True)
             await self.state.mark_processed(address)
             await self.state.remove_retry(address)
         else:
+            from analysis.filters import is_permanent_failure
             retry_info = await self.state.get_retry_info(address)
             retries = retry_info.get("retries", 0)
+
+            # Permanent filters (min_market_cap, max_market_cap, min_holders,
+            # min_total_fee) will NOT change value in the retry window — skip
+            # retry entirely to avoid wasting rate-limit budget.
+            if is_permanent_failure(failures):
+                perm_list = [f for f in failures if f in
+                    {"min_market_cap", "max_market_cap", "min_holders", "min_total_fee"}]
+                logger.info(
+                    f"[RETRY-SKIP] {token.symbol} ({address[:8]}): "
+                    f"permanent filter fail {perm_list}"
+                )
+                self.state.metrics.record_call("SKIP_PERMANENT")
+                return
+
             logger.info(f"[RETRY {retries+1}/3] {token.symbol} ({address[:8]}): failed {len(failures)} filters: {failures}")
-            await self.state.add_retry(address, symbol=token.symbol, name=token.name)
+            self.state.metrics.record_retry(passed=False)
+            await self.state.add_retry(
+                address, symbol=token.symbol, name=token.name,
+                failed_filters=failures,
+            )
             self.state.metrics.record_call("SKIP")
             return
 
@@ -1195,8 +1222,12 @@ class TrenchingBot:
             m = self.state.metrics
             retry_count = len(self.state.retry_queue)
             logger.info(
-                f"STATS | calls:{m.calls_total} ape:{m.calls_ape} watch:{m.calls_watch} skip:{m.calls_skip} | "
-                f"w/l:{m.wins}/{m.losses} alerts:{m.alerts_sent} q:{self.queue.qsize()} retry:{retry_count} err:{m.errors}"
+                f"STATS | calls:{m.calls_total} ape:{m.calls_ape} watch:{m.calls_watch} "
+                f"skip:{m.calls_skip} perm_skip:{m.calls_skip_permanent} | "
+                f"retry:{m.retry_attempts} pass:{m.retry_passes} fail:{m.retry_fails} "
+                f"({m.retry_success_rate:.0f}%) | "
+                f"w/l:{m.wins}/{m.losses} alerts:{m.alerts_sent} "
+                f"q:{self.queue.qsize()} rq:{retry_count} err:{m.errors}"
             )
             await self.state.cleanup_retry_queue()
 

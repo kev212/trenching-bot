@@ -74,13 +74,17 @@ class SharedState:
     async def mark_processed(self, address: str):
         await self.processed_cache.set(address, True)
 
-    async def add_retry(self, address: str, symbol: str = "?", name: str = "?"):
+    async def add_retry(self, address: str, symbol: str = "?", name: str = "?", failed_filters: list[str] = None):
         async with self._lock:
             if address in self.retry_queue:
                 self.retry_queue[address]["retries"] += 1
                 self.retry_queue[address]["timestamp"] = time.time()
             else:
-                self.retry_queue[address] = {"timestamp": time.time(), "retries": 0, "symbol": symbol, "name": name}
+                self.retry_queue[address] = {
+                    "timestamp": time.time(), "retries": 0,
+                    "symbol": symbol, "name": name,
+                    "failed_filters": failed_filters or [],
+                }
 
     async def should_retry(self, address: str) -> bool:
         async with self._lock:
@@ -103,11 +107,14 @@ class SharedState:
             self.retry_queue.pop(address, None)
 
     async def cleanup_retry_queue(self):
+        from analysis.filters import is_permanent_failure
         async with self._lock:
             now = time.time()
             max_stale = get_retry_delay(MAX_RETRIES - 1) * 2
             expired = [k for k, v in self.retry_queue.items()
-                       if v["retries"] >= MAX_RETRIES or now - v["timestamp"] > max_stale]
+                       if v["retries"] >= MAX_RETRIES
+                       or now - v["timestamp"] > max_stale
+                       or is_permanent_failure(v.get("failed_filters", []))]
             for k in expired:
                 del self.retry_queue[k]
 
@@ -153,6 +160,10 @@ class Metrics:
         self.calls_ape = 0
         self.calls_watch = 0
         self.calls_skip = 0
+        self.calls_skip_permanent = 0
+        self.retry_attempts = 0
+        self.retry_passes = 0
+        self.retry_fails = 0
         self.wins = 0
         self.losses = 0
         self.alerts_sent = 0
@@ -169,8 +180,17 @@ class Metrics:
             self.calls_ape += 1
         elif verdict == "WATCH":
             self.calls_watch += 1
+        elif verdict == "SKIP_PERMANENT":
+            self.calls_skip_permanent += 1
         else:
             self.calls_skip += 1
+
+    def record_retry(self, passed: bool):
+        self.retry_attempts += 1
+        if passed:
+            self.retry_passes += 1
+        else:
+            self.retry_fails += 1
 
     def record_outcome(self, status: str):
         if status == "WIN":
@@ -184,12 +204,23 @@ class Metrics:
     def record_error(self):
         self.errors += 1
 
+    @property
+    def retry_success_rate(self) -> float:
+        if self.retry_attempts == 0:
+            return 0.0
+        return self.retry_passes / self.retry_attempts * 100.0
+
     def to_dict(self) -> dict:
         return {
             "calls_total": self.calls_total,
             "calls_ape": self.calls_ape,
             "calls_watch": self.calls_watch,
             "calls_skip": self.calls_skip,
+            "calls_skip_permanent": self.calls_skip_permanent,
+            "retry_attempts": self.retry_attempts,
+            "retry_passes": self.retry_passes,
+            "retry_fails": self.retry_fails,
+            "retry_success_rate": f"{self.retry_success_rate:.1f}%",
             "wins": self.wins,
             "losses": self.losses,
             "alerts_sent": self.alerts_sent,
