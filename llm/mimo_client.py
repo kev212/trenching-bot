@@ -43,10 +43,10 @@ class MiMoClient:
 
         except json.JSONDecodeError as e:
             logger.error(f"MiMo returned invalid JSON: {e}")
-            return {"score": 0, "verdict": "SKIP", "reasoning": "LLM parse error", "confidence": 0.0, "key_factors": [], "_processing_time_ms": int((time.time() - start) * 1000)}
+            return None
         except Exception as e:
             logger.error(f"MiMo API error: {e}")
-            return {"score": 0, "verdict": "SKIP", "reasoning": f"LLM error: {str(e)}", "confidence": 0.0, "key_factors": [], "_processing_time_ms": int((time.time() - start) * 1000)}
+            return None
 
     async def analyze_batch(self, prompts: list):
         tasks = [self.analyze_token(sys, usr) for sys, usr in prompts]

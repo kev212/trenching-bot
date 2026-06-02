@@ -34,7 +34,7 @@
   "max_total_bonus": 40,
   "multiplier": {
     "max_boost_pct": 40,
-    "max_penalty_pct": 30,
+    "max_penalty_pct": 50,
     "floor": 0.5,
     "ceiling": 1.5
   }

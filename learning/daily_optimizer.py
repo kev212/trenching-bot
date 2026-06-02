@@ -50,10 +50,20 @@ async def _run_optimization(state, db, mimo: MiMoClient):
 
         wins = [c for c in calls if c.status.value == "WIN"]
         losses = [c for c in calls if c.status.value == "LOSS"]
-        total = len(wins) + len(losses)
+        total_resolved = len(wins) + len(losses)
 
-        if total == 0:
+        # CRITICAL: gate on RESOLVED outcomes (WIN/LOSS), not PENDING.
+        # Optimizing on pending calls = optimizing on noise = dangerous
+        # directional adjustments based on zero information.
+        min_resolved = rules.get("min_resolved_outcomes", 5)
+        if total_resolved < min_resolved:
+            logger.info(
+                f"Skipping optimization: only {total_resolved} resolved outcomes "
+                f"(W={len(wins)}, L={len(losses)}); need >= {min_resolved}"
+            )
             return
+
+        total = total_resolved
 
         win_rate = len(wins) / total * 100
 
@@ -126,6 +136,11 @@ async def _run_optimization(state, db, mimo: MiMoClient):
             return
 
         filters = current_params.get("filters", {})
+        # The version that will result from these adjustments is current+1.
+        # We compute it ONCE here (all adjustments in a single cycle share
+        # a version) and record it so revert monitor can do per-version
+        # cohort analysis.
+        new_version = current_params.get("version", 0) + 1
         for adj in valid_suggestions:
             filter_name = adj["filter"]
             param_name = adj["param"]
@@ -138,12 +153,13 @@ async def _run_optimization(state, db, mimo: MiMoClient):
                 await db.save_adjustment(
                     filter_name, param_name, old_value, new_value,
                     adj["reason"], adj["confidence"], win_rate,
+                    resulting_version=new_version,
                 )
 
                 logger.info(f"Adjusted {filter_name}.{param_name}: {old_value} -> {new_value}")
 
         current_params["filters"] = filters
-        current_params["version"] = current_params.get("version", 0) + 1
+        current_params["version"] = new_version
         current_params["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         save_filter_params(current_params)
@@ -192,10 +208,18 @@ def _validate_adjustments(suggestions: list, rules: dict, current_filters: dict)
     max_change = rules.get("max_change_pct", 0.20)
     min_confidence = rules.get("min_confidence", 0.70)
     max_per_cycle = rules.get("max_adjustments_per_cycle", 3)
+    param_floors = rules.get("param_floors", {})
+    param_ceilings = rules.get("param_ceilings", {})
+    never_disable = rules.get("never_disable_filters", False)
 
     for adj in suggestions:
         if len(valid) >= max_per_cycle:
             break
+
+        # Defensive shape check
+        if not all(k in adj for k in ("filter", "param", "new_value", "confidence")):
+            logger.info(f"Skipping malformed adjustment: missing required keys")
+            continue
 
         confidence = adj.get("confidence", 0)
         if confidence < min_confidence:
@@ -204,7 +228,6 @@ def _validate_adjustments(suggestions: list, rules: dict, current_filters: dict)
 
         filter_name = adj["filter"]
         param_name = adj["param"]
-        old_value = adj.get("old_value")
         new_value = adj.get("new_value")
 
         if filter_name not in current_filters:
@@ -213,15 +236,46 @@ def _validate_adjustments(suggestions: list, rules: dict, current_filters: dict)
             continue
 
         current_value = current_filters[filter_name][param_name]
+
+        # never_disable: refuse to flip `enabled` (bool) AND refuse to
+        # effectively disable a numeric filter by setting it to 0/1.
         if isinstance(current_value, bool):
+            if never_disable and new_value != current_value:
+                logger.info(
+                    f"Skipping {filter_name}.{param_name}: never_disable_filters=True "
+                    f"and adjustment flips bool (would disable)"
+                )
+                continue
+        if never_disable and isinstance(current_value, (int, float)):
+            # If a numeric param has a known minimum that still allows
+            # the filter to function, the floor config enforces that.
+            pass
+
+        if not isinstance(current_value, (int, float)):
             continue
 
+        # Magnitude clamp
         if current_value != 0:
             change_pct = abs(new_value - current_value) / abs(current_value)
             if change_pct > max_change:
                 direction = 1 if new_value > current_value else -1
                 new_value = current_value * (1 + direction * max_change)
                 adj["new_value"] = new_value
+
+        # Per-param FLOOR (safety: never below this) and CEILING (safety: never above).
+        # E.g. min_holders can never drop below 75 — that's the rug-rug floor.
+        if param_name in param_floors and new_value < param_floors[param_name]:
+            logger.info(
+                f"Clamping {filter_name}.{param_name}: {new_value} -> floor {param_floors[param_name]}"
+            )
+            new_value = param_floors[param_name]
+            adj["new_value"] = new_value
+        if param_name in param_ceilings and new_value > param_ceilings[param_name]:
+            logger.info(
+                f"Clamping {filter_name}.{param_name}: {new_value} -> ceiling {param_ceilings[param_name]}"
+            )
+            new_value = param_ceilings[param_name]
+            adj["new_value"] = new_value
 
         valid.append(adj)
 

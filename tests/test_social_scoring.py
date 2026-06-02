@@ -270,13 +270,13 @@ def test_multiplier_elon_vs_penalty():
     print(f"✓ multiplier_elon_vs_penalty: mult=0.82 (signals 12 vs penalty 30)")
 
 
-def test_multiplier_penalty_capped_at_30():
-    """Penalty=50 should cap at 30 (max)."""
+def test_multiplier_penalty_capped_at_50():
+    """Penalty=100 should cap at 50 (max), multiplier reaches 0.5 floor."""
     token = make_token()
-    result = compute_social_multiplier(token, "test", negative_penalty=50)
-    assert result["negative_penalty"] == 30, f"Expected 30, got {result['negative_penalty']}"
-    assert abs(result["multiplier"] - 0.70) < 0.001
-    print(f"✓ multiplier_penalty_capped: penalty capped at 30, mult=0.70")
+    result = compute_social_multiplier(token, "test", negative_penalty=100)
+    assert result["negative_penalty"] == 50, f"Expected 50, got {result['negative_penalty']}"
+    assert abs(result["multiplier"] - 0.50) < 0.001
+    print(f"✓ multiplier_penalty_capped: penalty capped at 50, mult=0.50")
 
 
 def test_multiplier_floor_protection():

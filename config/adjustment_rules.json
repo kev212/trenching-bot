@@ -2,9 +2,25 @@
   "max_change_pct": 0.20,
   "min_confidence": 0.70,
   "min_samples": 10,
+  "min_resolved_outcomes": 5,
+  "min_per_filter_samples": 5,
   "cooldown_hours": 24,
   "auto_revert_threshold": 0.10,
   "max_adjustments_per_cycle": 3,
   "never_disable_filters": true,
-  "revert_check_after_hours": 24
+  "revert_check_after_hours": 24,
+  "param_floors": {
+    "min_market_cap": 5000,
+    "min_holders": 75,
+    "min_total_fee": 3.0,
+    "fee_tier": 3.0,
+    "max_market_cap": 250000
+  },
+  "param_ceilings": {
+    "min_market_cap": 15000,
+    "min_holders": 200,
+    "min_total_fee": 10.0,
+    "fee_tier": 15.0,
+    "max_market_cap": 1000000
+  }
 }

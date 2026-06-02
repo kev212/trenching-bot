@@ -1,7 +1,11 @@
 import aiosqlite
+import logging
+
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from analysis.models import CallRecord, PriceSnapshot, CallStatus
+
+logger = logging.getLogger("main")
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS calls (
@@ -58,6 +62,7 @@ CREATE TABLE IF NOT EXISTS filter_adjustments (
     applied_at TIMESTAMP,
     win_rate_before REAL,
     win_rate_after REAL,
+    resulting_version INTEGER,
     reverted BOOLEAN DEFAULT FALSE,
     reverted_at TIMESTAMP,
     revert_reason TEXT
@@ -264,6 +269,7 @@ class Database:
         migrations = [
             ("positions", "raw_gmgn_json", "TEXT DEFAULT ''"),
             ("positions", "total_sold_sol", "REAL DEFAULT 0.0"),
+            ("filter_adjustments", "resulting_version", "INTEGER"),
         ]
         for table, column, typedef in migrations:
             try:
@@ -373,14 +379,16 @@ class Database:
 
     async def save_adjustment(
         self, filter_name: str, param_name: str, old_value: float,
-        new_value: float, reason: str, confidence: float, win_rate_before: float
+        new_value: float, reason: str, confidence: float, win_rate_before: float,
+        resulting_version: int = 0,
     ):
         await self.db.execute(
             """INSERT INTO filter_adjustments
-            (filter_name, param_name, old_value, new_value, reason, confidence, applied_at, win_rate_before)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (filter_name, param_name, old_value, new_value, reason, confidence,
-             datetime.now(timezone.utc).isoformat(), win_rate_before),
+             applied_at, win_rate_before, resulting_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (filter_name, param_name, old_value, new_value, reason, confidence,
+             datetime.now(timezone.utc).isoformat(), win_rate_before, resulting_version),
         )
         await self.db.commit()
 
@@ -406,6 +414,26 @@ class Database:
              SUM(CASE WHEN status = 'WIN' THEN 1 ELSE 0 END) as wins
              FROM calls WHERE call_time >= ? AND status IN ('WIN', 'LOSS')""",
             (since.isoformat(),),
+        )
+        row = await cursor.fetchone()
+        total = row["total"] or 0
+        wins = row["wins"] or 0
+        wr = (wins / total * 100) if total > 0 else 0.0
+        return total, wins, wr
+
+    async def get_win_rate_for_version(self, version: int) -> tuple[int, int, float]:
+        """Win rate for a specific filter_params_version cohort.
+
+        Replaces the (broken) global `get_win_rate_since` usage in the
+        revert monitor: a single adjustment's effect should be measured
+        against calls made UNDER the new params, not against a global
+        snapshot that includes old-param calls.
+        """
+        cursor = await self.db.execute(
+            """SELECT COUNT(*) as total,
+             SUM(CASE WHEN status = 'WIN' THEN 1 ELSE 0 END) as wins
+             FROM calls WHERE filter_params_version = ? AND status IN ('WIN', 'LOSS')""",
+            (version,),
         )
         row = await cursor.fetchone()
         total = row["total"] or 0

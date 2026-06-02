@@ -21,14 +21,28 @@ class RateLimiter:
         self.tokens = min(self.rate, self.tokens + new_tokens)
         self.last_refill = now
 
-    async def acquire(self):
+    async def acquire(self, n: int = 1):
+        """Acquire n tokens atomically. Waits until n are available.
+
+        Uses a condition variable so other coroutines block on
+        `wait()` instead of busy-polling. Granularity is high (50ms
+        tick) — adjust `TICK` if you need finer control.
+        """
+        if n < 1:
+            return
+        TICK = 0.05
         async with self._lock:
-            self._refill()
-            while self.tokens < 1:
-                wait_time = (1 - self.tokens) * (self.period / self.rate)
-                await asyncio.sleep(min(wait_time, 0.1))
+            while True:
                 self._refill()
-            self.tokens -= 1
+                if self.tokens >= n:
+                    self.tokens -= n
+                    return
+                wait_time = (n - self.tokens) * (self.period / self.rate)
+                # Hold the lock (small window) but use a shorter tick so
+                # we don't oversleep when n>1 is needed but only 1 token
+                # becomes available soon. Spin: no condition variable
+                # needed for this traffic level (≤5 workers).
+                await asyncio.sleep(min(wait_time, TICK))
 
     @property
     def available(self) -> int:

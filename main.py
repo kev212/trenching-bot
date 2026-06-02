@@ -238,6 +238,8 @@ class TrenchingBot:
 
         while True:
             try:
+                # Route through rate limiter — trending is 1 GMGN call
+                await self.rate_limiter.acquire(1)
                 tokens = await self.gmgn.get_trending(limit=20)
                 ban_count = 0
                 new_count = 0
@@ -289,6 +291,8 @@ class TrenchingBot:
 
         while True:
             try:
+                # Route through rate limiter — trenches is 1 GMGN call
+                await self.rate_limiter.acquire(1)
                 tokens = await self.gmgn.get_trenches(limit=20)
                 ban_count = 0
                 new_count = 0
@@ -447,8 +451,9 @@ class TrenchingBot:
                 self.state.metrics.record_call("SKIP")
                 return
 
-        # Acquire 1 rate limit slot (4 parallel calls = 1 budget slot)
-        await self.rate_limiter.acquire()
+        # Acquire 4 rate limit slots — one per parallel GMGN call.
+        # Without this, 1 acquire + 4 parallel calls = 4x the budget.
+        await self.rate_limiter.acquire(4)
 
         # Phase B: parallel fetch — info + security + holders + ath in one round-trip
         # Pre-filter at lines 341-366 already screens ~80% of tokens before this
@@ -486,6 +491,19 @@ class TrenchingBot:
         stat_obj = info.get("stat", {}) if isinstance(info.get("stat"), dict) else {}
         dev_obj = info.get("dev", {}) if isinstance(info.get("dev"), dict) else {}
         holders_list = holders.get("list", []) if isinstance(holders.get("list"), list) else []
+
+        # Data quality flag: True when holder data is missing/failed AND the
+        # stat fallback (top_10_holder_rate, fresh_wallet_rate) is also
+        # missing. In that case, hard-gate filters that depend on holder
+        # distribution or fresh-wallet percentage would be running on
+        # implicit zeros (= "perfect distribution") — that's a silent
+        # false-pass. We mark the token as data-insufficient so the
+        # downstream filter check can refuse to pass.
+        holder_data_missing = (
+            not holders_list
+            and not stat_obj.get("top_10_holder_rate")
+            and not stat_obj.get("fresh_wallet_rate")
+        )
 
         # Calculate market cap from price * total_supply
         current_price = float(price_obj.get("price", 0) or 0)
@@ -566,15 +584,27 @@ class TrenchingBot:
         filter_params = await self.state.get_filter_params()
         fv = run_all_filters(token, filter_params)
 
-        # Hard gate: ALL filters must pass
+        # Hard gate: ALL filters must pass.
+        # Safety override: if holder data was missing (fetch failed AND stat
+        # fallback missing), do NOT pass on implicit zeros — force a
+        # `holder_data_missing` filter failure so the token is re-queued
+        # (or dropped after max retries) instead of falsely passing as
+        # "perfect distribution".
         all_passed, failures = check_hard_gate(fv)
+        if holder_data_missing and all_passed and "holder_data_missing" not in failures:
+            all_passed = False
+            failures = list(failures) + ["holder_data_missing"]
+            logger.info(
+                f"[DATA-INSURFICIENT] {symbol} ({address[:8]}): "
+                "holder/security fetch returned no data; refusing implicit-zero pass"
+            )
 
         # Phase E2-Alert: log every hard-gate outcome (pass or fail) for retro-tuning
         try:
             retry_info_for_log = await self.state.get_retry_info(address)
             retry_count_for_log = retry_info_for_log.get("retries", 0)
             age_min_for_log = (
-                (time.time() * 1000 - max(token.creation_timestamp or 0, token.open_timestamp or 0)) / 60000
+                (time.time() - max(token.creation_timestamp or 0, token.open_timestamp or 0)) / 60
                 if (token.creation_timestamp or token.open_timestamp) else 0.0
             )
             filter_results_dict = {
@@ -588,6 +618,12 @@ class TrenchingBot:
                     "holder_distribution", "token_age", "min_holders", "min_total_fee",
                 ]
             }
+            # If we forced a fail due to missing holder data, record it
+            if "holder_data_missing" in failures:
+                filter_results_dict["holder_data_missing"] = {
+                    "passed": False,
+                    "value": "no holder data and no stat fallback",
+                }
             await self.db.save_filter_outcome(
                 token_address=address,
                 token_name=token.name,
@@ -683,7 +719,7 @@ class TrenchingBot:
         if decision.verdict == Verdict.SKIP:
             try:
                 age_min_skip = (
-                    (time.time() * 1000 - max(token.creation_timestamp or 0, token.open_timestamp or 0)) / 60000
+                    (time.time() - max(token.creation_timestamp or 0, token.open_timestamp or 0)) / 60
                     if (token.creation_timestamp or token.open_timestamp) else 0.0
                 )
                 social_score_skip = float(fv.social_narrative.get("score", 0)) if hasattr(fv, "social_narrative") else 0.0
@@ -946,26 +982,48 @@ class TrenchingBot:
             await self.llm_rate_limiter.acquire()
             social_result = await self.mimo.analyze_token(SOCIAL_ANALYSIS_SYSTEM, social_prompt)
 
-            # 6. Parse LLM #1 response
-            if social_result:
-                try:
-                    social_data = json.loads(social_result) if isinstance(social_result, str) else social_result
-                    token.project_type = social_data.get("project_type", "unknown")
-                    token.social_narrative_score = float(social_data.get("score", 0))
-                    token.social_narrative_text = social_data.get("summary", "")
-                    token.catalyst_match = bool(social_data.get("has_catalyst", False))
-                    token.catalyst_description = social_data.get("catalyst_description", "")
-                except Exception as e:
-                    logger.warning(f"Social analysis parse error for {token.symbol}: {e}")
-                    token.project_type = "unknown"
-                    token.social_narrative_score = 0
-                    token.social_narrative_text = ""
-                    token.catalyst_match = False
-                    token.catalyst_description = ""
+            # 6. Parse LLM #1 response.
+            # IMPORTANT: `analyze_token` returns None on failure (JSON parse
+            # error or API error). Treat failure as DISTINCT from a 0-score
+            # scam verdict — a 0 score means "scam", but None means "we
+            # don't know". A token with no LLM opinion should be NEUTRAL
+            # (50), not falsely treated as a confirmed scam.
+            llm1_succeeded = social_result is not None
+            if llm1_succeeded:
+                social_data = social_result
+                token.project_type = social_data.get("project_type", "unknown")
+                token.social_narrative_score = float(social_data.get("score", 0))
+                token.social_narrative_text = social_data.get("summary", "")
+                token.catalyst_match = bool(social_data.get("has_catalyst", False))
+                token.catalyst_description = social_data.get("catalyst_description", "")
+            else:
+                # LLM failed — mark as "unknown" and use neutral 50.
+                # Don't collapse to 0; that would silently drive the token
+                # toward SKIP (and break the multiplier floor invariant).
+                logger.warning(
+                    f"[LLM-1-FAIL] {token.symbol} ({token.address[:8]}): "
+                    "LLM #1 returned no result; defaulting to neutral 50/unknown"
+                )
+                token.project_type = "unknown"
+                token.social_narrative_score = 50.0
+                token.social_narrative_text = ""
+                token.catalyst_match = False
+                token.catalyst_description = ""
 
             # Score floor: tokens with basic social links get minimum 15pts
+            # EXCEPT: never floor a scam (project_type="scam" or LLM score==0).
+            # The floor is meant to keep marginal-but-real tokens from being
+            # totally killed by sparse social data; it must NOT rescue a flagged
+            # scam or a zero-score LLM verdict (invariant from prompts.py:238).
             has_basic_social = bool(token.twitter_username or token.website_url)
-            if has_basic_social and token.social_narrative_score < 15:
+            is_scam_signal = (
+                token.project_type == "scam" or token.social_narrative_score == 0
+            )
+            if (
+                has_basic_social
+                and not is_scam_signal
+                and token.social_narrative_score < 15
+            ):
                 token.social_narrative_score = 15
 
             # Stage 4: For web3_project tokens, run LLM #3 (substance analysis)
@@ -981,11 +1039,17 @@ class TrenchingBot:
                     token.substance_has_audit = substance["has_audit"]
                     token.substance_audit_firm = substance["audit_firm"]
 
-                    # Combine: 0.4 social + 0.6 substance
+                    # Combine: 0.4 social + 0.6 substance (KEEP SEPARATE for
+                    # multiplier application — multiplier is a SOCIAL signal
+                    # and should only amplify the social component, not the
+                    # substance (audit/team/tech) verdict.
                     llm1_score = token.social_narrative_score
                     llm3_score = substance["substance_score"]
-                    combined = (llm1_score * 0.4) + (llm3_score * 0.6)
-                    token.social_narrative_score = max(0, min(100, combined))
+                    # Apply multiplier later — track components separately
+                    token._llm1_social_raw = llm1_score
+                    token._llm3_substance_raw = llm3_score
+                    combined_no_mult = (llm1_score * 0.4) + (llm3_score * 0.6)
+                    token.social_narrative_score = max(0, min(100, combined_no_mult))
                     logger.info(
                         f"[LLM-3] {token.symbol} ({token.address[:8]}): "
                         f"substance={llm3_score:.0f}/100, team={substance['team_visible']}, "
@@ -995,6 +1059,8 @@ class TrenchingBot:
                     )
                 except Exception as e:
                     logger.error(f"[LLM-3] {token.symbol} error: {e}, using LLM #1 only")
+                    token._llm1_social_raw = token.social_narrative_score
+                    token._llm3_substance_raw = None
 
             # Compute social multiplier (replaces additive bonus)
             # LLM is the FLOOR; signals only amplify (multiplicative, max 1.4x).
@@ -1005,7 +1071,19 @@ class TrenchingBot:
             volume_multiplier = mult["multiplier"]
             signals_bonus = mult["signals_bonus"]
             pre_mult_score = token.social_narrative_score
-            token.social_narrative_score = min(100, max(0, pre_mult_score * volume_multiplier))
+
+            # For web3 tokens, apply multiplier ONLY to social component
+            # (substance is orthogonal — multiplying it by social noise
+            # would inflate real project quality on shill pumping).
+            if (
+                token.project_type == "web3_project"
+                and getattr(token, "_llm3_substance_raw", None) is not None
+            ):
+                llm1_boosted = max(0, min(100, token._llm1_social_raw * volume_multiplier))
+                combined = (llm1_boosted * 0.4) + (token._llm3_substance_raw * 0.6)
+                token.social_narrative_score = max(0, min(100, combined))
+            else:
+                token.social_narrative_score = min(100, max(0, pre_mult_score * volume_multiplier))
 
             logger.info(
                 f"[SOCIAL] {token.symbol} ({token.address[:8]}): "

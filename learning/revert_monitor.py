@@ -11,36 +11,63 @@ logger = logging.getLogger(__name__)
 async def revert_monitor(state, db):
     logger.info("Revert monitor started")
     rules = load_adjustment_rules()
-    check_interval = rules.get("revert_check_after_hours", 24) * 3600
+    # Use the configured interval (in hours) instead of a hardcoded 1h
+    check_interval_hours = rules.get("revert_check_after_hours", 24)
+    check_interval_seconds = max(60, check_interval_hours * 3600)  # at least 1min
+    min_cohort = rules.get("min_per_filter_samples", 5)
 
     while True:
         try:
-            await asyncio.sleep(3600)
+            await asyncio.sleep(check_interval_seconds)
 
-            since = datetime.now(timezone.utc) - timedelta(hours=24)
+            since = datetime.now(timezone.utc) - timedelta(hours=check_interval_hours)
             adjustments = await db.get_adjustments_since(since)
 
             if not adjustments:
                 continue
 
-            total, wins, current_wr = await db.get_win_rate_since(since)
-
-            if total < 5:
-                continue
-
             for adj in adjustments:
-                wr_before = adj.get("win_rate_before", 0)
-                threshold = rules.get("auto_revert_threshold", 0.10)
+                # Per-version cohort: measure the impact of THIS adjustment
+                # against calls made under the version IT produced. This
+                # avoids confounding the win-rate comparison with old-param
+                # calls (the previous global-snapshot logic could revert
+                # a good adjustment because of pre-existing losses).
+                resulting_version = adj.get("resulting_version") or 0
+                if resulting_version <= 0:
+                    # Legacy adjustments before this column was added.
+                    # Skip rather than mis-attribute a global snapshot.
+                    logger.debug(
+                        f"Skip revert check for adj id={adj.get('id')}: no resulting_version"
+                    )
+                    continue
 
-                if wr_before > 0 and (wr_before - current_wr) > threshold * 100:
-                    logger.warning(f"Win rate dropped {wr_before - current_wr:.1f}%, reverting {adj['filter_name']}.{adj['param_name']}")
-                    await _revert_adjustment(adj, state, db, wr_before, current_wr)
+                total, wins, cohort_wr = await db.get_win_rate_for_version(resulting_version)
+                if total < min_cohort:
+                    # Not enough data under the new version yet — wait.
+                    logger.info(
+                        f"Revert check: version {resulting_version} has {total} "
+                        f"resolved calls (need {min_cohort}), skipping"
+                    )
+                    continue
+
+                wr_before = adj.get("win_rate_before", 0)
+                threshold_pct = rules.get("auto_revert_threshold", 0.10) * 100
+
+                if wr_before > 0 and (wr_before - cohort_wr) > threshold_pct:
+                    logger.warning(
+                        f"Cohort v{resulting_version} WR dropped "
+                        f"{wr_before - cohort_wr:.1f}pp (>{threshold_pct:.0f}pp threshold), "
+                        f"reverting {adj['filter_name']}.{adj['param_name']}"
+                    )
+                    await _revert_adjustment(adj, state, db, wr_before, cohort_wr, threshold_pct)
 
         except Exception as e:
             logger.error(f"Revert monitor error: {e}")
 
 
-async def _revert_adjustment(adj: dict, state, db, wr_before: float, wr_after: float):
+async def _revert_adjustment(
+    adj: dict, state, db, wr_before: float, wr_after: float, threshold_pct: float
+):
     try:
         filter_name = adj["filter_name"]
         param_name = adj["param_name"]
@@ -70,7 +97,7 @@ async def _revert_adjustment(adj: dict, state, db, wr_before: float, wr_after: f
                 f"Filter: {filter_name}.{param_name}\n"
                 f"Reverted: {new_value} → {old_value}\n"
                 f"Reason: Win rate dropped {wr_before - wr_after:.1f}%\n"
-                f"Threshold: {10}%"
+                f"Threshold: {threshold_pct:.0f}%"
             )
             await dispatcher.send_message(msg)
 

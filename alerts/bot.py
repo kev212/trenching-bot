@@ -16,6 +16,33 @@ logger = logging.getLogger("main")
 _bot_app: Application = None
 
 
+def _is_authorized(update: Update) -> bool:
+    """Single-user auth: only settings.telegram_chat_id may issue commands."""
+    if not settings.telegram_chat_id:
+        return False  # Refuse everything if no allowlist configured
+    chat = update.effective_chat
+    return bool(chat and str(chat.id) == str(settings.telegram_chat_id))
+
+
+def _require_auth(func):
+    """Decorator: silently reject commands from non-authorized chats.
+    Logs every rejected attempt at warning level for audit trail."""
+    import functools
+
+    @functools.wraps(func)
+    async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if not _is_authorized(update):
+            chat_id = update.effective_chat.id if update.effective_chat else "?"
+            user_id = update.effective_user.id if update.effective_user else "?"
+            logger.warning(
+                f"[AUTH] Rejected command from chat_id={chat_id} user_id={user_id}"
+            )
+            return  # Silent — don't leak that the bot exists or what commands it has
+        return await func(update, ctx)
+
+    return wrapper
+
+
 def _fmt_uptime(seconds: float) -> str:
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -29,6 +56,7 @@ def _fmt_uptime(seconds: float) -> str:
     return " ".join(parts)
 
 
+@_require_auth
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔥 Trenching Bot ACTIVE\n\n"
@@ -48,6 +76,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@_require_auth
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = ctx.bot_data.get("state")
     db = ctx.bot_data.get("db")
@@ -72,6 +101,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+@_require_auth
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = ctx.bot_data.get("state")
     if not state:
@@ -91,6 +121,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+@_require_auth
 async def cmd_active(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = ctx.bot_data.get("state")
     db = ctx.bot_data.get("db")
@@ -121,6 +152,7 @@ async def cmd_active(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+@_require_auth
 async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show open trading positions (Phase 1 paper mode)."""
     state = ctx.bot_data.get("state")
@@ -171,6 +203,7 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+@_require_auth
 async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show PnL summary + wallet balance (Phase 1 paper mode)."""
     state = ctx.bot_data.get("state")
@@ -222,6 +255,7 @@ async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+@_require_auth
 async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show closed (past) trading positions with PnL."""
     state = ctx.bot_data.get("state")
@@ -285,6 +319,7 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+@_require_auth
 async def cmd_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = ctx.bot_data.get("state")
     if not state:
@@ -326,6 +361,7 @@ async def cmd_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+@_require_auth
 async def cmd_queue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = ctx.bot_data.get("state")
     if not state:
@@ -336,6 +372,7 @@ async def cmd_queue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+@_require_auth
 async def cmd_recent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db = ctx.bot_data.get("db")
     if not db:
@@ -366,6 +403,7 @@ async def cmd_recent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+@_require_auth
 async def cmd_best(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db = ctx.bot_data.get("db")
     if not db:
@@ -395,12 +433,14 @@ async def cmd_best(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+@_require_auth
 async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = ctx.bot_data.get("state")
     uptime = _fmt_uptime(state.metrics.uptime_seconds) if state else "?"
     await update.message.reply_text(f"🏓 Pong! Uptime: {uptime}")
 
 
+@_require_auth
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await cmd_start(update, ctx)
 

@@ -68,26 +68,44 @@ async def analyze_web3_substance(token, mimo: MiMoClient) -> dict:
             gmgn_raw=gmgn_raw_str,
         )
 
-        await mimo._lock.acquire()
-        try:
-            result = await mimo.analyze_token(WEB3_SUBSTANCE_SYSTEM, prompt)
-        finally:
-            mimo._lock.release()
+        result = await mimo.analyze_token(WEB3_SUBSTANCE_SYSTEM, prompt)
 
         elapsed_ms = int((time.time() - start) * 1000)
+
+        # LLM #3 failure is a separate signal from a 0 score. Return
+        # neutral defaults so the caller can decide (vs. falsely failing
+        # the substance path on a transient API error).
+        if result is None:
+            logger.warning(
+                f"[LLM-3-FAIL] {token.symbol}: LLM #3 returned no result; "
+                "defaulting to neutral substance 50, no red flags"
+            )
+            return {
+                "substance_score": 50.0,
+                "red_flags": [],
+                "reasoning": "LLM error",
+                "team_visible": False,
+                "has_github": False,
+                "has_audit": False,
+                "audit_firm": "",
+                "_processing_time_ms": elapsed_ms,
+            }
 
         substance_score = float(result.get("substance_score", 50))
         substance_score = max(0, min(100, substance_score))
 
         # Apply red-flag cap (per the rubric: cap at 40)
+        # Match by keyword substring (LLM emits free-text like "Fake/plagiarized
+        # whitepaper" — don't rely on exact snake_case keys).
         red_flags = result.get("red_flags", []) or []
         if isinstance(red_flags, str):
             red_flags = [red_flags]
-        critical_flags = {"fake_audit", "stolen_team", "plagiarized_whitepaper", "fake_team"}
-        if any(flag in critical_flags for flag in red_flags):
+        critical_keywords = ["fake_audit", "stolen", "plagiar", "fake_team", "fake team", "copied"]
+        flags_text = " ".join(str(f).lower() for f in red_flags)
+        if any(kw in flags_text for kw in critical_keywords):
             substance_score = min(substance_score, 40)
             logger.warning(
-                f"[LLM-3] {token.symbol}: red flags detected, capped at 40: {red_flags}"
+                f"[LLM-3] {token.symbol}: critical red flags detected, capped at 40: {red_flags}"
             )
 
         return {
