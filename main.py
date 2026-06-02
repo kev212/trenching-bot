@@ -198,7 +198,8 @@ class TrenchingBot:
             "gmgn_poller": asyncio.create_task(self._gmgn_poller()),
             "trenches_poller": asyncio.create_task(self._trenches_poller()),
             "retry_scheduler": asyncio.create_task(self._retry_scheduler()),
-            "worker_0": asyncio.create_task(self._token_worker(0)),
+            **{f"worker_{i}": asyncio.create_task(self._token_worker(i))
+               for i in range(settings.min_workers)},
             "price_monitor": asyncio.create_task(self._run_forever("price_monitor", price_monitor)),
             "hourly_recap": asyncio.create_task(self._run_forever("hourly_recap", hourly_recap)),
             "daily_optimizer": asyncio.create_task(self._run_forever("daily_optimizer", daily_optimizer)),
@@ -260,6 +261,10 @@ class TrenchingBot:
                             continue
 
                     seen.add(addr)
+
+                    if not self._passes_prefilter(token):
+                        continue
+
                     try:
                         self.queue.put_nowait(token)
                         new_count += 1
@@ -316,6 +321,10 @@ class TrenchingBot:
                         if retry_info["retries"] >= 3:
                             continue
                     self.seen_trenches.add(addr)
+
+                    if not self._passes_prefilter(token):
+                        continue
+
                     try:
                         self.queue.put_nowait(token)
                         new_count += 1
@@ -439,37 +448,38 @@ class TrenchingBot:
                 self.state.metrics.record_error()
                 await asyncio.sleep(1)
 
+    def _passes_prefilter(self, token: dict) -> bool:
+        """Quick pre-filter from poller data — no API call needed.
+
+        Returns True if token passes hard gates (mc, holders, wash).
+        Returns False + logs SKIP + records metric if rejected.
+        """
+        mc = token.get("market_cap", 0) or 0
+        holder_count = token.get("holder_count", 0) or 0
+        is_wash = token.get("is_wash_trading", False)
+        symbol = token.get("symbol", "?") or "?"
+        addr = (token.get("address") or token.get("token_address", ""))[:8]
+
+        if mc <= 0:
+            logger.info(f"[SKIP] {symbol} ({addr}): mc=0")
+            self.state.metrics.record_call("SKIP"); return False
+        if mc < 7000:
+            logger.info(f"[SKIP] {symbol} ({addr}): mc=${mc:,.0f} < $7K")
+            self.state.metrics.record_call("SKIP"); return False
+        if mc > 200000:
+            logger.info(f"[SKIP] {symbol} ({addr}): mc=${mc:,.0f} > $200K")
+            self.state.metrics.record_call("SKIP"); return False
+        if holder_count < 100:
+            logger.info(f"[SKIP] {symbol} ({addr}): holders={holder_count} < 100")
+            self.state.metrics.record_call("SKIP"); return False
+        if is_wash:
+            logger.info(f"[SKIP] {symbol} ({addr}): wash_trading=True")
+            self.state.metrics.record_call("SKIP"); return False
+        return True
+
     async def _process_token(self, address: str, token_info: dict):
-        is_retry = token_info.get("_retry", False)
-        symbol = token_info.get("symbol", "?") or "?"
-
-        if not is_retry:
-            # Quick pre-filter from trending data (no API call needed)
-            mc = token_info.get("market_cap", 0) or 0
-            holder_count = token_info.get("holder_count", 0) or 0
-            is_wash = token_info.get("is_wash_trading", False)
-
-            if mc <= 0:
-                logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=0")
-                self.state.metrics.record_call("SKIP")
-                return
-            if mc < 7000:
-                logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=${mc:,.0f} < $7K")
-                self.state.metrics.record_call("SKIP")
-                return
-            if mc > 200000:
-                logger.info(f"[SKIP] {symbol} ({address[:8]}): mc=${mc:,.0f} > $200K")
-                self.state.metrics.record_call("SKIP")
-                return
-            if holder_count < 100:
-                logger.info(f"[SKIP] {symbol} ({address[:8]}): holders={holder_count} < 100")
-                self.state.metrics.record_call("SKIP")
-                return
-            if is_wash:
-                logger.info(f"[SKIP] {symbol} ({address[:8]}): wash_trading=True")
-                self.state.metrics.record_call("SKIP")
-                return
-
+        # Token already passed prefilter (checked in poller). Retry path
+        # also bypasses prefilter — if it's being retried, it passed before.
         # Acquire 4 rate limit slots — one per parallel GMGN call.
         # Without this, 1 acquire + 4 parallel calls = 4x the budget.
         await self.rate_limiter.acquire(4)
