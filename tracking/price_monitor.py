@@ -127,4 +127,5 @@ async def _analyze_loss(call, final_gain: float, elapsed: float, mimo: MiMoClien
             logger.error(f"loss_analysis save failed for {call.token_symbol}: {e}")
 
     except Exception as e:
-        logger.error(f"Loss analysis error for {call.token_symbol}: {e}")
+        logger.error(f"Loss analysis error for {call.token_symbol}: {e}", exc_info=True)
+

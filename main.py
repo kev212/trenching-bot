@@ -738,7 +738,7 @@ class TrenchingBot:
                     feature_vector=fv_dict,
                 )
             except Exception as e:
-                logger.debug(f"skip_decision save failed for {address[:8]}: {e}")
+                logger.warning(f"skip_decision save failed for {address[:8]}: {e}")
 
         # Alert if APE or WATCH
         if decision.verdict in (Verdict.APE, Verdict.WATCH):
@@ -1116,18 +1116,12 @@ class TrenchingBot:
         while True:
             await asyncio.sleep(300)
             try:
-                cur = await self.db.db.execute(
-                    "SELECT (SELECT COUNT(*) FROM filter_outcomes) as fo, "
-                    "(SELECT COUNT(*) FROM skip_decisions) as sd, "
-                    "(SELECT COUNT(*) FROM loss_analyses) as la"
-                )
-                row = await cur.fetchone()
-                fo_passed = await (await self.db.db.execute(
-                    "SELECT COUNT(*) as c FROM filter_outcomes WHERE passed = 1"
-                )).fetchone()
+                counts = await self.db.get_table_counts()
                 logger.info(
-                    f"DB-STATS | filter_outcomes:{row['fo']} (pass={fo_passed['c']}) "
-                    f"skip_decisions:{row['sd']} loss_analyses:{row['la']}"
+                    f"DB-STATS | filter_outcomes:{counts['filter_outcomes']} "
+                    f"(pass={counts['filter_outcomes_passed']}) "
+                    f"skip_decisions:{counts['skip_decisions']} "
+                    f"loss_analyses:{counts['loss_analyses']}"
                 )
             except Exception as e:
                 logger.warning(f"DB stats error: {e}")

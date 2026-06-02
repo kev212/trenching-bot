@@ -15,14 +15,14 @@ class MiMoClient:
             base_url=settings.mimo_base_url,
         )
         self.model = settings.mimo_model
-        self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(4)
 
     async def analyze_token(
         self, system_prompt: str, user_prompt: str, temperature: float = 0.3
     ) -> dict:
         start = time.time()
         try:
-            async with self._lock:
+            async with self._semaphore:
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=[

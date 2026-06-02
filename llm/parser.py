@@ -43,7 +43,15 @@ def parse_decision(raw: dict) -> LLMDecision:
         )
 
 
-def parse_loss_analysis(raw: dict) -> dict:
+def parse_loss_analysis(raw) -> dict:
+    if raw is None:
+        return {
+            "root_cause": "LLM unavailable",
+            "wrong_filter": "Unknown",
+            "suggestion": "Retry when LLM recovers",
+            "pattern": "LLM failure — no analysis available",
+            "confidence": 0.0,
+        }
     return {
         "root_cause": raw.get("root_cause", "Unknown"),
         "wrong_filter": raw.get("wrong_filter", "Unknown"),
