@@ -857,7 +857,7 @@ class TrenchingBot:
                                 "handle": author,
                                 "name": self.influencers[author]["name"],
                                 "weight": self.influencers[author]["weight"],
-                                "tweet_text": tweet.get("text", "")[:100],
+                            "tweet_text": tweet.get("text", "")[:280],
                                 "likes": tweet.get("likes", 0),
                             })
                         logger.info(f"[SOCIAL] {token.symbol}: fetched tweet {parsed['tweet_id']} by @{author}")
@@ -963,7 +963,7 @@ class TrenchingBot:
                     token.catalyst_description = ""
 
             # Score floor: tokens with basic social links get minimum 15pts
-            has_basic_social = bool(token.twitter_username or token.website_url or token.telegram_url)
+            has_basic_social = bool(token.twitter_username or token.website_url)
             if has_basic_social and token.social_narrative_score < 15:
                 token.social_narrative_score = 15
 
