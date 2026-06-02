@@ -56,11 +56,11 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict,
             social_text += f"  • Project: {token.project_type}\n"
 
     data_score = decision.score
-    final_score = (social_score * 0.6) + (data_score * 0.4)
+    final_score = (social_score * 0.5) + (data_score * 0.5)
 
     scoring_text = f"""📊 SCORE BREAKDOWN:
-  Social (LLM #1):  {social_score:.0f}/100 × 60% = {social_score*0.6:.1f}
-  Data (LLM #2):    {data_score}/100 × 40% = {data_score*0.4:.1f}
+  Social (LLM #1):  {social_score:.0f}/100 × 50% = {social_score*0.5:.1f}
+  Data (LLM #2):    {data_score}/100 × 50% = {data_score*0.5:.1f}
   ─────────────────────────────
   Final Score:       {final_score:.1f}/100
   Verdict:           {decision.verdict.value} {verdict_emoji}"""
