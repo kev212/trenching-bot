@@ -478,6 +478,7 @@ class TrenchingBot:
         return True
 
     async def _process_token(self, address: str, token_info: dict):
+        symbol = (token_info.get("symbol") or token_info.get("name", "?")) or "?"
         # Token already passed prefilter (checked in poller). Retry path
         # also bypasses prefilter — if it's being retried, it passed before.
         # Acquire 4 rate limit slots — one per parallel GMGN call.
