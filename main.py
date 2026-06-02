@@ -967,6 +967,34 @@ class TrenchingBot:
             if has_basic_social and token.social_narrative_score < 15:
                 token.social_narrative_score = 15
 
+            # Stage 4: For web3_project tokens, run LLM #3 (substance analysis)
+            # and combine with LLM #1 using 0.4/0.6 weight.
+            if token.project_type == "web3_project":
+                try:
+                    from core.web3_analyzer import analyze_web3_substance
+                    substance = await analyze_web3_substance(token, self.mimo)
+                    token.substance_score = substance["substance_score"]
+                    token.substance_red_flags = substance["red_flags"]
+                    token.substance_team_visible = substance["team_visible"]
+                    token.substance_has_github = substance["has_github"]
+                    token.substance_has_audit = substance["has_audit"]
+                    token.substance_audit_firm = substance["audit_firm"]
+
+                    # Combine: 0.4 social + 0.6 substance
+                    llm1_score = token.social_narrative_score
+                    llm3_score = substance["substance_score"]
+                    combined = (llm1_score * 0.4) + (llm3_score * 0.6)
+                    token.social_narrative_score = max(0, min(100, combined))
+                    logger.info(
+                        f"[LLM-3] {token.symbol} ({token.address[:8]}): "
+                        f"substance={llm3_score:.0f}/100, team={substance['team_visible']}, "
+                        f"github={substance['has_github']}, audit={substance['has_audit']} "
+                        f"({substance['audit_firm']}), red_flags={substance['red_flags']}, "
+                        f"reasoning={substance['reasoning'][:120]}"
+                    )
+                except Exception as e:
+                    logger.error(f"[LLM-3] {token.symbol} error: {e}, using LLM #1 only")
+
             # Compute social multiplier (replaces additive bonus)
             # LLM is the FLOOR; signals only amplify (multiplicative, max 1.4x).
             from llm.social_scoring import compute_social_multiplier

@@ -74,6 +74,14 @@ class TokenData:
     catalyst_match: bool = False
     catalyst_description: str = ""
 
+    # Web3 substance scoring (Stage 4 — for project_type == "web3_project" only)
+    substance_score: float = 0.0
+    substance_red_flags: list = field(default_factory=list)
+    substance_team_visible: bool = False
+    substance_has_github: bool = False
+    substance_has_audit: bool = False
+    substance_audit_firm: str = ""
+
 
 @dataclass
 class FeatureVector:

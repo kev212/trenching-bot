@@ -1,0 +1,108 @@
+"""Web3 project substance analysis (LLM #3).
+
+Dedicated LLM call to evaluate project substance for web3_project tokens.
+Returns substance_score 0-100 plus red_flags. Falls back to neutral 50
+on LLM error so the token isn't auto-rejected.
+"""
+import json
+import logging
+import time
+from datetime import datetime, timezone
+from typing import Optional
+
+from llm.mimo_client import MiMoClient
+from llm.prompts import WEB3_SUBSTANCE_SYSTEM, WEB3_SUBSTANCE_USER
+
+logger = logging.getLogger("web3_analyzer")
+
+
+async def analyze_web3_substance(token, mimo: MiMoClient) -> dict:
+    """Run LLM #3 to evaluate web3 project substance.
+
+    Returns dict:
+        {
+            "substance_score": float 0-100,
+            "red_flags": list[str],
+            "reasoning": str,
+            "team_visible": bool,
+            "has_github": bool,
+            "has_audit": bool,
+            "audit_firm": str,
+            "_processing_time_ms": int,
+        }
+    """
+    start = time.time()
+    fallback = {
+        "substance_score": 50.0,  # neutral fallback so token isn't auto-rejected
+        "red_flags": [],
+        "reasoning": "LLM #3 fallback (neutral)",
+        "team_visible": False,
+        "has_github": False,
+        "has_audit": False,
+        "audit_firm": "",
+        "_processing_time_ms": 0,
+    }
+
+    if not getattr(token, "project_type", "") == "web3_project":
+        return fallback
+
+    try:
+        if token.creation_timestamp > 0:
+            age_min = (datetime.now(timezone.utc).timestamp() - token.creation_timestamp) / 60
+            if age_min < 60:
+                age_description = f"{age_min:.0f} minutes ago"
+            else:
+                age_description = f"{age_min/60:.1f} hours ago"
+        else:
+            age_description = "unknown"
+
+        gmgn_raw_str = json.dumps(getattr(token, "raw_gmgn", {}) or {}, default=str)[:2000]
+
+        prompt = WEB3_SUBSTANCE_USER.format(
+            token_name=token.name,
+            token_symbol=token.symbol,
+            market_cap=token.market_cap,
+            age_description=age_description,
+            website_text=(token.website_text or "")[:1500] or "No website content",
+            twitter_description=(token.twitter_description or "")[:500] or "No Twitter description",
+            gmgn_raw=gmgn_raw_str,
+        )
+
+        await mimo._lock.acquire()
+        try:
+            result = await mimo.analyze_token(WEB3_SUBSTANCE_SYSTEM, prompt)
+        finally:
+            mimo._lock.release()
+
+        elapsed_ms = int((time.time() - start) * 1000)
+
+        substance_score = float(result.get("substance_score", 50))
+        substance_score = max(0, min(100, substance_score))
+
+        # Apply red-flag cap (per the rubric: cap at 40)
+        red_flags = result.get("red_flags", []) or []
+        if isinstance(red_flags, str):
+            red_flags = [red_flags]
+        critical_flags = {"fake_audit", "stolen_team", "plagiarized_whitepaper", "fake_team"}
+        if any(flag in critical_flags for flag in red_flags):
+            substance_score = min(substance_score, 40)
+            logger.warning(
+                f"[LLM-3] {token.symbol}: red flags detected, capped at 40: {red_flags}"
+            )
+
+        return {
+            "substance_score": substance_score,
+            "red_flags": red_flags,
+            "reasoning": result.get("reasoning", ""),
+            "team_visible": bool(result.get("team_visible", False)),
+            "has_github": bool(result.get("has_github", False)),
+            "has_audit": bool(result.get("has_audit", False)),
+            "audit_firm": result.get("audit_firm", "") or "",
+            "_processing_time_ms": elapsed_ms,
+        }
+
+    except Exception as e:
+        elapsed_ms = int((time.time() - start) * 1000)
+        logger.error(f"[LLM-3] {token.symbol} error: {e}")
+        fallback["_processing_time_ms"] = elapsed_ms
+        return fallback

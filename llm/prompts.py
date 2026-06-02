@@ -233,6 +233,10 @@ Influencer Mentions:
 IMPORTANT: This is a NEW meme token. A score of 15-30 is NORMAL if basic social links exist.
 Focus on what social presence EXISTS and whether there's any community activity around this token.
 
+Your score reflects PRESENCE QUALITY (how good the social setup is).
+Code will MULTIPLY your score by a volume signal (0.5x-1.5x) based on activity.
+So a 0 score = scam, code cannot rescue it. A 50 score with high activity = ~70.
+
 Respond with this exact JSON format:
 {{
   "project_type": "web3_project|meme|scam|unknown",
@@ -241,4 +245,73 @@ Respond with this exact JSON format:
   "summary": "<brief description of what this token is about and its social presence>",
   "has_catalyst": <bool>,
   "catalyst_description": "<if has_catalyst=true, describe the real-world event this token is riding; empty string otherwise>"
+}}"""
+
+
+WEB3_SUBSTANCE_SYSTEM = """You are a Web3 project due-diligence analyst.
+Score a Solana token's PROJECT SUBSTANCE 0-100 based on evidence of working technology,
+credible team, and verifiable claims. This is NOT a social/buzz score.
+
+Use the rubric below to guide your evaluation.
+
+WEBSITE QUALITY (35pts):
+- 0-10: Placeholder/empty/vague
+- 10-20: Marketing copy only, no real product
+- 20-30: Has product description with some technical depth
+- 30-35: Detailed product spec / whitepaper / clear roadmap
+
+TEAM CREDIBILITY (25pts):
+- 0-10: Fully anonymous, no team info
+- 10-20: Pseudonymous with verifiable track record
+- 20-25: Doxxed team or known prior projects
+
+TECH VERIFICATION (25pts):
+- 0-10: No verifiable code (no GitHub, no audit)
+- 10-15: GitHub link present but low activity
+- 15-20: Active GitHub with realistic code
+- 20-25: Audit by known firm + active repo
+
+TOKENOMICS (15pts):
+- 0-5: Suspicious (huge dev wallet, no vesting, anti-whale traps)
+- 5-10: Standard memecoin-style (acceptable for early)
+- 10-15: Reasonable distribution, clear vesting
+
+If ANY of these red flags appear, CAP the score at 40:
+- Fake/plagiarized whitepaper
+- Stolen team (photos or bios of known people without consent)
+- Audit claimed but no audit link or known firm
+- GitHub repo copied from another project
+
+Respond ONLY in JSON format."""
+
+
+WEB3_SUBSTANCE_USER = """Analyze this Solana token's project substance:
+
+TOKEN CONTEXT:
+- Name: {token_name}
+- Symbol: {token_symbol}
+- Market Cap: ${market_cap:,.0f}
+- Created: {age_description}
+
+WEBSITE TEXT:
+{website_text}
+
+TWITTER DESCRIPTION:
+{twitter_description}
+
+GMGN RAW DATA (may contain GitHub links, audit refs, social links):
+{gmgn_raw}
+
+You can ONLY use what's in the data above — do not invent details.
+Score honestly. If information is missing, give partial credit and note it in reasoning.
+
+Respond with this exact JSON format:
+{{
+  "substance_score": <integer 0-100>,
+  "red_flags": ["<flag1>", "<flag2>"],
+  "reasoning": "<1-2 sentence explanation of your score>",
+  "team_visible": <bool>,
+  "has_github": <bool>,
+  "has_audit": <bool>,
+  "audit_firm": "<name of audit firm if mentioned, else empty string>"
 }}"""
