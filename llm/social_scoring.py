@@ -126,12 +126,13 @@ def _influencer_bonus(token, cfg: dict) -> int:
     return int(base + consensus_bonus)
 
 
-def _organic_spread_bonus(token, cfg: dict) -> int:
-    """Count unique non-influencer authors and apply tiered bonus."""
+def _organic_spread_bonus(token, cfg: dict, token_address: str = "") -> int:
+    """Count unique non-influencer authors with CA in tweet, apply tiered bonus."""
     if not token.organic_mentions:
         return 0
 
-    unique_authors = {m.get("handle", "") for m in token.organic_mentions if m.get("handle")}
+    ca_mentions = _filter_by_ca(token.organic_mentions, token_address)
+    unique_authors = {m.get("handle", "") for m in ca_mentions if m.get("handle")}
     n = len(unique_authors)
 
     spread = cfg["organic_spread"]
@@ -144,29 +145,43 @@ def _organic_spread_bonus(token, cfg: dict) -> int:
     return 0
 
 
-def _engagement_quality_bonus(token, cfg: dict) -> int:
-    """3-tier engagement quality (20+, 100+, 500+ likes)."""
+def _engagement_quality_bonus(token, cfg: dict, token_address: str = "") -> int:
+    """3-tier engagement quality (20+, 100+, 500+ likes) — only CA-containing tweets."""
     if not token.organic_mentions:
         return 0
 
+    ca_mentions = _filter_by_ca(token.organic_mentions, token_address)
     eng = cfg["engagement"]
     bonus = 0
 
     # Tier 1: 2+ tweets with 20+ likes
-    tier1_count = sum(1 for m in token.organic_mentions if m.get("likes", 0) >= eng["tier1_likes"])
+    tier1_count = sum(1 for m in ca_mentions if m.get("likes", 0) >= eng["tier1_likes"])
     if tier1_count >= eng["tier1_min_count"]:
         bonus += eng["tier1_bonus"]
 
     # Tier 2: 5+ tweets with 100+ likes (viral)
-    tier2_count = sum(1 for m in token.organic_mentions if m.get("likes", 0) >= eng["tier2_likes"])
+    tier2_count = sum(1 for m in ca_mentions if m.get("likes", 0) >= eng["tier2_likes"])
     if tier2_count >= eng["tier2_min_count"]:
         bonus += eng["tier2_bonus"]
 
     # Tier 3: any single tweet with 500+ likes (mega viral)
-    if any(m.get("likes", 0) >= eng["tier3_likes"] for m in token.organic_mentions):
+    if any(m.get("likes", 0) >= eng["tier3_likes"] for m in ca_mentions):
         bonus += eng["tier3_bonus"]
 
     return bonus
+
+
+def _filter_by_ca(mentions: list, token_address: str) -> list:
+    """Filter mentions to only those containing the contract address in tweet text."""
+    if not token_address:
+        return mentions
+    ca_lower = token_address.lower()
+    filtered = []
+    for m in mentions:
+        text = (m.get("tweet_text", "") or "").lower()
+        if ca_lower in text:
+            filtered.append(m)
+    return filtered
 
 
 def _catalyst_bonus(token, cfg: dict) -> int:
@@ -176,8 +191,12 @@ def _catalyst_bonus(token, cfg: dict) -> int:
     return 0
 
 
-def calculate_social_signals_bonus(token) -> dict:
+def calculate_social_signals_bonus(token, token_address: str = "") -> dict:
     """Compute total social signals bonus for a token.
+
+    Args:
+        token: TokenData object with social fields
+        token_address: Contract address for CA presence filtering
 
     Returns:
         {
@@ -194,8 +213,8 @@ def calculate_social_signals_bonus(token) -> dict:
 
     breakdown = {
         "influencer": _influencer_bonus(token, cfg),
-        "organic_spread": _organic_spread_bonus(token, cfg),
-        "engagement": _engagement_quality_bonus(token, cfg),
+        "organic_spread": _organic_spread_bonus(token, cfg, token_address),
+        "engagement": _engagement_quality_bonus(token, cfg, token_address),
         "catalyst": _catalyst_bonus(token, cfg),
     }
 

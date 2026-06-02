@@ -160,32 +160,27 @@ SOCIAL_ANALYSIS_SYSTEM = """You are a crypto social analyst. Analyze the social 
 IMPORTANT CONTEXT: This is typically a NEW meme token (hours old). Most new tokens have minimal social presence. This is NORMAL.
 
 SCORING GUIDE (0-100):
-**Basic Presence (up to 25pts):**
-- Has Twitter account: +15pts
-- Has website: +10pts
-- Has Telegram: +5pts
+**Twitter Presence (max 40pts):**
+- Has Twitter account: +20pts
+- Has Twitter community: +20pts
 
-**Twitter Quality (up to 25pts):**
-- Followers > 100: +5pts
-- Followers > 1,000: +10pts
-- Followers > 10,000: +15pts
+**Twitter Quality (max 25pts):**
+- Followers >100: +5pts
+- Followers >1K: +10pts
+- Followers >10K: +15pts
 - Verified account: +10pts
 
-**Community Activity (up to 20pts):**
-- Recent tweets about this token (search results): +10pts
-- Multiple people discussing it: +10pts
-- Active Twitter account (recent posts): +5pts
+**Tweet Activity (max 25pts):**
+- Recent tweets from token account: +10pts
+- Organic mentions (search by contract address): +10pts
+- High engagement tweets (likes, retweets): +5pts
 
-**Social Engagement Quality (up to 30pts):**
-- Tweet tied to real-world event (news, quote, viral moment): +15-20pts
-- Multiple accounts discussing the same catalyst: +10-15pts
-- High engagement (likes, retweets, replies) on tweets: +5-10pts
-- Note: I handle individual influencer detection separately via code.
+**Website (max 15pts):**
+- Has website: +10pts
+- Website has real content (not placeholder/empty): +5pts
 
-**Project Signals (up to 20pts):**
-- Real web3 project (not just meme): +15pts
-- Active development visible: +10pts
-- Roadmap or whitepaper: +5pts
+**Catalyst (max 10pts):**
+- Token narrative matches a real-world event: +10pts
 
 CATALYST DETECTION (important):
 Check if the token's narrative matches a current event visible in the tweets. Examples:
@@ -220,6 +215,8 @@ Twitter: @{twitter_username}
 Followers: {twitter_followers}
 Verified: {twitter_verified}
 Description: {twitter_description}
+
+Twitter Community: {twitter_community}
 
 Recent Tweets (from this account):
 {recent_tweets}

@@ -935,6 +935,7 @@ class TrenchingBot:
                 twitter_followers=token.twitter_followers,
                 twitter_verified="Yes" if token.twitter_verified else "No",
                 twitter_description=token.twitter_description[:200] or "No description",
+                twitter_community=token.has_community or "No",
                 recent_tweets=json.dumps(token.recent_tweets[:3], indent=2) if token.recent_tweets else "No tweets from this account yet",
                 website_text=token.website_text[:500] or "No website content",
                 search_results=json.dumps(search_results[:5], indent=2) if search_results else "No search results yet",
@@ -968,7 +969,7 @@ class TrenchingBot:
 
             # Compute social signals bonus (replaces simple max(weight))
             from llm.social_scoring import calculate_social_signals_bonus
-            signals = calculate_social_signals_bonus(token)
+            signals = calculate_social_signals_bonus(token, token.address)
             signals_bonus = signals["total_bonus"]
             token.social_narrative_score = min(100, token.social_narrative_score + signals_bonus)
 
