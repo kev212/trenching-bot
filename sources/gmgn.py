@@ -134,6 +134,8 @@ class GMGNClient:
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
+            import json
+            logger.info(f"[GMGN-API] get_trenches keys={list(data.keys())} data={json.dumps(data, default=str)[:500]}")
             for key in body.get("types", []):
                 if key in data:
                     return data[key]
