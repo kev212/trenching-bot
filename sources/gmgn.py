@@ -135,5 +135,7 @@ class GMGNClient:
             result = data
         else:
             result = data.get("items", []) if isinstance(data, dict) else []
-        logger.info(f"[GMGN-API] get_trenches returned type={type(data).__name__} count={len(result)}")
+        import json
+        preview = json.dumps(data, default=str)[:400] if isinstance(data, dict) else 'N/A'
+        logger.info(f"[GMGN-API] get_trenches type={type(data).__name__} count={len(result)} keys={list(data.keys())[:10] if isinstance(data, dict) else 'N/A'} preview={preview}")
         return result
