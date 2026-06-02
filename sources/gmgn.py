@@ -132,10 +132,9 @@ class GMGNClient:
         }
         data = await self._post("/v1/trenches", query, body)
         if isinstance(data, list):
-            result = data
-        else:
-            result = data.get("items", []) if isinstance(data, dict) else []
-        import json
-        preview = json.dumps(data, default=str)[:400] if isinstance(data, dict) else 'N/A'
-        logger.info(f"[GMGN-API] get_trenches type={type(data).__name__} count={len(result)} keys={list(data.keys())[:10] if isinstance(data, dict) else 'N/A'} preview={preview}")
-        return result
+            return data
+        if isinstance(data, dict):
+            for key in body.get("types", []):
+                if key in data:
+                    return data[key]
+        return []
