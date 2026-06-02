@@ -230,7 +230,7 @@ class TrenchingBot:
                 await asyncio.sleep(min(2 ** retries, 60))
 
     async def _gmgn_poller(self):
-        logger.info("GMGN Poller starting...")
+        logger.info("[TRENDING] Poller starting...")
         seen = set()
         poll_count = 0
         ban_count = 0
@@ -264,12 +264,12 @@ class TrenchingBot:
                         self.queue.put_nowait(token)
                         new_count += 1
                     except asyncio.QueueFull:
-                        logger.warning(f"GMGN poller: queue full ({self.queue.qsize()}), dropping new token {addr[:8]}")
+                        logger.warning(f"[TRENDING] queue full ({self.queue.qsize()}), dropping new token {addr[:8]}")
                         break
 
                 poll_count += 1
                 if new_count > 0:
-                    logger.info(f"GMGN #{poll_count}: +{new_count} tokens (queue:{self.queue.qsize()})")
+                    logger.info(f"[TRENDING] #{poll_count}: +{new_count} tokens (queue:{self.queue.qsize()})")
 
                 if len(seen) > 10000:
                     seen.clear()
@@ -281,14 +281,14 @@ class TrenchingBot:
                 if "429" in err_str or "RATE_LIMIT" in err_str or "BANNED" in err_str:
                     ban_count += 1
                     wait_time = min(60 * (2 ** ban_count), 600)
-                    logger.warning(f"GMGN rate limited (ban #{ban_count}), waiting {wait_time}s...")
+                    logger.warning(f"[TRENDING] rate limited (ban #{ban_count}), waiting {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
-                    logger.error(f"GMGN poller error: {e}")
+                    logger.error(f"[TRENDING] poller error: {e}")
                     await asyncio.sleep(base_delay)
 
     async def _trenches_poller(self):
-        logger.info("Trenches Poller starting...")
+        logger.info("[TRENCHES] Poller starting...")
         poll_count = 0
         ban_count = 0
         base_delay = 30
@@ -317,12 +317,12 @@ class TrenchingBot:
                         self.queue.put_nowait(token)
                         new_count += 1
                     except asyncio.QueueFull:
-                        logger.warning(f"Trenches poller: queue full ({self.queue.qsize()}), dropping new token {addr[:8]}")
+                        logger.warning(f"[TRENCHES] queue full ({self.queue.qsize()}), dropping new token {addr[:8]}")
                         break
 
                 poll_count += 1
                 if new_count > 0:
-                    logger.info(f"Trenches #{poll_count}: +{new_count} tokens (queue:{self.queue.qsize()})")
+                    logger.info(f"[TRENCHES] #{poll_count}: +{new_count} tokens (queue:{self.queue.qsize()})")
 
                 if len(self.seen_trenches) > 10000:
                     self.seen_trenches.clear()
@@ -334,10 +334,10 @@ class TrenchingBot:
                 if "429" in err_str or "RATE_LIMIT" in err_str or "BANNED" in err_str:
                     ban_count += 1
                     wait_time = min(60 * (2 ** ban_count), 600)
-                    logger.warning(f"Trenches rate limited (ban #{ban_count}), waiting {wait_time}s...")
+                    logger.warning(f"[TRENCHES] rate limited (ban #{ban_count}), waiting {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
-                    logger.error(f"Trenches poller error: {e}")
+                    logger.error(f"[TRENCHES] poller error: {e}")
                     await asyncio.sleep(base_delay)
 
     async def _retry_scheduler(self):
