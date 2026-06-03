@@ -670,8 +670,28 @@ class TrenchingBot:
             drawdown_from_ath_pct=drawdown,
         )
 
+        # Early permanent skip — before running expensive filters.
+        from analysis.filters import is_compound_permanent_failure
+
+        # fee < 0.1 SOL → dead-letter, gak perlu filter.
+        if token.fee_collected < 0.1:
+            logger.info(
+                f"[RETRY-SKIP] {token.symbol} ({address[:8]}): "
+                f"fee={token.fee_collected:.2f} SOL < 0.1 — permanent"
+            )
+            self.state.metrics.record_call("SKIP_PERMANENT")
+            return
+
+        # Compound rule — age > 30m + fee < 1.0 SOL → dead-letter
+        if is_compound_permanent_failure(token):
+            logger.info(
+                f"[RETRY-SKIP] {token.symbol} ({address[:8]}): "
+                f"age > 30m fee={token.fee_collected:.2f} SOL < 1.0 — no traction"
+            )
+            self.state.metrics.record_call("SKIP_PERMANENT")
+            return
+
         # Run filters
-        filter_params = await self.state.get_filter_params()
         fv = run_all_filters(token, filter_params)
 
         # Hard gate: ALL filters must pass.
@@ -737,30 +757,8 @@ class TrenchingBot:
             await self.state.mark_processed(address)
             await self.state.remove_retry(address)
         else:
-            from analysis.filters import is_permanent_failure, is_compound_permanent_failure
             retry_info = await self.state.get_retry_info(address)
             retries = retry_info.get("retries", 0)
-
-            # Permanent filters: value won't change in retry window — skip retry.
-            if is_permanent_failure(failures):
-                perm_list = [f for f in failures
-                             if f in {"min_total_fee"}]
-                logger.info(
-                    f"[RETRY-SKIP] {token.symbol} ({address[:8]}): "
-                    f"permanent filter fail {perm_list}"
-                )
-                self.state.metrics.record_call("SKIP_PERMANENT")
-                return
-
-            # Compound rule: pre-migrate token > 30 min with fee < 5 SOL
-            # has had enough time to prove traction but hasn't.
-            elif is_compound_permanent_failure(failures, token):
-                logger.info(
-                    f"[RETRY-SKIP] {token.symbol} ({address[:8]}): "
-                    f"age > 30m fee={token.fee_collected:.2f} SOL < 1 — no traction"
-                )
-                self.state.metrics.record_call("SKIP_PERMANENT")
-                return
 
             logger.info(f"[RETRY {retries+1}/3] {token.symbol} ({address[:8]}): failed {len(failures)} filters: {failures}")
             self.state.metrics.record_retry(passed=False)

@@ -14,7 +14,7 @@ PERMANENT_FILTERS = frozenset({
 
 # Compound rule: token (pre or post migrate) older than COMPOUND_AGE_MINUTES
 # with fee below COMPOUND_FEE_MIN_SOL has had enough time to prove traction
-# but hasn't — skip retry permanently.
+# but hasn't — skip permanently.
 COMPOUND_FEE_MIN_SOL = 1.0
 COMPOUND_AGE_MINUTES = 30.0
 
@@ -25,17 +25,14 @@ def is_permanent_failure(failures: list[str]) -> bool:
 
 
 def is_compound_permanent_failure(
-    failures: list[str],
     token: TokenData,
 ) -> bool:
     """Check if a token qualifies for compound permanent skip.
 
-    Rule: min_total_fee failed AND age > 30min AND fee < 1 SOL (pre or post
-    migrate). Such a token has had enough time to prove traction but hasn't.
-    No point retrying — skip permanently.
+    Rule: age > 30min AND fee < 0.1 SOL (pre or post migrate).
+    Such a token has had enough time to prove traction but hasn't.
+    Independent of hard gate min_total_fee — runs regardless of other failures.
     """
-    if "min_total_fee" not in failures:
-        return False
     age_seconds = time.time() - max(
         token.creation_timestamp or 0, token.open_timestamp or 0
     )
