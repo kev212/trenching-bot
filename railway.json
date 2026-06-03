@@ -1,0 +1,9 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "buildCommand": "pip install -r requirements.txt && playwright install chromium --with-deps"
+  },
+  "deploy": {
+    "startCommand": "python3 -u main.py"
+  }
+}
