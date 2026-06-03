@@ -64,6 +64,7 @@ class TokenData:
     has_toly_tweet: bool = False
     has_community: bool = False
     community_id: str = ""
+    community_creator: str = ""
 
     # Website content
     website_text: str = ""

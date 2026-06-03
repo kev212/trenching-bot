@@ -1043,6 +1043,44 @@ class TrenchingBot:
                 token.community_id = parsed["community_id"]
                 logger.info(f"[SOCIAL] {token.symbol}: has community {parsed['community_id']}")
 
+                # Scrape community creator if no handle exists
+                if not parsed["handle"]:
+                    try:
+                        creator_handle = await self.twitter.get_community_creator(
+                            parsed["community_id"]
+                        )
+                        if creator_handle:
+                            token.community_creator = creator_handle
+                            # Fetch creator profile + tweets as social data
+                            try:
+                                profile = await self.twitter.get_profile(creator_handle)
+                                if profile:
+                                    token.twitter_followers = profile.get("followers", 0)
+                                    token.twitter_verified = profile.get(
+                                        "verification", {}
+                                    ).get("verified", False)
+                                    token.twitter_description = profile.get(
+                                        "description", ""
+                                    )
+                                    token.twitter_username = creator_handle
+                            except Exception as e:
+                                logger.warning(
+                                    f"Creator profile error for {token.symbol}: {e}"
+                                )
+                            try:
+                                tweets = await self.twitter.get_recent_tweets(
+                                    creator_handle, 3
+                                )
+                                token.recent_tweets = tweets
+                            except Exception as e:
+                                logger.warning(
+                                    f"Creator tweets error for {token.symbol}: {e}"
+                                )
+                    except Exception as e:
+                        logger.warning(
+                            f"Community scrape error for {token.symbol}: {e}"
+                        )
+
             # 4. Website scraping
             if token.website_url:
                 try:
@@ -1097,6 +1135,7 @@ class TrenchingBot:
                 twitter_verified="Yes" if token.twitter_verified else "No",
                 twitter_description=token.twitter_description[:200] or "No description",
                 twitter_community=f"Yes (community/{token.community_id})" if token.has_community else "No",
+                community_creator=f"@{token.community_creator} (creator)" if token.community_creator else "Unknown",
                 recent_tweets=json.dumps(token.recent_tweets[:3], indent=2) if token.recent_tweets else "No tweets from this account yet",
                 website_text=token.website_text[:500] or "No website content",
                 search_results=json.dumps(search_results[:5], indent=2) if search_results else "No search results yet",

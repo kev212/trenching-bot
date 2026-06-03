@@ -107,3 +107,54 @@ class TwitterClient:
             {"q": address, "feed": "latest", "count": count},
         )
         return data.get("results", [])
+
+    async def get_community_creator(self, community_id: str) -> str:
+        """Scrape community page via Playwright to extract creator handle.
+
+        Returns handle (e.g. 'derpserk_ai') or empty string on failure.
+        """
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            logger.warning("Playwright not installed, cannot scrape community creator")
+            return ""
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                ctx = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/120.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 720},
+                )
+                page = await ctx.new_page()
+                url = f"https://x.com/i/communities/{community_id}"
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                await page.wait_for_timeout(5000)
+
+                # Click About tab
+                about = page.get_by_text("About", exact=True)
+                await about.click()
+                await page.wait_for_timeout(3000)
+
+                text = await page.inner_text("body")
+
+                # Extract creator from "Created ... by @handle"
+                match = re.search(r"by\s+@(\w+)", text)
+                if match:
+                    handle = match.group(1)
+                    logger.info(f"[COMMUNITY] {community_id}: creator=@{handle}")
+                    await browser.close()
+                    return handle
+
+                logger.warning(f"[COMMUNITY] {community_id}: no creator found in About tab")
+                await browser.close()
+                return ""
+
+        except Exception as e:
+            logger.error(f"[COMMUNITY] {community_id}: scrape failed: {e}")
+            return ""
