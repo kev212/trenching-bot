@@ -746,19 +746,27 @@ class TrenchingBot:
             await self.state.mark_processed(address)
             await self.state.remove_retry(address)
         else:
-            from analysis.filters import is_permanent_failure
+            from analysis.filters import is_permanent_failure, is_compound_permanent_failure
             retry_info = await self.state.get_retry_info(address)
             retries = retry_info.get("retries", 0)
 
-            # Permanent filters (min_market_cap, max_market_cap, min_holders,
-            # min_total_fee) will NOT change value in the retry window — skip
-            # retry entirely to avoid wasting rate-limit budget.
+            # Permanent filters: value won't change in retry window — skip retry.
             if is_permanent_failure(failures):
-                perm_list = [f for f in failures if f in
-                    {"min_market_cap", "max_market_cap", "min_holders", "min_total_fee"}]
+                perm_list = [f for f in failures
+                             if f in {"min_total_fee"}]
                 logger.info(
                     f"[RETRY-SKIP] {token.symbol} ({address[:8]}): "
                     f"permanent filter fail {perm_list}"
+                )
+                self.state.metrics.record_call("SKIP_PERMANENT")
+                return
+
+            # Compound rule: pre-migrate token > 30 min with fee < 5 SOL
+            # has had enough time to prove traction but hasn't.
+            elif is_compound_permanent_failure(failures, token):
+                logger.info(
+                    f"[RETRY-SKIP] {token.symbol} ({address[:8]}): "
+                    f"pre-migrate age > 30m fee={token.fee_collected:.2f} SOL < 5 — no traction"
                 )
                 self.state.metrics.record_call("SKIP_PERMANENT")
                 return

@@ -61,24 +61,16 @@ async def _make_state(real_metrics: bool = False):
 # ── PERMANENT_FILTERS ─────────────────────────────────────────────────────────
 
 
-def test_permanent_filters_includes_min_total_fee():
+def test_permanent_filters_only_min_total_fee():
     from analysis.filters import PERMANENT_FILTERS
-    assert "min_total_fee" in PERMANENT_FILTERS
+    assert PERMANENT_FILTERS == frozenset({"min_total_fee"})
 
 
-def test_permanent_filters_includes_mc_bounds():
+def test_permanent_filters_excludes_others():
     from analysis.filters import PERMANENT_FILTERS
-    assert "min_market_cap" in PERMANENT_FILTERS
-    assert "max_market_cap" in PERMANENT_FILTERS
-
-
-def test_permanent_filters_includes_min_holders():
-    from analysis.filters import PERMANENT_FILTERS
-    assert "min_holders" in PERMANENT_FILTERS
-
-
-def test_permanent_filters_excludes_dynamic():
-    from analysis.filters import PERMANENT_FILTERS
+    assert "min_market_cap" not in PERMANENT_FILTERS
+    assert "max_market_cap" not in PERMANENT_FILTERS
+    assert "min_holders" not in PERMANENT_FILTERS
     assert "token_age" not in PERMANENT_FILTERS
     assert "fee_tier" not in PERMANENT_FILTERS
     assert "holder_distribution" not in PERMANENT_FILTERS
@@ -89,7 +81,6 @@ def test_permanent_filters_excludes_dynamic():
 def test_is_permanent_failure_true():
     from analysis.filters import is_permanent_failure
     assert is_permanent_failure(["min_total_fee"]) is True
-    assert is_permanent_failure(["min_market_cap"]) is True
     assert is_permanent_failure(["min_total_fee", "token_age"]) is True
 
 
@@ -97,7 +88,94 @@ def test_is_permanent_failure_false():
     from analysis.filters import is_permanent_failure
     assert is_permanent_failure([]) is False
     assert is_permanent_failure(["token_age"]) is False
+    assert is_permanent_failure(["min_market_cap"]) is False
+    assert is_permanent_failure(["max_market_cap"]) is False
+    assert is_permanent_failure(["min_holders"]) is False
     assert is_permanent_failure(["fee_tier", "holder_distribution"]) is False
+
+
+# ── COMPOUND RULE ──────────────────────────────────────────────────
+
+
+def test_compound_skip_for_old_pre_migrate_low_fee():
+    from analysis.filters import is_compound_permanent_failure, TokenData
+
+    token = TokenData(
+        address="cmp1",
+        symbol="CMP",
+        name="Compound",
+        market_cap=10000,
+        fee_collected=0.5,  # < 5 SOL
+        creation_timestamp=1000,
+        open_timestamp=0,
+        migrated_timestamp=0,  # pre-migrate
+    )
+    # Age = now - 1000 >> 30 min
+    assert is_compound_permanent_failure(["min_total_fee"], token) is True
+
+
+def test_compound_no_skip_when_fee_above_5():
+    from analysis.filters import is_compound_permanent_failure, TokenData
+
+    token = TokenData(
+        address="cmp2",
+        symbol="CMP2",
+        name="Compound2",
+        market_cap=80000,
+        fee_collected=6.0,  # >= 5 SOL
+        creation_timestamp=1000,
+        open_timestamp=0,
+        migrated_timestamp=0,
+    )
+    assert is_compound_permanent_failure(["min_total_fee"], token) is False
+
+
+def test_compound_no_skip_when_post_migrate():
+    from analysis.filters import is_compound_permanent_failure, TokenData
+
+    token = TokenData(
+        address="cmp3",
+        symbol="CMP3",
+        name="Compound3",
+        market_cap=80000,
+        fee_collected=0.5,
+        creation_timestamp=1000,
+        open_timestamp=0,
+        migrated_timestamp=2000,  # post-migrate
+    )
+    assert is_compound_permanent_failure(["min_total_fee"], token) is False
+
+
+def test_compound_no_skip_when_young():
+    from analysis.filters import is_compound_permanent_failure, TokenData
+
+    token = TokenData(
+        address="cmp4",
+        symbol="CMP4",
+        name="Compound4",
+        market_cap=10000,
+        fee_collected=0.5,
+        creation_timestamp=time_module.time() - 60,  # 1 min old
+        open_timestamp=0,
+        migrated_timestamp=0,
+    )
+    assert is_compound_permanent_failure(["min_total_fee"], token) is False
+
+
+def test_compound_no_skip_when_min_total_fee_not_in_failures():
+    from analysis.filters import is_compound_permanent_failure, TokenData
+
+    token = TokenData(
+        address="cmp5",
+        symbol="CMP5",
+        name="Compound5",
+        market_cap=10000,
+        fee_collected=0.5,
+        creation_timestamp=1000,
+        open_timestamp=0,
+        migrated_timestamp=0,
+    )
+    assert is_compound_permanent_failure(["token_age"], token) is False
 
 
 # ── Metrics ────────────────────────────────────────────────────────────────────

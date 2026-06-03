@@ -1,3 +1,4 @@
+import time
 import logging
 from datetime import datetime, timezone
 from analysis.models import TokenData, FeatureVector
@@ -8,16 +9,43 @@ logger = logging.getLogger(__name__)
 # Tokens that fail these filters should NOT be retried — they'll
 # fail again at the same value, wasting rate-limit budget.
 PERMANENT_FILTERS = frozenset({
-    "min_market_cap",
-    "max_market_cap",
-    "min_holders",
     "min_total_fee",
 })
+
+# Compound rule: pre-migrate token older than COMPOUND_AGE_MINUTES minutes
+# with fee below COMPOUND_FEE_MIN_SOL has had enough time to prove traction
+# but hasn't — skip retry permanently.
+COMPOUND_FEE_MIN_SOL = 5.0
+COMPOUND_AGE_MINUTES = 30.0
 
 
 def is_permanent_failure(failures: list[str]) -> bool:
     """True if any of the failures is a permanent filter."""
     return any(f in PERMANENT_FILTERS for f in failures)
+
+
+def is_compound_permanent_failure(
+    failures: list[str],
+    token: TokenData,
+) -> bool:
+    """Check if a pre-migrate token qualifies for compound permanent skip.
+
+    Rule: min_total_fee failed AND pre-migrate AND age > 30min AND fee < 5 SOL.
+    Such a token has had enough time to prove traction but hasn't.
+    No point retrying — skip permanently.
+    """
+    if "min_total_fee" not in failures:
+        return False
+    if token.migrated_timestamp > 0:
+        return False  # post-migrate only — compound rule is pre-migrate only
+    age_seconds = time.time() - max(
+        token.creation_timestamp or 0, token.open_timestamp or 0
+    )
+    age_minutes = age_seconds / 60
+    return (
+        age_minutes > COMPOUND_AGE_MINUTES
+        and token.fee_collected < COMPOUND_FEE_MIN_SOL
+    )
 
 
 def run_all_filters(token: TokenData, filter_params: dict) -> FeatureVector:
