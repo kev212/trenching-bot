@@ -65,7 +65,7 @@ class TradeExecutor:
                 except Exception as e:
                     logger.debug(f"[EXEC] oracle buy price error: {e}")
             if entry_price <= 0:
-                entry_price = self._gmgn_price_in_sol(token)
+                entry_price = await self._gmgn_price_in_sol(token)
             if entry_price <= 0:
                 logger.warning(
                     f"[EXEC] TRADE-SKIPPED {token.symbol} ({token.address[:8]}): "
@@ -177,26 +177,34 @@ class TradeExecutor:
 
         return position
 
-    def _gmgn_price_in_sol(self, token: TokenData) -> float:
+    async def _gmgn_price_in_sol(self, token: TokenData) -> float:
         """Get token price in SOL from GMGN's info payload (paper mode only).
 
-        Falls back through 3 paths:
-        1. raw_gmgn.price.price (preferred — direct USD/SOL field)
-        2. raw_gmgn.price native_token (Solscan format)
+        Priority:
+        1. raw_gmgn.price.native_token.price (SOL — preferred)
+        2. raw_gmgn.price.price (USD) ÷ SOL/USD rate
         3. 0.0 (caller treats as failure)
         """
         raw = getattr(token, "raw_gmgn", {}) or {}
         price_obj = raw.get("price", {}) if isinstance(raw.get("price"), dict) else {}
-
-        price_val = price_obj.get("price")
-        if price_val and float(price_val) > 0:
-            return float(price_val)
 
         native_token = price_obj.get("native_token")
         if isinstance(native_token, dict):
             nt_price = native_token.get("price")
             if nt_price and float(nt_price) > 0:
                 return float(nt_price)
+
+        price_val = price_obj.get("price")
+        if price_val and float(price_val) > 0:
+            sol_usd = 0.0
+            if self.price_oracle:
+                try:
+                    sol_usd = await self.price_oracle.get_sol_price_usd()
+                except Exception:
+                    pass
+            if sol_usd > 0:
+                return float(price_val) / sol_usd
+            return float(price_val)
 
         return 0.0
 
@@ -225,9 +233,24 @@ class TradeExecutor:
             try:
                 info = await self.gmgn.get_token_info(token_address)
                 price_obj = info.get("price", {}) if isinstance(info.get("price"), dict) else {}
-                price_val = price_obj.get("price")
-                if price_val and float(price_val) > 0:
-                    price = float(price_val)
+                native_token = price_obj.get("native_token")
+                if isinstance(native_token, dict):
+                    nt_price = native_token.get("price")
+                    if nt_price and float(nt_price) > 0:
+                        price = float(nt_price)
+                if price <= 0:
+                    price_val = price_obj.get("price")
+                    if price_val and float(price_val) > 0:
+                        sol_usd = 0.0
+                        if self.price_oracle:
+                            try:
+                                sol_usd = await self.price_oracle.get_sol_price_usd()
+                            except Exception:
+                                pass
+                        if sol_usd > 0:
+                            price = float(price_val) / sol_usd
+                        else:
+                            price = float(price_val)
             except Exception as e:
                 logger.debug(f"[EXEC] paper price fetch error: {e}")
 
@@ -237,9 +260,24 @@ class TradeExecutor:
                 if raw_json:
                     raw = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
                     price_obj = raw.get("price", {}) if isinstance(raw.get("price"), dict) else {}
-                    price_val = price_obj.get("price")
-                    if price_val and float(price_val) > 0:
-                        price = float(price_val)
+                    native_token = price_obj.get("native_token")
+                    if isinstance(native_token, dict):
+                        nt_price = native_token.get("price")
+                        if nt_price and float(nt_price) > 0:
+                            price = float(nt_price)
+                    if price <= 0:
+                        price_val = price_obj.get("price")
+                        if price_val and float(price_val) > 0:
+                            sol_usd = 0.0
+                            if self.price_oracle:
+                                try:
+                                    sol_usd = await self.price_oracle.get_sol_price_usd()
+                                except Exception:
+                                    pass
+                            if sol_usd > 0:
+                                price = float(price_val) / sol_usd
+                            else:
+                                price = float(price_val)
             except Exception as e:
                 logger.debug(f"[EXEC] paper price walk parse error: {e}")
 

@@ -119,14 +119,14 @@ class TrenchingBot:
         self.state = SharedState()
         self.queue = asyncio.Queue(maxsize=settings.max_queue_size)
         self.state.queue = self.queue
-        self.gmgn = GMGNClient(settings.gmgn_api_key, settings.http_proxy)
+        self.rate_limiter = RateLimiter(15, 60)  # GMGN: 15 req/min
+        self.gmgn = GMGNClient(settings.gmgn_api_key, settings.http_proxy, rate_limiter=self.rate_limiter)
         logger.warning(f"GMGN init: proxy=[{self.gmgn.proxy[:50] if self.gmgn.proxy else 'NONE'}]")
         self.twitter = TwitterClient()
         self.scraper = WebScraper()
         self.influencers = _load_influencers()
         logger.warning(f"Loaded {len(self.influencers)} influencers")
         self.mimo = MiMoClient()
-        self.rate_limiter = RateLimiter(15, 60)  # GMGN: 15 req/min
         self.llm_rate_limiter = RateLimiter(10, 60)  # LLM: 10 req/min
         self.tasks = {}
         self.workers = []
@@ -253,8 +253,6 @@ class TrenchingBot:
                 else:
                     delay = base_delay
 
-                # Route through rate limiter — trending is 1 GMGN call
-                await self.rate_limiter.acquire(1)
                 tokens = await self.gmgn.get_trending(limit=20)
                 ban_count = 0
                 new_count = 0
@@ -330,8 +328,6 @@ class TrenchingBot:
                 else:
                     delay = base_delay
 
-                # Route through rate limiter — trenches is 1 GMGN call
-                await self.rate_limiter.acquire(1)
                 tokens = await self.gmgn.get_trenches(limit=20)
                 ban_count = 0
                 new_count = 0
@@ -545,13 +541,8 @@ class TrenchingBot:
 
     async def _process_token(self, address: str, token_info: dict):
         symbol = (token_info.get("symbol") or token_info.get("name", "?")) or "?"
-        # Token already passed prefilter (checked in poller). Retry path
-        # also bypasses prefilter — if it's being retried, it passed before.
-        # Acquire 4 rate limit slots — one per parallel GMGN call.
-        # Without this, 1 acquire + 4 parallel calls = 4x the budget.
-        await self.rate_limiter.acquire(4)
-        # Stagger workers to prevent GMGN per-second rate limit
-        # (2 workers × 4 parallel calls = 8 req burst < 1s).
+        # Rate limiting is handled internally by GMGNClient._get().
+        # Stagger 0.3s prevents GMGN per-second burst (4 parallel calls).
         await asyncio.sleep(0.3)
 
         # Phase B: parallel fetch — info + security + holders + ath in one round-trip

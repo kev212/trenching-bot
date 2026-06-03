@@ -10,10 +10,11 @@ BASE_URL = "https://openapi.gmgn.ai"
 
 
 class GMGNClient:
-    def __init__(self, api_key: str, proxy: str = ""):
+    def __init__(self, api_key: str, proxy: str = "", rate_limiter=None):
         self.api_key = api_key
         self.host = BASE_URL
         self.proxy = proxy or os.environ.get("GMGN_PROXY") or os.environ.get("HTTP_PROXY") or ""
+        self.rate_limiter = rate_limiter
         if self.proxy:
             logger.warning(f"GMGN proxy: {self.proxy[:50]}...")
         else:
@@ -38,6 +39,8 @@ class GMGNClient:
 
     async def _get(self, path: str, params: dict = None) -> dict:
         try:
+            if self.rate_limiter:
+                await self.rate_limiter.acquire(1)
             query = {**(params or {}), **self._auth_params()}
             async with AsyncSession(impersonate="chrome") as session:
                 resp = await session.get(
@@ -64,6 +67,8 @@ class GMGNClient:
 
     async def _post(self, path: str, query: dict = None, body: dict = None) -> dict:
         try:
+            if self.rate_limiter:
+                await self.rate_limiter.acquire(1)
             auth = self._auth_params()
             full_query = {**(query or {}), **auth}
             async with AsyncSession(impersonate="chrome") as session:
