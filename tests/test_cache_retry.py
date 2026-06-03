@@ -97,7 +97,7 @@ def test_is_permanent_failure_false():
 # ── COMPOUND RULE ──────────────────────────────────────────────────
 
 
-def test_compound_skip_for_old_pre_migrate_low_fee():
+def test_compound_skip_for_old_low_fee():
     from analysis.filters import is_compound_permanent_failure, TokenData
 
     token = TokenData(
@@ -105,32 +105,31 @@ def test_compound_skip_for_old_pre_migrate_low_fee():
         symbol="CMP",
         name="Compound",
         market_cap=10000,
-        fee_collected=0.5,  # < 5 SOL
+        fee_collected=0.5,  # < 1 SOL
         creation_timestamp=1000,
         open_timestamp=0,
         migrated_timestamp=0,  # pre-migrate
     )
-    # Age = now - 1000 >> 30 min
     assert is_compound_permanent_failure(["min_total_fee"], token) is True
 
 
-def test_compound_no_skip_when_fee_above_5():
+def test_compound_skip_old_post_migrate_low_fee():
     from analysis.filters import is_compound_permanent_failure, TokenData
 
     token = TokenData(
         address="cmp2",
         symbol="CMP2",
-        name="Compound2",
+        name="Cmp2",
         market_cap=80000,
-        fee_collected=6.0,  # >= 5 SOL
+        fee_collected=0.5,  # < 1 SOL
         creation_timestamp=1000,
         open_timestamp=0,
-        migrated_timestamp=0,
+        migrated_timestamp=2000,  # post-migrate
     )
-    assert is_compound_permanent_failure(["min_total_fee"], token) is False
+    assert is_compound_permanent_failure(["min_total_fee"], token) is True
 
 
-def test_compound_no_skip_when_post_migrate():
+def test_compound_no_skip_when_fee_above_1():
     from analysis.filters import is_compound_permanent_failure, TokenData
 
     token = TokenData(
@@ -138,10 +137,10 @@ def test_compound_no_skip_when_post_migrate():
         symbol="CMP3",
         name="Compound3",
         market_cap=80000,
-        fee_collected=0.5,
+        fee_collected=1.5,  # >= 1 SOL
         creation_timestamp=1000,
         open_timestamp=0,
-        migrated_timestamp=2000,  # post-migrate
+        migrated_timestamp=0,
     )
     assert is_compound_permanent_failure(["min_total_fee"], token) is False
 

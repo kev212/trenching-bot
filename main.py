@@ -757,7 +757,7 @@ class TrenchingBot:
             elif is_compound_permanent_failure(failures, token):
                 logger.info(
                     f"[RETRY-SKIP] {token.symbol} ({address[:8]}): "
-                    f"pre-migrate age > 30m fee={token.fee_collected:.2f} SOL < 5 — no traction"
+                    f"age > 30m fee={token.fee_collected:.2f} SOL < 1 — no traction"
                 )
                 self.state.metrics.record_call("SKIP_PERMANENT")
                 return
