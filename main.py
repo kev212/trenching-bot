@@ -692,6 +692,7 @@ class TrenchingBot:
             return
 
         # Run filters
+        filter_params = await self.state.get_filter_params()
         fv = run_all_filters(token, filter_params)
 
         # Hard gate: ALL filters must pass.
