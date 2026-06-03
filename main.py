@@ -1135,7 +1135,6 @@ class TrenchingBot:
                 twitter_verified="Yes" if token.twitter_verified else "No",
                 twitter_description=token.twitter_description[:200] or "No description",
                 twitter_community=f"Yes (community/{token.community_id})" if token.has_community else "No",
-                community_creator=f"@{token.community_creator} (creator)" if token.community_creator else "Unknown",
                 recent_tweets=json.dumps(token.recent_tweets[:3], indent=2) if token.recent_tweets else "No tweets from this account yet",
                 website_text=token.website_text[:500] or "No website content",
                 search_results=json.dumps(search_results[:5], indent=2) if search_results else "No search results yet",
