@@ -2,25 +2,6 @@
   "version": 7,
   "updated_at": "2026-06-02T00:00:00Z",
   "filters": {
-    "token_age": {
-      "enabled": true,
-      "max_pre_migrate_minutes": 120,
-      "max_post_migrate_minutes": 45,
-      "weight": 0.15,
-      "llm_hint": "Younger tokens have more upside. 5min >> 60min."
-    },
-    "min_market_cap": {
-      "enabled": true,
-      "min_mc_usd": 7000,
-      "weight": 0.0,
-      "llm_hint": "Hard gate only"
-    },
-    "max_market_cap": {
-      "enabled": true,
-      "max_mc_usd": 200000,
-      "weight": 0.0,
-      "llm_hint": "Hard gate only"
-    },
     "min_total_fee": {
       "enabled": true,
       "min_fee_sol": 5.0,

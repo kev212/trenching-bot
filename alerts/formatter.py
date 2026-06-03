@@ -10,9 +10,6 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict,
 
     filters_text = ""
     filter_names = {
-        "token_age": "⏰ Age",
-        "min_market_cap": "📊 Min MC",
-        "max_market_cap": "📊 Max MC",
         "min_total_fee": "⛽ Min Fee",
         "fee_tier": "💰 Fee Tier",
         "insider_concentration": "🔍 Insider",

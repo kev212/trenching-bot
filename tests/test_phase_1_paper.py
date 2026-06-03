@@ -868,9 +868,6 @@ def test_calculate_weighted_score_basic():
     from analysis.filters import FeatureVector, calculate_weighted_score
 
     fv = FeatureVector()
-    fv.token_age = {"passed": True, "enabled": True}
-    fv.min_market_cap = {"passed": True, "enabled": True}
-    fv.max_market_cap = {"passed": True, "enabled": True}
     fv.min_total_fee = {"passed": False, "enabled": True}
     fv.fee_tier = {"passed": True, "enabled": True}
     fv.min_holders = {"passed": True, "enabled": True}
@@ -883,9 +880,6 @@ def test_calculate_weighted_score_basic():
 
     filter_params = {
         "filters": {
-            "token_age": {"weight": 0.05, "enabled": True},
-            "min_market_cap": {"weight": 0.0, "enabled": True},
-            "max_market_cap": {"weight": 0.0, "enabled": True},
             "min_total_fee": {"weight": 0.25, "enabled": True},
             "fee_tier": {"weight": 0.0, "enabled": True},
             "min_holders": {"weight": 0.25, "enabled": True},
@@ -897,8 +891,8 @@ def test_calculate_weighted_score_basic():
 
     score, breakdown = calculate_weighted_score(fv, filter_params)
 
-    total_weight = 0.05 + 0.25 + 0.25 + 0.10 + 0.20 + 0.15
-    passed_weight = 0.05 + 0.25 + 0.10 + 0.20 + 0.15
+    total_weight = 0.25 + 0.25 + 0.10 + 0.20 + 0.15
+    passed_weight = 0.25 + 0.10 + 0.20 + 0.15
     expected = passed_weight / total_weight
     assert abs(score - expected) < 0.01
     assert "social_narrative" not in breakdown
@@ -911,7 +905,6 @@ def test_calculate_weighted_score_all_pass():
     from analysis.filters import FeatureVector, calculate_weighted_score
 
     fv = FeatureVector()
-    fv.token_age = {"passed": True, "enabled": True}
     fv.min_total_fee = {"passed": True, "enabled": True}
     fv.min_holders = {"passed": True, "enabled": True}
     fv.funded_wallet_age = {"passed": True, "enabled": True}
@@ -920,7 +913,6 @@ def test_calculate_weighted_score_all_pass():
 
     filter_params = {
         "filters": {
-            "token_age": {"weight": 0.05, "enabled": True},
             "min_total_fee": {"weight": 0.25, "enabled": True},
             "min_holders": {"weight": 0.25, "enabled": True},
             "funded_wallet_age": {"weight": 0.10, "enabled": True},
@@ -938,12 +930,12 @@ def test_calculate_weighted_score_social_excluded():
     from analysis.filters import FeatureVector, calculate_weighted_score
 
     fv = FeatureVector()
-    fv.token_age = {"passed": True, "enabled": True}
+    fv.min_total_fee = {"passed": True, "enabled": True}
     fv.social_narrative = {"passed": True, "enabled": True, "score": 80}
 
     filter_params = {
         "filters": {
-            "token_age": {"weight": 1.0, "enabled": True},
+            "min_total_fee": {"weight": 1.0, "enabled": True},
             "social_narrative": {"weight": 1.0, "enabled": True},
         }
     }

@@ -46,9 +46,6 @@ def is_compound_permanent_failure(
 def run_all_filters(token: TokenData, filter_params: dict) -> FeatureVector:
     fv = FeatureVector(token_data=token)
 
-    fv.token_age = _filter_token_age(token, filter_params.get("token_age", {}))
-    fv.min_market_cap = _filter_min_market_cap(token, filter_params.get("min_market_cap", {}))
-    fv.max_market_cap = _filter_max_market_cap(token, filter_params.get("max_market_cap", {}))
     fv.min_total_fee = _filter_min_total_fee(token, filter_params.get("min_total_fee", {}))
     fv.fee_tier = _filter_fee_tier(token, filter_params.get("fee_tier", {}))
     fv.insider_concentration = _filter_insider_concentration(token, filter_params.get("insider_concentration", {}))
@@ -59,83 +56,39 @@ def run_all_filters(token: TokenData, filter_params: dict) -> FeatureVector:
     fv.social_narrative = _filter_social_narrative(token, filter_params.get("social_narrative", {}))
     fv.ath_drawdown = _filter_ath_drawdown(token, filter_params.get("ath_drawdown", {}))
 
+    # token_age: computed for LLM #2 context, NOT a hard gate filter
+    # (early check handles permanent skip for old tokens)
+    fv.token_age = _compute_token_age(token)
+
     return fv
 
 
-def _filter_token_age(token: TokenData, params: dict) -> dict:
-    max_pre_migrate = params.get("max_pre_migrate_minutes", 120)
-    max_post_migrate = params.get("max_post_migrate_minutes", 45)
+def _compute_token_age(token: TokenData) -> dict:
+    """Compute token age for LLM #2 context. Not used in hard gate."""
     now = datetime.now(timezone.utc).timestamp()
-
     if token.migrated_timestamp > 0:
-        # Post-migrate: use open_timestamp, max 45 min
         if token.open_timestamp > 0:
             age_min = (now - token.open_timestamp) / 60
-            max_minutes = max_post_migrate
             status = "post-migrate"
         else:
-            return {
-                "age_minutes": None,
-                "threshold": max_post_migrate,
-                "passed": False,
-                "enabled": True,
-                "note": "Post-migrate but no open_timestamp",
-            }
+            return {"age_minutes": None, "status": "unknown", "passed": True, "enabled": False,
+                    "note": "Post-migrate but no open_timestamp"}
     else:
-        # Pre-migrate: use creation_timestamp, max 120 min
         if token.creation_timestamp > 0:
             age_min = (now - token.creation_timestamp) / 60
-            max_minutes = max_pre_migrate
             status = "pre-migrate"
         elif token.created_at:
             age_min = (now - token.created_at.timestamp()) / 60
-            max_minutes = max_pre_migrate
             status = "pre-migrate"
         else:
-            return {
-                "age_minutes": None,
-                "threshold": max_pre_migrate,
-                "passed": False,
-                "enabled": True,
-                "note": "No creation timestamp",
-            }
-
-    passed = age_min <= max_minutes
+            return {"age_minutes": None, "status": "unknown", "passed": True, "enabled": False,
+                    "note": "No creation timestamp"}
     return {
         "age_minutes": age_min,
-        "threshold": max_minutes,
         "status": status,
-        "passed": passed,
-        "enabled": True,
-        "note": f"Age: {age_min:.0f}min (max: {max_minutes}min) [{status}]",
-    }
-
-
-def _filter_min_market_cap(token: TokenData, params: dict) -> dict:
-    min_mc = params.get("min_mc_usd", 7000)
-    mc = token.market_cap
-
-    passed = mc >= min_mc
-    return {
-        "market_cap": mc,
-        "threshold": min_mc,
-        "passed": passed,
-        "enabled": True,
-        "note": f"MC: ${mc:,.0f} (min: ${min_mc:,})",
-    }
-
-
-def _filter_max_market_cap(token: TokenData, params: dict) -> dict:
-    max_mc = params.get("max_mc_usd", 200000)
-    mc = token.market_cap
-
-    passed = mc <= max_mc or mc <= 0
-    return {
-        "market_cap": mc,
-        "threshold": max_mc,
-        "passed": passed,
-        "enabled": True,
-        "note": f"MC: ${mc:,.0f} (max: ${max_mc:,})",
+        "passed": True,
+        "enabled": False,
+        "note": f"Age: {age_min:.0f}min [{status}]",
     }
 
 
@@ -308,9 +261,6 @@ def count_passed_filters(fv: FeatureVector) -> tuple[int, int, list[str]]:
     Filters with `enabled: False` are auto-passed (not counted as failures).
     """
     filters = {
-        "token_age": fv.token_age,
-        "min_market_cap": fv.min_market_cap,
-        "max_market_cap": fv.max_market_cap,
         "min_total_fee": fv.min_total_fee,
         "fee_tier": fv.fee_tier,
         "insider_concentration": fv.insider_concentration,

@@ -331,9 +331,6 @@ async def cmd_filter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = [f"🔧 FILTER PARAMS (v{version})\n"]
 
     key_map = {
-        "token_age": ("max_age", "max_token_age_minutes", "min"),
-        "min_market_cap": ("min_mc", "min_mc_usd", "$"),
-        "max_market_cap": ("max_mc", "max_mc_usd", "$"),
         "min_total_fee": ("min_fee", "min_fee_sol", " SOL"),
         "fee_tier": ("fee_tier", None, ""),
         "insider_concentration": ("max_insider", "max_insider_ratio", "%"),

@@ -672,6 +672,8 @@ class TrenchingBot:
 
         # Early permanent skip — before running expensive filters.
         from analysis.filters import is_compound_permanent_failure
+        filter_params = await self.state.get_filter_params()
+        filters_cfg = filter_params.get("filters", filter_params)
 
         # fee < 0.1 SOL → dead-letter, gak perlu filter.
         if token.fee_collected < 0.1:
@@ -691,8 +693,26 @@ class TrenchingBot:
             self.state.metrics.record_call("SKIP_PERMANENT")
             return
 
+        # token_age — gak bisa jadi lebih muda, retry percuma
+        age_params = filters_cfg.get("token_age", {})
+        max_pre = age_params.get("max_pre_migrate_minutes", 120)
+        max_post = age_params.get("max_post_migrate_minutes", 45)
+        now = time.time()
+        if token.migrated_timestamp > 0:
+            age_min = (now - token.open_timestamp) / 60 if token.open_timestamp > 0 else 999
+            max_min = max_post
+        else:
+            age_min = (now - token.creation_timestamp) / 60 if token.creation_timestamp > 0 else 999
+            max_min = max_pre
+        if age_min > max_min:
+            logger.info(
+                f"[RETRY-SKIP] {token.symbol} ({address[:8]}): "
+                f"age={age_min:.0f}m > {max_min}m — too old"
+            )
+            self.state.metrics.record_call("SKIP_PERMANENT")
+            return
+
         # Run filters
-        filter_params = await self.state.get_filter_params()
         fv = run_all_filters(token, filter_params)
 
         # Hard gate: ALL filters must pass.
@@ -724,9 +744,9 @@ class TrenchingBot:
                     "value": getattr(fv, name, {}).get("note", "") if hasattr(fv, name) else "",
                 }
                 for name in [
-                    "funded_wallet_age", "min_market_cap", "max_market_cap",
+                    "funded_wallet_age",
                     "insider_concentration", "fee_tier", "rug_probability",
-                    "holder_distribution", "token_age", "min_holders", "min_total_fee",
+                    "holder_distribution", "min_holders", "min_total_fee",
                 ]
             }
             # If we forced a fail due to missing holder data, record it
@@ -1069,22 +1089,9 @@ class TrenchingBot:
             token.influencer_mentions = influencer_mentions
 
             # 5. LLM #1: Social analysis
-            # Calculate age description
-            if token.creation_timestamp > 0:
-                age_min = (datetime.now(timezone.utc).timestamp() - token.creation_timestamp) / 60
-                if age_min < 60:
-                    age_description = f"{age_min:.0f} minutes ago"
-                else:
-                    age_description = f"{age_min/60:.1f} hours ago"
-            else:
-                age_description = "unknown"
-
             social_prompt = SOCIAL_ANALYSIS_USER.format(
                 token_name=token.name,
                 token_symbol=token.symbol,
-                market_cap=token.market_cap,
-                age_description=age_description,
-                holders_count=token.holders_count,
                 twitter_username=token.twitter_username or "none",
                 twitter_followers=token.twitter_followers,
                 twitter_verified="Yes" if token.twitter_verified else "No",

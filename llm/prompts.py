@@ -209,9 +209,6 @@ SOCIAL_ANALYSIS_USER = """Analyze this Solana meme token's social media presence
 TOKEN CONTEXT:
 - Name: {token_name}
 - Symbol: {token_symbol}
-- Market Cap: ${market_cap:,.0f}
-- Created: {age_description}
-- Holders: {holders_count}
 
 Twitter: @{twitter_username}
 Followers: {twitter_followers}

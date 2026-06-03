@@ -87,8 +87,6 @@ class TokenData:
 @dataclass
 class FeatureVector:
     funded_wallet_age: dict = field(default_factory=dict)
-    min_market_cap: dict = field(default_factory=dict)
-    max_market_cap: dict = field(default_factory=dict)
     insider_concentration: dict = field(default_factory=dict)
     fee_tier: dict = field(default_factory=dict)
     rug_probability: dict = field(default_factory=dict)
@@ -103,8 +101,6 @@ class FeatureVector:
     def to_dict(self) -> dict:
         return {
             "funded_wallet_age": self.funded_wallet_age,
-            "min_market_cap": self.min_market_cap,
-            "max_market_cap": self.max_market_cap,
             "insider_concentration": self.insider_concentration,
             "fee_tier": self.fee_tier,
             "rug_probability": self.rug_probability,
