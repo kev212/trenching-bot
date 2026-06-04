@@ -1,6 +1,6 @@
 """Position state machine: SL / TP1 / TP2 / trailing / time exits.
 
-Runs 4×/sec. Reads open positions, fetches current price via Jupiter,
+Runs 4x/sec. Reads open positions, fetches current price via Jupiter,
 advances each position toward its exit trigger. Sends Telegram alerts
 on every exit.
 """
@@ -22,7 +22,8 @@ async def _process_position(
     position, executor, position_manager, is_paper,
     stop_loss_pct, tp1_mult, tp2_mult, extreme_tp_mult,
     tp1_pct, trailing_pct, min_hold_seconds, time_limit,
-):
+) -> dict:
+    """Returns exit state dict if triggered, empty dict otherwise."""
     token_address = position["token_address"]
 
     if is_paper:
@@ -35,7 +36,7 @@ async def _process_position(
         )
 
     if current_price <= 0:
-        return
+        return {}
 
     entry = position["entry_price"]
     peak = max(position["peak_price"] or 0, current_price)
@@ -93,27 +94,76 @@ async def _process_position(
             triggered = True
             last_reason = "TIME"
 
-    if triggered:
-        try:
-            gain = (current_price - entry) / entry * 100
-            alert_text = format_exit_alert(position, last_reason, current_price, gain)
-            await dispatcher.send_alert(alert_text)
-            logger.info(
-                f"[EXIT] {position['token_symbol']} ({token_address[:8]}): "
-                f"{last_reason} at {gain:+.1f}% (price={current_price:.8f})"
-            )
-        except Exception as e:
-            logger.error(f"Exit alert send failed: {e}")
+    if not triggered:
+        return {}
+
+    gain = (current_price - entry) / entry * 100
+    logger.info(
+        f"[EXIT] {position['token_symbol']} ({token_address[:8]}): "
+        f"{last_reason} at {gain:+.1f}% (price={current_price:.8f})"
+    )
+
+    entry_tokens = position.get("entry_amount_token", 0) or 0
+    current_tokens = position.get("current_amount_token", 0) or 0
+    entry_sol = position.get("entry_amount_sol", 0.0) or 0.0
+    total_sold = position.get("total_sold_sol", 0.0) or 0.0
+
+    if last_reason in ("TP1", "TP1-EXTREME"):
+        pre_sell_tokens = entry_tokens
+        sold_tokens = entry_tokens - current_tokens
+        pnl_sol = (current_price - entry) * sold_tokens
+        pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0.0
+    elif last_reason == "TP2":
+        pre_sell_tokens = current_tokens
+        sold_tokens = pre_sell_tokens - (position.get("current_amount_token", 0) or 0)
+        pnl_sol = (current_price - entry) * sold_tokens
+        pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0.0
+    elif last_reason in ("SL", "TRAILING", "TIME"):
+        pnl_sol = total_sold - entry_sol
+        pnl_pct = ((total_sold / entry_sol) - 1) * 100 if entry_sol > 0 else 0.0
+        sold_tokens = entry_tokens
+    else:
+        sold_tokens = 0
+        pnl_sol = 0.0
+        pnl_pct = 0.0
+
+    sold_pct = (sold_tokens / entry_tokens * 100) if entry_tokens > 0 else 0.0
+
+    try:
+        exit_msg = format_exit_alert(
+            symbol=position["token_symbol"],
+            address=position["token_address"],
+            entry_price=entry,
+            exit_price=current_price,
+            pnl_sol=pnl_sol,
+            pnl_pct=pnl_pct,
+            reason=last_reason,
+            hold_seconds=held_so_far,
+            paper=is_paper,
+            position_size_sol=entry_sol,
+            total_tokens=entry_tokens,
+            sold_pct=sold_pct,
+            sold_tokens=sold_tokens,
+            remaining_tokens=current_tokens if last_reason in ("TP1", "TP2") else 0,
+        )
+        await dispatcher.send_alert(exit_msg)
+    except Exception as e:
+        logger.error(f"Exit alert send failed: {e}")
+
+    return {
+        "triggered": True,
+        "current_price": current_price,
+        "entry": entry,
+        "peak": peak,
+        "held_so_far": held_so_far,
+        "last_reason": last_reason,
+    }
 
 
 async def position_monitor(state, db, position_manager: PositionManager,
                             risk: RiskManager, jupiter: JupiterClient,
                             executor: TradeExecutor, config: dict):
-    """High-frequency position state machine. Runs 4×/sec.
-
-    Paper mode: re-fetches GMGN price for the token to evaluate triggers.
-    Live mode: uses Jupiter (with retry) for real prices.
-    """
+    """High-frequency position state machine. Runs 4x/sec."""
     logger.info("Position monitor started")
     check_interval = 0.25
 
@@ -136,7 +186,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
 
             for position in open_positions:
                 try:
-                    await asyncio.wait_for(
+                    result = await asyncio.wait_for(
                         _process_position(
                             position, executor, position_manager, is_paper,
                             stop_loss_pct, tp1_mult, tp2_mult, extreme_tp_mult,
@@ -144,66 +194,18 @@ async def position_monitor(state, db, position_manager: PositionManager,
                         ),
                         timeout=20,
                     )
+                    if result and result.get("triggered"):
+                        logger.info(
+                            f"[POS-MON] {position['token_symbol']} exit: "
+                            f"price={result['current_price']:.10f}, "
+                            f"entry={result['entry']:.10f}, "
+                            f"peak={result['peak']:.10f}, "
+                            f"paper={is_paper}, hold={result['held_so_far']:.0f}s"
+                        )
                 except asyncio.TimeoutError:
                     logger.warning(f"Position {position['token_address'][:8]} monitor timeout (> 20s)")
                 except Exception as e:
                     logger.error(f"Position {position['token_address'][:8]} monitor error: {e}")
-
-                if triggered:
-                    logger.info(
-                        f"[POS-MON] {position['token_symbol']} exit: "
-                        f"price={current_price:.10f}, entry={entry:.10f}, "
-                        f"peak={peak:.10f}, paper={is_paper}, hold={held_so_far:.0f}s"
-                    )
-                    try:
-                        entry_tokens = position.get("entry_amount_token", 0) or 0
-                        current_tokens = position.get("current_amount_token", 0) or 0
-                        if last_reason == "TP1":
-                            pre_sell_tokens = entry_tokens
-                            sold_tokens = entry_tokens - current_tokens
-                            sold_pct = (sold_tokens / pre_sell_tokens * 100) if pre_sell_tokens > 0 else 0
-                            pnl_sol = (current_price - entry) * sold_tokens
-                            pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0.0
-                        elif last_reason == "TP2":
-                            pre_sell_tokens = current_tokens
-                            sold_tokens = pre_sell_tokens - (position.get("current_amount_token", 0) or 0)
-                            sold_pct = (sold_tokens / pre_sell_tokens * 100) if pre_sell_tokens > 0 else 0
-                            pnl_sol = (current_price - entry) * sold_tokens
-                            pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0.0
-                        elif last_reason in ("SL", "TRAILING", "TIME"):
-                            total_sold = position.get("total_sold_sol", 0.0) or 0.0
-                            entry_sol = position.get("entry_amount_sol", 0.0) or 0.0
-                            pnl_sol = total_sold - entry_sol
-                            pnl_pct = ((total_sold / entry_sol) - 1) * 100 if entry_sol > 0 else 0.0
-                            pre_sell_tokens = entry_tokens
-                            sold_tokens = entry_tokens
-                            sold_pct = 100.0
-                        else:
-                            pre_sell_tokens = 0
-                            sold_tokens = 0
-                            sold_pct = 0.0
-                            pnl_sol = 0.0
-                            pnl_pct = 0.0
-                        exit_msg = format_exit_alert(
-                            symbol=position["token_symbol"],
-                            address=position["token_address"],
-                            entry_price=entry,
-                            exit_price=current_price,
-                            pnl_sol=pnl_sol,
-                            pnl_pct=pnl_pct,
-                            reason=last_reason or "TIME",
-                            hold_seconds=(datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
-                                if position.get("entry_time") else 0,
-                            paper=is_paper,
-                            position_size_sol=position.get("entry_amount_sol", 0) or 0,
-                            total_tokens=entry_tokens,
-                            sold_pct=sold_pct,
-                            sold_tokens=sold_tokens,
-                            remaining_tokens=current_tokens if last_reason in ("TP1", "TP2") else 0,
-                        )
-                        await dispatcher.send_alert(exit_msg)
-                    except Exception as e:
-                        logger.error(f"[POS-MON] exit alert send failed: {e}")
 
         except Exception as e:
             logger.error(f"Position monitor error: {e}")
