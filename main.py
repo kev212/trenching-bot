@@ -587,6 +587,7 @@ class TrenchingBot:
         if not info:
             logger.info(f"[SKIP] {symbol} ({address[:8]}): no data")
             self.state.metrics.record_call("SKIP")
+            await self.state.remove_retry(address)
             return
 
         # Extract nested objects from GMGN response
@@ -695,6 +696,7 @@ class TrenchingBot:
                 f"fee={token.fee_collected:.2f} SOL < 0.1 — permanent"
             )
             self.state.metrics.record_call("SKIP_PERMANENT")
+            await self.state.remove_retry(address)
             return
 
         # Compound rule — age > 30m + fee < 1.0 SOL → dead-letter
@@ -704,6 +706,7 @@ class TrenchingBot:
                 f"age > 30m fee={token.fee_collected:.2f} SOL < 1.0 — no traction"
             )
             self.state.metrics.record_call("SKIP_PERMANENT")
+            await self.state.remove_retry(address)
             return
 
         # token_age — gak bisa jadi lebih muda, retry percuma
@@ -723,6 +726,7 @@ class TrenchingBot:
                 f"age={age_min:.0f}m > {max_min}m — too old"
             )
             self.state.metrics.record_call("SKIP_PERMANENT")
+            await self.state.remove_retry(address)
             return
 
         # Run filters
