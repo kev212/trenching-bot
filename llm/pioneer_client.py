@@ -28,45 +28,68 @@ class PioneerLLMClient:
         self._semaphore = asyncio.Semaphore(4)
 
     async def analyze_token(
-        self, system_prompt: str, user_prompt: str, temperature: float = 0.3
+        self, system_prompt: str, user_prompt: str, temperature: float = 0.3, retries: int = 2
     ) -> dict:
         start = time.time()
-        try:
-            async with self._semaphore:
-                response = await asyncio.wait_for(
-                    self.client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        temperature=temperature,
-                        max_tokens=1024,
-                        response_format={"type": "json_object"},
-                    ),
-                    timeout=LLM_TIMEOUT,
-                )
+        last_error = None
+        for attempt in range(retries + 1):
+            try:
+                async with self._semaphore:
+                    response = await asyncio.wait_for(
+                        self.client.chat.completions.create(
+                            model=self.model,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            temperature=temperature,
+                            max_tokens=1024,
+                            response_format={"type": "json_object"},
+                        ),
+                        timeout=LLM_TIMEOUT,
+                    )
 
-            content = response.choices[0].message.content
-            elapsed_ms = int((time.time() - start) * 1000)
+                content = response.choices[0].message.content
+                elapsed_ms = int((time.time() - start) * 1000)
 
-            if not content or not content.strip():
-                logger.error(f"LLM returned empty content")
+                if not content or not content.strip():
+                    last_error = "empty content"
+                    if attempt < retries:
+                        logger.warning(f"LLM returned empty content, retry {attempt+1}/{retries}")
+                        await asyncio.sleep(1)
+                        continue
+                    logger.error(f"LLM returned empty content after {retries+1} attempts")
+                    return None
+
+                result = json.loads(content)
+                result["_processing_time_ms"] = elapsed_ms
+                return result
+
+            except json.JSONDecodeError as e:
+                last_error = str(e)
+                if attempt < retries:
+                    logger.warning(f"LLM returned invalid JSON, retry {attempt+1}/{retries}: {e}")
+                    await asyncio.sleep(1)
+                    continue
+                logger.error(f"LLM returned invalid JSON after {retries+1} attempts: {e}")
+                return None
+            except asyncio.TimeoutError:
+                last_error = "timeout"
+                if attempt < retries:
+                    logger.warning(f"LLM timeout, retry {attempt+1}/{retries}")
+                    continue
+                logger.error(f"LLM timeout (> {LLM_TIMEOUT}s) after {retries+1} attempts")
+                return None
+            except Exception as e:
+                last_error = str(e)
+                if attempt < retries:
+                    logger.warning(f"LLM API error, retry {attempt+1}/{retries}: {e}")
+                    await asyncio.sleep(1)
+                    continue
+                logger.error(f"LLM API error after {retries+1} attempts: {e}")
                 return None
 
-            result = json.loads(content)
-            result["_processing_time_ms"] = elapsed_ms
-            return result
-
-        except json.JSONDecodeError as e:
-            logger.error(f"LLM returned invalid JSON: {e}")
-            return None
-        except asyncio.TimeoutError:
-            logger.error(f"LLM timeout (> {LLM_TIMEOUT}s)")
-            return None
-        except Exception as e:
-            logger.error(f"LLM API error: {e}")
-            return None
+        return None
 
     async def analyze_batch(self, prompts: list):
         tasks = [self.analyze_token(sys, usr) for sys, usr in prompts]
