@@ -61,9 +61,9 @@ async def _make_state(real_metrics: bool = False):
 # ── PERMANENT_FILTERS ─────────────────────────────────────────────────────────
 
 
-def test_permanent_filters_only_min_total_fee():
+def test_permanent_filters_empty():
     from analysis.filters import PERMANENT_FILTERS
-    assert PERMANENT_FILTERS == frozenset({"min_total_fee"})
+    assert PERMANENT_FILTERS == frozenset()
 
 
 def test_permanent_filters_excludes_others():
@@ -78,14 +78,10 @@ def test_permanent_filters_excludes_others():
     assert "ath_drawdown" not in PERMANENT_FILTERS
 
 
-def test_is_permanent_failure_true():
+def test_is_permanent_failure_false_for_all():
     from analysis.filters import is_permanent_failure
-    assert is_permanent_failure(["min_total_fee"]) is True
-    assert is_permanent_failure(["min_total_fee", "token_age"]) is True
-
-
-def test_is_permanent_failure_false():
-    from analysis.filters import is_permanent_failure
+    assert is_permanent_failure(["min_total_fee"]) is False
+    assert is_permanent_failure(["min_total_fee", "token_age"]) is False
     assert is_permanent_failure([]) is False
     assert is_permanent_failure(["token_age"]) is False
     assert is_permanent_failure(["min_market_cap"]) is False
@@ -396,16 +392,16 @@ def test_cleanup_removes_stale():
     asyncio.run(go())
 
 
-def test_cleanup_removes_permanent_filter():
+def test_cleanup_keeps_min_total_fee_for_retry():
     async def go():
         state = await _make_state()
         now = time_module.time()
-        state.retry_queue["perm"] = {"timestamp": now, "retries": 0, "symbol": "P",
-                                      "failed_filters": ["min_total_fee"]}
+        state.retry_queue["fee"] = {"timestamp": now, "retries": 0, "symbol": "F",
+                                    "failed_filters": ["min_total_fee"]}
         state.retry_queue["dyn"] = {"timestamp": now, "retries": 0, "symbol": "D",
-                                     "failed_filters": ["token_age"]}
+                                    "failed_filters": ["token_age"]}
         await state.cleanup_retry_queue()
-        assert "perm" not in state.retry_queue
+        assert "fee" in state.retry_queue
         assert "dyn" in state.retry_queue
     asyncio.run(go())
 

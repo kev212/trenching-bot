@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 # Tokens that fail these filters should NOT be retried — they'll
 # fail again at the same value, wasting rate-limit budget.
 PERMANENT_FILTERS = frozenset({
-    "min_total_fee",
 })
 
 # Compound rule: token (pre or post migrate) older than COMPOUND_AGE_MINUTES
