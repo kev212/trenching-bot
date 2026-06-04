@@ -50,6 +50,10 @@ class PioneerLLMClient:
             content = response.choices[0].message.content
             elapsed_ms = int((time.time() - start) * 1000)
 
+            if not content or not content.strip():
+                logger.error(f"LLM returned empty content")
+                return None
+
             result = json.loads(content)
             result["_processing_time_ms"] = elapsed_ms
             return result

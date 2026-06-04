@@ -6,6 +6,14 @@ logger = logging.getLogger(__name__)
 
 
 def parse_decision(raw: dict) -> LLMDecision:
+    if raw is None:
+        return LLMDecision(
+            score=0,
+            verdict=Verdict.SKIP,
+            reasoning="LLM returned None",
+            confidence=0.0,
+            key_factors=[],
+        )
     try:
         score = int(raw.get("score", 0))
         score = max(0, min(100, score))
