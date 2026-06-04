@@ -220,15 +220,21 @@ class TrenchingBot:
 
     async def _run_forever(self, name, coro_func, *args):
         retries = 0
-        while retries < 5:
+        while True:
             try:
                 await coro_func(self.state, self.db, *args)
+                retries = 0  # reset on success
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 retries += 1
-                logger.error(f"{name} error ({retries}/5): {e}")
-                await asyncio.sleep(min(2 ** retries, 60))
+                logger.error(f"{name} error ({retries}): {e}")
+                if retries >= 5:
+                    logger.critical(f"{name} failed 5 times, restarting in 60s")
+                    await asyncio.sleep(60)
+                    retries = 0
+                else:
+                    await asyncio.sleep(min(2 ** retries, 60))
 
     async def _gmgn_poller(self):
         logger.info("[TRENDING] Poller starting...")

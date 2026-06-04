@@ -119,6 +119,7 @@ class TwitterClient:
             logger.warning("Playwright not installed, cannot scrape community creator")
             return ""
 
+        browser = None
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
@@ -148,13 +149,17 @@ class TwitterClient:
                 if match:
                     handle = match.group(1)
                     logger.info(f"[COMMUNITY] {community_id}: creator=@{handle}")
-                    await browser.close()
                     return handle
 
                 logger.warning(f"[COMMUNITY] {community_id}: no creator found in About tab")
-                await browser.close()
                 return ""
 
         except Exception as e:
             logger.error(f"[COMMUNITY] {community_id}: scrape failed: {e}")
             return ""
+        finally:
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
