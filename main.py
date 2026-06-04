@@ -551,31 +551,43 @@ class TrenchingBot:
         # Stagger 0.3s prevents GMGN per-second burst (4 parallel calls).
         await asyncio.sleep(0.3)
 
-        # Phase B: parallel fetch — info + security + holders + ath in one round-trip
-        # Pre-filter at lines 341-366 already screens ~80% of tokens before this
+        # Phase B: fetch token data in 2 batches of 2 to avoid timeout
+        # (rate limiter 15 req/min serializes calls; 4 parallel → risk > 30s)
         try:
             from sources.gmgn import GMGN_GATHER_TIMEOUT
-            results = await asyncio.wait_for(
+            batch1 = await asyncio.wait_for(
                 asyncio.gather(
                     self.gmgn.get_token_info(address),
                     self.gmgn.get_token_security(address),
+                    return_exceptions=True,
+                ),
+                timeout=GMGN_GATHER_TIMEOUT,
+            )
+            info_r, security_r = batch1
+            info = info_r if not isinstance(info_r, Exception) else {}
+            security = security_r if not isinstance(security_r, Exception) else {}
+            if isinstance(info_r, Exception):
+                logger.warning(f"GMGN info error for {address[:10]}: {info_r}")
+            if isinstance(security_r, Exception):
+                logger.warning(f"GMGN security error for {address[:10]}: {security_r}")
+
+            batch2 = await asyncio.wait_for(
+                asyncio.gather(
                     self.gmgn.get_token_holders(address),
                     self.gmgn.get_token_ath(address),
                     return_exceptions=True,
                 ),
                 timeout=GMGN_GATHER_TIMEOUT,
             )
-            info, security, holders, ath_data = [
-                r if not isinstance(r, Exception) else {} for r in results
-            ]
-            if isinstance(results[1], Exception):
-                logger.warning(f"GMGN security error for {address[:10]}: {results[1]}")
-            if isinstance(results[2], Exception):
-                logger.warning(f"GMGN holders error for {address[:10]}: {results[2]}")
-            if isinstance(results[3], Exception):
-                logger.warning(f"GMGN ath error for {address[:10]}: {results[3]}")
+            holders_r, ath_r = batch2
+            holders = holders_r if not isinstance(holders_r, Exception) else {}
+            ath_data = ath_r if not isinstance(ath_r, Exception) else {}
+            if isinstance(holders_r, Exception):
+                logger.warning(f"GMGN holders error for {address[:10]}: {holders_r}")
+            if isinstance(ath_r, Exception):
+                logger.warning(f"GMGN ath error for {address[:10]}: {ath_r}")
         except asyncio.TimeoutError:
-            logger.warning(f"GMGN gather timeout for {address[:10]} (> {GMGN_GATHER_TIMEOUT}s)")
+            logger.warning(f"GMGN batch timeout for {address[:10]}")
             info, security, holders, ath_data = {}, {}, {}, {}
         except Exception as e:
             logger.warning(f"GMGN gather error for {address[:10]}: {e}")

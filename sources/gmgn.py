@@ -13,7 +13,7 @@ logger = logging.getLogger("main")
 BASE_URL = "https://openapi.gmgn.ai"
 
 GMGN_TIMEOUT = 15
-GMGN_GATHER_TIMEOUT = 30
+GMGN_GATHER_TIMEOUT = 45
 
 
 class GMGNClient:
