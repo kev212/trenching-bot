@@ -28,10 +28,9 @@ class PioneerLLMClient:
         self._semaphore = asyncio.Semaphore(4)
 
     async def analyze_token(
-        self, system_prompt: str, user_prompt: str, temperature: float = 0.3, retries: int = 2
+        self, system_prompt: str, user_prompt: str, temperature: float = 0.3, retries: int = 3
     ) -> dict:
         start = time.time()
-        last_error = None
         for attempt in range(retries + 1):
             try:
                 async with self._semaphore:
@@ -53,12 +52,12 @@ class PioneerLLMClient:
                 elapsed_ms = int((time.time() - start) * 1000)
 
                 if not content or not content.strip():
-                    last_error = "empty content"
                     if attempt < retries:
-                        logger.warning(f"LLM returned empty content, retry {attempt+1}/{retries}")
-                        await asyncio.sleep(1)
+                        wait = 2 ** attempt
+                        logger.warning(f"LLM empty content, retry {attempt+1}/{retries} (wait {wait}s)")
+                        await asyncio.sleep(wait)
                         continue
-                    logger.error(f"LLM returned empty content after {retries+1} attempts")
+                    logger.error(f"LLM empty content after {retries+1} attempts")
                     return None
 
                 result = json.loads(content)
@@ -66,25 +65,26 @@ class PioneerLLMClient:
                 return result
 
             except json.JSONDecodeError as e:
-                last_error = str(e)
                 if attempt < retries:
-                    logger.warning(f"LLM returned invalid JSON, retry {attempt+1}/{retries}: {e}")
-                    await asyncio.sleep(1)
+                    wait = 2 ** attempt
+                    logger.warning(f"LLM invalid JSON, retry {attempt+1}/{retries} (wait {wait}s): {e}")
+                    await asyncio.sleep(wait)
                     continue
-                logger.error(f"LLM returned invalid JSON after {retries+1} attempts: {e}")
+                logger.error(f"LLM invalid JSON after {retries+1} attempts: {e}")
                 return None
             except asyncio.TimeoutError:
-                last_error = "timeout"
                 if attempt < retries:
-                    logger.warning(f"LLM timeout, retry {attempt+1}/{retries}")
+                    wait = 2 ** attempt
+                    logger.warning(f"LLM timeout, retry {attempt+1}/{retries} (wait {wait}s)")
+                    await asyncio.sleep(wait)
                     continue
-                logger.error(f"LLM timeout (> {LLM_TIMEOUT}s) after {retries+1} attempts")
+                logger.error(f"LLM timeout after {retries+1} attempts")
                 return None
             except Exception as e:
-                last_error = str(e)
                 if attempt < retries:
-                    logger.warning(f"LLM API error, retry {attempt+1}/{retries}: {e}")
-                    await asyncio.sleep(1)
+                    wait = 2 ** attempt
+                    logger.warning(f"LLM API error, retry {attempt+1}/{retries} (wait {wait}s): {e}")
+                    await asyncio.sleep(wait)
                     continue
                 logger.error(f"LLM API error after {retries+1} attempts: {e}")
                 return None
