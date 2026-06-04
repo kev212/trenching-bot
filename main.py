@@ -537,8 +537,8 @@ class TrenchingBot:
         if mc > 200000:
             logger.info(f"[SKIP] {symbol} ({addr}): mc=${mc:,.0f} > $200K")
             self.state.metrics.record_call("SKIP"); return False
-        if holder_count < 300:
-            logger.info(f"[SKIP] {symbol} ({addr}): holders={holder_count} < 300")
+        if holder_count < 100:
+            logger.info(f"[SKIP] {symbol} ({addr}): holders={holder_count} < 100")
             self.state.metrics.record_call("SKIP"); return False
         if is_wash:
             logger.info(f"[SKIP] {symbol} ({addr}): wash_trading=True")
