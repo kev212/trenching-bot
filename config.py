@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     llm_api_key: str = ""
-    llm_base_url: str = "https://api.pioneer.ai/v1"
-    llm_model: str = "MiniMaxAI/MiniMax-M3"
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-v4-flash"
 
     def model_post_init(self, __context):
         if not self.llm_api_key:
