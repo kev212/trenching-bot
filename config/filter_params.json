@@ -21,7 +21,7 @@
     },
     "min_holders": {
       "enabled": true,
-      "min_holders": 100,
+      "min_holders": 300,
       "weight": 0.20,
       "llm_hint": "More holders = real community, less rug risk."
     },

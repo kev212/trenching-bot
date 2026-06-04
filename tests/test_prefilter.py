@@ -27,7 +27,7 @@ def bot():
     return FakeBot()
 
 
-PASS = {"address": "abc123", "symbol": "TEST", "market_cap": 50000, "holder_count": 200, "is_wash_trading": False}
+PASS = {"address": "abc123", "symbol": "TEST", "market_cap": 50000, "holder_count": 400, "is_wash_trading": False}
 
 
 def test_prefilter_passes_good_token(bot):
