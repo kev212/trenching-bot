@@ -16,7 +16,7 @@ from sources.twitter import TwitterClient
 from sources.web_scraper import WebScraper
 from analysis.models import TokenData, CallRecord, CallStatus, Verdict
 from analysis.filters import run_all_filters, check_hard_gate
-from llm.mimo_client import MiMoClient
+from llm.pioneer_client import PioneerLLMClient
 from llm.prompts import DECISION_SYSTEM, DECISION_USER, SOCIAL_ANALYSIS_SYSTEM, SOCIAL_ANALYSIS_USER
 from llm.parser import parse_decision
 from tracking.price_monitor import price_monitor
@@ -126,7 +126,7 @@ class TrenchingBot:
         self.scraper = WebScraper()
         self.influencers = _load_influencers()
         logger.warning(f"Loaded {len(self.influencers)} influencers")
-        self.mimo = MiMoClient()
+        self.llm_client = PioneerLLMClient()
         self.llm_rate_limiter = RateLimiter(10, 60)  # LLM: 10 req/min
         self.tasks = {}
         self.workers = []
@@ -554,12 +554,16 @@ class TrenchingBot:
         # Phase B: parallel fetch — info + security + holders + ath in one round-trip
         # Pre-filter at lines 341-366 already screens ~80% of tokens before this
         try:
-            results = await asyncio.gather(
-                self.gmgn.get_token_info(address),
-                self.gmgn.get_token_security(address),
-                self.gmgn.get_token_holders(address),
-                self.gmgn.get_token_ath(address),
-                return_exceptions=True,
+            from sources.gmgn import GMGN_GATHER_TIMEOUT
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    self.gmgn.get_token_info(address),
+                    self.gmgn.get_token_security(address),
+                    self.gmgn.get_token_holders(address),
+                    self.gmgn.get_token_ath(address),
+                    return_exceptions=True,
+                ),
+                timeout=GMGN_GATHER_TIMEOUT,
             )
             info, security, holders, ath_data = [
                 r if not isinstance(r, Exception) else {} for r in results
@@ -570,6 +574,9 @@ class TrenchingBot:
                 logger.warning(f"GMGN holders error for {address[:10]}: {results[2]}")
             if isinstance(results[3], Exception):
                 logger.warning(f"GMGN ath error for {address[:10]}: {results[3]}")
+        except asyncio.TimeoutError:
+            logger.warning(f"GMGN gather timeout for {address[:10]} (> {GMGN_GATHER_TIMEOUT}s)")
+            info, security, holders, ath_data = {}, {}, {}, {}
         except Exception as e:
             logger.warning(f"GMGN gather error for {address[:10]}: {e}")
             info, security, holders, ath_data = {}, {}, {}, {}
@@ -823,7 +830,7 @@ class TrenchingBot:
             historical_patterns="",
         )
 
-        raw = await self.mimo.analyze_token(DECISION_SYSTEM, prompt)
+        raw = await self.llm_client.analyze_token(DECISION_SYSTEM, prompt)
         logger.debug(f"[LLM-RAW] {token.symbol} ({address[:8]}): {raw}")
         decision = parse_decision(raw)
 
@@ -989,284 +996,261 @@ class TrenchingBot:
     async def _social_analysis(self, token: TokenData, info: dict):
         """Analyze social media presence for tokens that pass hard gate."""
         try:
-            link = info.get("link", {})
-            raw_twitter = link.get("twitter_username", "")
-            token.website_url = link.get("website", "")
-            token.telegram_url = link.get("telegram", "")
+            await asyncio.wait_for(
+                self._social_analysis_inner(token, info),
+                timeout=45,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Social analysis timeout for {token.symbol} (> 45s), using partial data")
+        except Exception as e:
+            logger.warning(f"Social analysis error for {token.symbol}: {e}")
 
-            # Parse Twitter input into structured data
-            parsed = self.twitter.parse_twitter_input(raw_twitter)
-            token.twitter_username = parsed["handle"]
+    async def _social_analysis_inner(self, token: TokenData, info: dict):
+        link = info.get("link", {})
+        raw_twitter = link.get("twitter_username", "")
+        token.website_url = link.get("website", "")
+        token.telegram_url = link.get("telegram", "")
 
-            influencer_mentions = []
+        # Parse Twitter input into structured data
+        parsed = self.twitter.parse_twitter_input(raw_twitter)
+        token.twitter_username = parsed["handle"]
 
-            logger.info(f"[SOCIAL] {token.symbol}: twitter parsed={parsed}")
+        influencer_mentions = []
 
-            # 1. Profile + recent tweets (if valid handle)
-            if parsed["handle"]:
-                try:
-                    profile = await self.twitter.get_profile(parsed["handle"])
-                    if profile:
-                        token.twitter_followers = profile.get("followers", 0)
-                        token.twitter_verified = profile.get("verification", {}).get("verified", False)
-                        token.twitter_description = profile.get("description", "")
-                except Exception as e:
-                    logger.warning(f"Twitter profile error for {token.symbol}: {e}")
+        logger.info(f"[SOCIAL] {token.symbol}: twitter parsed={parsed}")
 
-                try:
-                    tweets = await self.twitter.get_recent_tweets(parsed["handle"], 3)
-                    token.recent_tweets = tweets
-                except Exception as e:
-                    logger.warning(f"Twitter tweets error for {token.symbol}: {e}")
-
-            # 2. Specific tweet (if tweet URL)
-            if parsed["tweet_id"]:
-                try:
-                    tweet = await self.twitter.get_tweet(parsed["tweet_id"])
-                    if tweet:
-                        # Add to recent_tweets if not already there
-                        if not token.recent_tweets:
-                            token.recent_tweets = [tweet]
-                        else:
-                            token.recent_tweets.insert(0, tweet)
-                        # Check if tweet author is influencer
-                        author = tweet.get("author", {}).get("screen_name", "").lower()
-                        if author in self.influencers:
-                            influencer_mentions.append({
-                                "handle": author,
-                                "name": self.influencers[author]["name"],
-                                "weight": self.influencers[author]["weight"],
-                            "tweet_text": tweet.get("text", "")[:280],
-                                "likes": tweet.get("likes", 0),
-                            })
-                        logger.info(f"[SOCIAL] {token.symbol}: fetched tweet {parsed['tweet_id']} by @{author}")
-                except Exception as e:
-                    logger.warning(f"Twitter tweet fetch error for {token.symbol}: {e}")
-
-            # 3. Community (if community URL)
-            if parsed["community_id"]:
-                token.has_community = True
-                token.community_id = parsed["community_id"]
-                logger.info(f"[SOCIAL] {token.symbol}: has community {parsed['community_id']}")
-
-                # Scrape community creator if no handle exists
-                if not parsed["handle"]:
-                    try:
-                        creator_handle = await self.twitter.get_community_creator(
-                            parsed["community_id"]
-                        )
-                        if creator_handle:
-                            token.community_creator = creator_handle
-                            # Fetch creator profile + tweets as social data
-                            try:
-                                profile = await self.twitter.get_profile(creator_handle)
-                                if profile:
-                                    token.twitter_followers = profile.get("followers", 0)
-                                    token.twitter_verified = profile.get(
-                                        "verification", {}
-                                    ).get("verified", False)
-                                    token.twitter_description = profile.get(
-                                        "description", ""
-                                    )
-                                    token.twitter_username = creator_handle
-                            except Exception as e:
-                                logger.warning(
-                                    f"Creator profile error for {token.symbol}: {e}"
-                                )
-                            try:
-                                tweets = await self.twitter.get_recent_tweets(
-                                    creator_handle, 3
-                                )
-                                token.recent_tweets = tweets
-                            except Exception as e:
-                                logger.warning(
-                                    f"Creator tweets error for {token.symbol}: {e}"
-                                )
-                    except Exception as e:
-                        logger.warning(
-                            f"Community scrape error for {token.symbol}: {e}"
-                        )
-
-            # 4. Website scraping
-            if token.website_url:
-                try:
-                    token.website_text = await self.scraper.scrape_text(token.website_url)
-                except Exception as e:
-                    logger.warning(f"Website scrape error for {token.symbol}: {e}")
-
-            # 3. Search FxTwitter by contract address
+        # 1. Profile + recent tweets (if valid handle)
+        if parsed["handle"]:
             try:
-                search_results = await self.twitter.search_by_contract(token.address, 10)
+                profile = await self.twitter.get_profile(parsed["handle"])
+                if profile:
+                    token.twitter_followers = profile.get("followers", 0)
+                    token.twitter_verified = profile.get("verification", {}).get("verified", False)
+                    token.twitter_description = profile.get("description", "")
+            except Exception as e:
+                logger.warning(f"Twitter profile error for {token.symbol}: {e}")
 
-                # 4. Influencer + organic mention detection (direct, no LLM)
-                for tweet in search_results:
+            try:
+                tweets = await self.twitter.get_recent_tweets(parsed["handle"], 3)
+                token.recent_tweets = tweets
+            except Exception as e:
+                logger.warning(f"Twitter tweets error for {token.symbol}: {e}")
+
+        # 2. Specific tweet (if tweet URL)
+        if parsed["tweet_id"]:
+            try:
+                tweet = await self.twitter.get_tweet(parsed["tweet_id"])
+                if tweet:
+                    if not token.recent_tweets:
+                        token.recent_tweets = [tweet]
+                    else:
+                        token.recent_tweets.insert(0, tweet)
                     author = tweet.get("author", {}).get("screen_name", "").lower()
-                    if not author:
-                        continue
-                    created_ts = tweet.get("created_timestamp", 0)
-                    tweet_age_min = (time.time() - created_ts) / 60 if created_ts else 0
-
                     if author in self.influencers:
                         influencer_mentions.append({
                             "handle": author,
                             "name": self.influencers[author]["name"],
                             "weight": self.influencers[author]["weight"],
-                            "tweet_text": tweet.get("text", "")[:100],
+                            "tweet_text": tweet.get("text", "")[:280],
                             "likes": tweet.get("likes", 0),
-                            "tweet_age_min": tweet_age_min,
                         })
-                        if author == "elonmusk":
-                            token.has_elon_tweet = True
-                        elif author == "aeyakovenko":
-                            token.has_toly_tweet = True
-                    else:
-                        token.organic_mentions.append({
-                            "handle": author,
-                            "followers": tweet.get("author", {}).get("followers", 0),
-                            "likes": tweet.get("likes", 0),
-                            "tweet_text": tweet.get("text", "")[:100],
-                            "tweet_age_min": tweet_age_min,
-                        })
+                    logger.info(f"[SOCIAL] {token.symbol}: fetched tweet {parsed['tweet_id']} by @{author}")
             except Exception as e:
-                logger.warning(f"Twitter search error for {token.symbol}: {e}")
+                logger.warning(f"Twitter tweet fetch error for {token.symbol}: {e}")
 
-            token.influencer_mentions = influencer_mentions
+        # 3. Community (if community URL)
+        if parsed["community_id"]:
+            token.has_community = True
+            token.community_id = parsed["community_id"]
+            logger.info(f"[SOCIAL] {token.symbol}: has community {parsed['community_id']}")
 
-            # 5. LLM #1: Social analysis
-            social_prompt = SOCIAL_ANALYSIS_USER.format(
-                token_name=token.name,
-                token_symbol=token.symbol,
-                twitter_username=token.twitter_username or "none",
-                twitter_followers=token.twitter_followers,
-                twitter_verified="Yes" if token.twitter_verified else "No",
-                twitter_description=token.twitter_description[:200] or "No description",
-                twitter_community=f"Yes (community/{token.community_id})" if token.has_community else "No",
-                recent_tweets=json.dumps(token.recent_tweets[:3], indent=2) if token.recent_tweets else "No tweets from this account yet",
-                website_text=token.website_text[:500] or "No website content",
-                search_results=json.dumps(search_results[:5], indent=2) if search_results else "No search results yet",
-                influencer_mentions=json.dumps(influencer_mentions, indent=2) if influencer_mentions else "No influencer mentions",
-            )
-
-            await self.llm_rate_limiter.acquire()
-            social_result = await self.mimo.analyze_token(SOCIAL_ANALYSIS_SYSTEM, social_prompt)
-
-            # 6. Parse LLM #1 response.
-            # IMPORTANT: `analyze_token` returns None on failure (JSON parse
-            # error or API error). Treat failure as DISTINCT from a 0-score
-            # scam verdict — a 0 score means "scam", but None means "we
-            # don't know". A token with no LLM opinion should be NEUTRAL
-            # (50), not falsely treated as a confirmed scam.
-            llm1_succeeded = social_result is not None
-            if llm1_succeeded:
-                social_data = social_result
-                token.project_type = social_data.get("project_type", "unknown")
-                token.social_narrative_score = float(social_data.get("score", 0))
-                token.social_narrative_text = social_data.get("summary", "")
-                token.catalyst_match = bool(social_data.get("has_catalyst", False))
-                token.catalyst_description = social_data.get("catalyst_description", "")
-            else:
-                # LLM failed — mark as "unknown" and use neutral 50.
-                # Don't collapse to 0; that would silently drive the token
-                # toward SKIP (and break the multiplier floor invariant).
-                logger.warning(
-                    f"[LLM-1-FAIL] {token.symbol} ({token.address[:8]}): "
-                    "LLM #1 returned no result; defaulting to neutral 50/unknown"
-                )
-                token.project_type = "unknown"
-                token.social_narrative_score = 50.0
-                token.social_narrative_text = ""
-                token.catalyst_match = False
-                token.catalyst_description = ""
-
-            # Score floor: tokens with basic social links get minimum 15pts
-            # EXCEPT: never floor a scam (project_type="scam" or LLM score==0).
-            # The floor is meant to keep marginal-but-real tokens from being
-            # totally killed by sparse social data; it must NOT rescue a flagged
-            # scam or a zero-score LLM verdict (invariant from prompts.py:238).
-            has_basic_social = bool(token.twitter_username or token.website_url)
-            is_scam_signal = (
-                token.project_type == "scam" or token.social_narrative_score == 0
-            )
-            if (
-                has_basic_social
-                and not is_scam_signal
-                and token.social_narrative_score < 15
-            ):
-                token.social_narrative_score = 15
-
-            # Stage 4: For web3_project tokens, run LLM #3 (substance analysis)
-            # and combine with LLM #1 using 0.4/0.6 weight.
-            if token.project_type == "web3_project":
+            if not parsed["handle"]:
                 try:
-                    from core.web3_analyzer import analyze_web3_substance
-                    substance = await analyze_web3_substance(token, self.mimo)
-                    token.substance_score = substance["substance_score"]
-                    token.substance_red_flags = substance["red_flags"]
-                    token.substance_team_visible = substance["team_visible"]
-                    token.substance_has_github = substance["has_github"]
-                    token.substance_has_audit = substance["has_audit"]
-                    token.substance_audit_firm = substance["audit_firm"]
-
-                    # Combine: 0.4 social + 0.6 substance (KEEP SEPARATE for
-                    # multiplier application — multiplier is a SOCIAL signal
-                    # and should only amplify the social component, not the
-                    # substance (audit/team/tech) verdict.
-                    llm1_score = token.social_narrative_score
-                    llm3_score = substance["substance_score"]
-                    # Apply multiplier later — track components separately
-                    token._llm1_social_raw = llm1_score
-                    token._llm3_substance_raw = llm3_score
-                    combined_no_mult = (llm1_score * 0.4) + (llm3_score * 0.6)
-                    token.social_narrative_score = max(0, min(100, combined_no_mult))
-                    logger.info(
-                        f"[LLM-3] {token.symbol} ({token.address[:8]}): "
-                        f"substance={llm3_score:.0f}/100, team={substance['team_visible']}, "
-                        f"github={substance['has_github']}, audit={substance['has_audit']} "
-                        f"({substance['audit_firm']}), red_flags={substance['red_flags']}, "
-                        f"reasoning={substance['reasoning'][:120]}"
+                    creator_handle = await self.twitter.get_community_creator(
+                        parsed["community_id"]
                     )
+                    if creator_handle:
+                        token.community_creator = creator_handle
+                        try:
+                            profile = await self.twitter.get_profile(creator_handle)
+                            if profile:
+                                token.twitter_followers = profile.get("followers", 0)
+                                token.twitter_verified = profile.get(
+                                    "verification", {}
+                                ).get("verified", False)
+                                token.twitter_description = profile.get(
+                                    "description", ""
+                                )
+                                token.twitter_username = creator_handle
+                        except Exception as e:
+                            logger.warning(
+                                f"Creator profile error for {token.symbol}: {e}"
+                            )
+                        try:
+                            tweets = await self.twitter.get_recent_tweets(
+                                creator_handle, 3
+                            )
+                            token.recent_tweets = tweets
+                        except Exception as e:
+                            logger.warning(
+                                f"Creator tweets error for {token.symbol}: {e}"
+                            )
                 except Exception as e:
-                    logger.error(f"[LLM-3] {token.symbol} error: {e}, using LLM #1 only")
-                    token._llm1_social_raw = token.social_narrative_score
-                    token._llm3_substance_raw = None
+                    logger.warning(
+                        f"Community scrape error for {token.symbol}: {e}"
+                    )
 
-            # Compute social multiplier (replaces additive bonus)
-            # LLM is the FLOOR; signals only amplify (multiplicative, max 1.4x).
-            from llm.social_scoring import compute_social_multiplier
-            from core.trench_signals import detect_negative_signals
-            negative_penalty = detect_negative_signals(token)
-            mult = compute_social_multiplier(token, token.address, negative_penalty=negative_penalty)
-            volume_multiplier = mult["multiplier"]
-            signals_bonus = mult["signals_bonus"]
-            pre_mult_score = token.social_narrative_score
+        # 4. Website scraping
+        if token.website_url:
+            try:
+                token.website_text = await self.scraper.scrape_text(token.website_url)
+            except Exception as e:
+                logger.warning(f"Website scrape error for {token.symbol}: {e}")
 
-            # For web3 tokens, apply multiplier ONLY to social component
-            # (substance is orthogonal — multiplying it by social noise
-            # would inflate real project quality on shill pumping).
-            if (
-                token.project_type == "web3_project"
-                and getattr(token, "_llm3_substance_raw", None) is not None
-            ):
-                llm1_boosted = max(0, min(100, token._llm1_social_raw * volume_multiplier))
-                combined = (llm1_boosted * 0.4) + (token._llm3_substance_raw * 0.6)
-                token.social_narrative_score = max(0, min(100, combined))
-            else:
-                token.social_narrative_score = min(100, max(0, pre_mult_score * volume_multiplier))
+        # 5. Search FxTwitter by contract address
+        search_results = []
+        try:
+            search_results = await self.twitter.search_by_contract(token.address, 10)
 
-            logger.info(
-                f"[SOCIAL] {token.symbol} ({token.address[:8]}): "
-                f"llm={pre_mult_score:.0f} × {volume_multiplier:.2f} = {token.social_narrative_score:.0f}/100, "
-                f"project={token.project_type}, social_links={has_basic_social}, "
-                f"influencers={len(influencer_mentions)}, organic={len(token.organic_mentions)}, "
-                f"catalyst={token.catalyst_match}, signals_bonus=+{signals_bonus}, "
-                f"penalty=-{negative_penalty}, breakdown={mult['breakdown']}"
-            )
+            for tweet in search_results:
+                author = tweet.get("author", {}).get("screen_name", "").lower()
+                if not author:
+                    continue
+                created_ts = tweet.get("created_timestamp", 0)
+                tweet_age_min = (time.time() - created_ts) / 60 if created_ts else 0
 
+                if author in self.influencers:
+                    influencer_mentions.append({
+                        "handle": author,
+                        "name": self.influencers[author]["name"],
+                        "weight": self.influencers[author]["weight"],
+                        "tweet_text": tweet.get("text", "")[:100],
+                        "likes": tweet.get("likes", 0),
+                        "tweet_age_min": tweet_age_min,
+                    })
+                    if author == "elonmusk":
+                        token.has_elon_tweet = True
+                    elif author == "aeyakovenko":
+                        token.has_toly_tweet = True
+                else:
+                    token.organic_mentions.append({
+                        "handle": author,
+                        "followers": tweet.get("author", {}).get("followers", 0),
+                        "likes": tweet.get("likes", 0),
+                        "tweet_text": tweet.get("text", "")[:100],
+                        "tweet_age_min": tweet_age_min,
+                    })
         except Exception as e:
-            logger.error(f"Social analysis error for {token.symbol}: {e}")
+            logger.warning(f"Twitter search error for {token.symbol}: {e}")
+
+        token.influencer_mentions = influencer_mentions
+
+        # 6. LLM #1: Social analysis
+        social_prompt = SOCIAL_ANALYSIS_USER.format(
+            token_name=token.name,
+            token_symbol=token.symbol,
+            twitter_username=token.twitter_username or "none",
+            twitter_followers=token.twitter_followers,
+            twitter_verified="Yes" if token.twitter_verified else "No",
+            twitter_description=token.twitter_description[:200] or "No description",
+            twitter_community=f"Yes (community/{token.community_id})" if token.has_community else "No",
+            recent_tweets=json.dumps(token.recent_tweets[:3], indent=2) if token.recent_tweets else "No tweets from this account yet",
+            website_text=token.website_text[:500] or "No website content",
+            search_results=json.dumps(search_results[:5], indent=2) if search_results else "No search results yet",
+            influencer_mentions=json.dumps(influencer_mentions, indent=2) if influencer_mentions else "No influencer mentions",
+        )
+
+        await self.llm_rate_limiter.acquire()
+        social_result = await self.llm_client.analyze_token(SOCIAL_ANALYSIS_SYSTEM, social_prompt)
+
+        # 7. Parse LLM #1 response
+        llm1_succeeded = social_result is not None
+        if llm1_succeeded:
+            social_data = social_result
+            token.project_type = social_data.get("project_type", "unknown")
+            token.social_narrative_score = float(social_data.get("score", 0))
+            token.social_narrative_text = social_data.get("summary", "")
+            token.catalyst_match = bool(social_data.get("has_catalyst", False))
+            token.catalyst_description = social_data.get("catalyst_description", "")
+        else:
+            logger.warning(
+                f"[LLM-1-FAIL] {token.symbol} ({token.address[:8]}): "
+                "LLM #1 returned no result; defaulting to neutral 50/unknown"
+            )
             token.project_type = "unknown"
-            token.social_narrative_score = 0
+            token.social_narrative_score = 50.0
             token.social_narrative_text = ""
+            token.catalyst_match = False
+            token.catalyst_description = ""
+
+        has_basic_social = bool(token.twitter_username or token.website_url)
+        is_scam_signal = (
+            token.project_type == "scam" or token.social_narrative_score == 0
+        )
+        if (
+            has_basic_social
+            and not is_scam_signal
+            and token.social_narrative_score < 15
+        ):
+            token.social_narrative_score = 15
+
+        # Stage 4: For web3_project tokens, run LLM #3 (substance analysis)
+        if token.project_type == "web3_project":
+            try:
+                from core.web3_analyzer import analyze_web3_substance
+                substance = await analyze_web3_substance(token, self.llm_client)
+                token.substance_score = substance["substance_score"]
+                token.substance_red_flags = substance["red_flags"]
+                token.substance_team_visible = substance["team_visible"]
+                token.substance_has_github = substance["has_github"]
+                token.substance_has_audit = substance["has_audit"]
+                token.substance_audit_firm = substance["audit_firm"]
+
+                llm1_score = token.social_narrative_score
+                llm3_score = substance["substance_score"]
+                token._llm1_social_raw = llm1_score
+                token._llm3_substance_raw = llm3_score
+                combined_no_mult = (llm1_score * 0.4) + (llm3_score * 0.6)
+                token.social_narrative_score = max(0, min(100, combined_no_mult))
+                logger.info(
+                    f"[LLM-3] {token.symbol} ({token.address[:8]}): "
+                    f"substance={llm3_score:.0f}/100, team={substance['team_visible']}, "
+                    f"github={substance['has_github']}, audit={substance['has_audit']} "
+                    f"({substance['audit_firm']}), red_flags={substance['red_flags']}, "
+                    f"reasoning={substance['reasoning'][:120]}"
+                )
+            except Exception as e:
+                logger.error(f"[LLM-3] {token.symbol} error: {e}, using LLM #1 only")
+                token._llm1_social_raw = token.social_narrative_score
+                token._llm3_substance_raw = None
+
+        # Compute social multiplier
+        from llm.social_scoring import compute_social_multiplier
+        from core.trench_signals import detect_negative_signals
+        negative_penalty = detect_negative_signals(token)
+        mult = compute_social_multiplier(token, token.address, negative_penalty=negative_penalty)
+        volume_multiplier = mult["multiplier"]
+        signals_bonus = mult["signals_bonus"]
+        pre_mult_score = token.social_narrative_score
+
+        if (
+            token.project_type == "web3_project"
+            and getattr(token, "_llm3_substance_raw", None) is not None
+        ):
+            llm1_boosted = max(0, min(100, token._llm1_social_raw * volume_multiplier))
+            combined = (llm1_boosted * 0.4) + (token._llm3_substance_raw * 0.6)
+            token.social_narrative_score = max(0, min(100, combined))
+        else:
+            token.social_narrative_score = min(100, max(0, pre_mult_score * volume_multiplier))
+
+        logger.info(
+            f"[SOCIAL] {token.symbol} ({token.address[:8]}): "
+            f"llm={pre_mult_score:.0f} × {volume_multiplier:.2f} = {token.social_narrative_score:.0f}/100, "
+            f"project={token.project_type}, social_links={has_basic_social}, "
+            f"influencers={len(influencer_mentions)}, organic={len(token.organic_mentions)}, "
+            f"catalyst={token.catalyst_match}, signals_bonus=+{signals_bonus}, "
+            f"penalty=-{negative_penalty}, breakdown={mult['breakdown']}"
+        )
 
     async def _metrics_loop(self):
         while True:
@@ -1303,6 +1287,10 @@ class TrenchingBot:
         for task in self.tasks.values():
             task.cancel()
         await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        await self.gmgn.close()
+        await self.twitter.close()
+        await self.scraper.close()
+        await self.jupiter.close()
         await self.price_oracle.close()
         await self.db.close()
         await dispatcher.close()

@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from config import settings
-from llm.mimo_client import MiMoClient
+from llm.pioneer_client import PioneerLLMClient
 from llm.prompts import RECAP_LOSS_ANALYSIS_SYSTEM, RECAP_LOSS_ANALYSIS_USER
 from llm.parser import parse_recap_loss_reasons
 
@@ -13,24 +13,18 @@ logger = logging.getLogger(__name__)
 
 async def hourly_recap(state, db):
     logger.info("Hourly recap scheduler started")
-    mimo = MiMoClient()
+    llm = PioneerLLMClient()
 
     while True:
         try:
-            now = datetime.now(timezone.utc)
-            next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-            wait_seconds = (next_hour - now).total_seconds()
-            logger.info(f"Next recap at {next_hour.isoformat()} (in {wait_seconds:.0f}s)")
-            await asyncio.sleep(wait_seconds)
-
-            await _generate_recap(state, db, mimo)
-
+            await asyncio.sleep(3600)
+            await _generate_recap(state, db, llm)
         except Exception as e:
             logger.error(f"Hourly recap error: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(300)
 
 
-async def _generate_recap(state, db, mimo: MiMoClient):
+async def _generate_recap(state, db, llm: PioneerLLMClient):
     try:
         now = datetime.now(timezone.utc)
         period_end = now
@@ -61,7 +55,7 @@ async def _generate_recap(state, db, mimo: MiMoClient):
 
         loss_reasons = {}
         if losses:
-            loss_reasons = await _analyze_losses_batch(losses, mimo)
+            loss_reasons = await _analyze_losses_batch(losses, llm)
 
         recap = {
             "period_start": period_start.isoformat(),
@@ -113,7 +107,7 @@ async def _generate_recap(state, db, mimo: MiMoClient):
         return None
 
 
-async def _analyze_losses_batch(losses: list, mimo: MiMoClient) -> dict:
+async def _analyze_losses_batch(losses: list, llm: PioneerLLMClient) -> dict:
     try:
         losses_data = []
         for call in losses:
@@ -129,7 +123,7 @@ async def _analyze_losses_batch(losses: list, mimo: MiMoClient) -> dict:
             losses_json=json.dumps(losses_data, indent=2)
         )
 
-        result = await mimo.analyze_token(RECAP_LOSS_ANALYSIS_SYSTEM, prompt, temperature=0.2)
+        result = await llm.analyze_token(RECAP_LOSS_ANALYSIS_SYSTEM, prompt, temperature=0.2)
 
         if isinstance(result, list):
             return parse_recap_loss_reasons(result)

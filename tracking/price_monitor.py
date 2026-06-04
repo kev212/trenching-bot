@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from config import settings
 from analysis.models import CallStatus, PriceSnapshot
 from sources.dexscreener import fetch_pair_data, extract_pair_info
-from llm.mimo_client import MiMoClient
+from llm.pioneer_client import PioneerLLMClient
 from llm.prompts import LOSS_ANALYSIS_SYSTEM, LOSS_ANALYSIS_USER
 from llm.parser import parse_loss_analysis
 
@@ -17,7 +17,7 @@ WIN_TIME_LIMIT = settings.win_time_limit_seconds
 
 async def price_monitor(state, db):
     logger.info("Price monitor started")
-    mimo = MiMoClient()
+    llm = PioneerLLMClient()
 
     while True:
         try:
@@ -29,7 +29,7 @@ async def price_monitor(state, db):
 
             logger.info(f"Checking {len(active_calls)} active calls...")
 
-            tasks = [_check_single_call(call, state, db, mimo) for call in active_calls]
+            tasks = [_check_single_call(call, state, db, llm) for call in active_calls]
             await asyncio.gather(*tasks, return_exceptions=True)
 
         except Exception as e:
@@ -37,7 +37,7 @@ async def price_monitor(state, db):
             await asyncio.sleep(30)
 
 
-async def _check_single_call(call, state, db, mimo: MiMoClient):
+async def _check_single_call(call, state, db, llm: PioneerLLMClient):
     try:
         pair_data = await fetch_pair_data(call.token_address)
         info = extract_pair_info(pair_data)
@@ -73,13 +73,13 @@ async def _check_single_call(call, state, db, mimo: MiMoClient):
             state.metrics.record_outcome("LOSS")
             await state.remove_active_call(call.token_address)
 
-            asyncio.create_task(_analyze_loss(call, gain, elapsed, mimo, db))
+            asyncio.create_task(_analyze_loss(call, gain, elapsed, llm, db))
 
     except Exception as e:
         logger.error(f"Error checking {call.token_address}: {e}")
 
 
-async def _analyze_loss(call, final_gain: float, elapsed: float, mimo: MiMoClient, db):
+async def _analyze_loss(call, final_gain: float, elapsed: float, llm: PioneerLLMClient, db):
     try:
         snapshots = []
         call_json = {
@@ -102,7 +102,7 @@ async def _analyze_loss(call, final_gain: float, elapsed: float, mimo: MiMoClien
             elapsed_minutes=f"{elapsed / 60:.0f}",
         )
 
-        result = await mimo.analyze_token(LOSS_ANALYSIS_SYSTEM, prompt, temperature=0.2)
+        result = await llm.analyze_token(LOSS_ANALYSIS_SYSTEM, prompt, temperature=0.2)
         analysis = parse_loss_analysis(result)
 
         logger.info(f"Loss analysis for {call.token_symbol}: {analysis.get('root_cause', 'N/A')}")

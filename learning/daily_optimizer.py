@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from config import settings, load_filter_params, save_filter_params, load_adjustment_rules
-from llm.mimo_client import MiMoClient
+from llm.pioneer_client import PioneerLLMClient
 from llm.prompts import OPTIMIZER_SYSTEM, OPTIMIZER_USER
 from llm.parser import parse_optimizer_suggestions
 
@@ -13,24 +13,18 @@ logger = logging.getLogger(__name__)
 
 async def daily_optimizer(state, db):
     logger.info("Daily optimizer started")
-    mimo = MiMoClient()
+    llm = PioneerLLMClient()
 
     while True:
         try:
-            now = datetime.now(timezone.utc)
-            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            wait_seconds = (tomorrow - now).total_seconds()
-            logger.info(f"Next optimization at {tomorrow.isoformat()} (in {wait_seconds:.0f}s)")
-            await asyncio.sleep(wait_seconds)
-
-            await _run_optimization(state, db, mimo)
-
+            await asyncio.sleep(3600)
+            await _run_optimization(state, db, llm)
         except Exception as e:
             logger.error(f"Daily optimizer error: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(300)
 
 
-async def _run_optimization(state, db, mimo: MiMoClient):
+async def _run_optimization(state, db, llm: PioneerLLMClient):
     try:
         rules = load_adjustment_rules()
 
@@ -122,11 +116,11 @@ async def _run_optimization(state, db, mimo: MiMoClient):
             filter_performance_json=json.dumps(filter_perf, indent=2),
         )
 
-        result = await mimo.analyze_token(OPTIMIZER_SYSTEM, prompt, temperature=0.3)
+        result = await llm.analyze_token(OPTIMIZER_SYSTEM, prompt, temperature=0.3)
         suggestions = parse_optimizer_suggestions(result)
 
         if not suggestions:
-            logger.info("No optimization suggestions from MiMo")
+            logger.info("No optimization suggestions from LLM")
             return
 
         valid_suggestions = _validate_adjustments(suggestions, rules, current_params.get("filters", {}))

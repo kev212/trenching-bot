@@ -1,12 +1,19 @@
+import asyncio
 import logging
 import os
 import time
+import threading
 import uuid
+from typing import Optional
+
 from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger("main")
 
 BASE_URL = "https://openapi.gmgn.ai"
+
+GMGN_TIMEOUT = 15
+GMGN_GATHER_TIMEOUT = 30
 
 
 class GMGNClient:
@@ -15,10 +22,21 @@ class GMGNClient:
         self.host = BASE_URL
         self.proxy = proxy or os.environ.get("GMGN_PROXY") or os.environ.get("HTTP_PROXY") or ""
         self.rate_limiter = rate_limiter
+        self._session: Optional[AsyncSession] = None
         if self.proxy:
             logger.warning(f"GMGN proxy: {self.proxy[:50]}...")
         else:
             logger.warning("GMGN: NO proxy")
+
+    async def _get_session(self) -> AsyncSession:
+        if self._session is None:
+            self._session = AsyncSession(impersonate="chrome")
+        return self._session
+
+    async def close(self):
+        if self._session:
+            await self._session.close()
+            self._session = None
 
     def _auth_params(self) -> dict:
         return {
@@ -42,25 +60,31 @@ class GMGNClient:
             if self.rate_limiter:
                 await self.rate_limiter.acquire(1)
             query = {**(params or {}), **self._auth_params()}
-            async with AsyncSession(impersonate="chrome") as session:
-                resp = await session.get(
+            session = await self._get_session()
+            resp = await asyncio.wait_for(
+                session.get(
                     f"{self.host}{path}",
                     params=query,
                     headers=self._headers(),
                     proxies=self._proxy_dict(),
-                    timeout=15,
-                )
-                if resp.status_code != 200:
-                    logger.warning(f"GMGN GET {path}: HTTP {resp.status_code} - {resp.text[:200]}")
-                    return {}
-                data = resp.json()
-                if data.get("code") != 0:
-                    logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
-                    return {}
-                result = data.get("data", data)
-                if isinstance(result, dict) and "data" in result:
-                    result = result["data"]
-                return result
+                    timeout=GMGN_TIMEOUT,
+                ),
+                timeout=GMGN_TIMEOUT + 5,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"GMGN GET {path}: HTTP {resp.status_code} - {resp.text[:200]}")
+                return {}
+            data = resp.json()
+            if data.get("code") != 0:
+                logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
+                return {}
+            result = data.get("data", data)
+            if isinstance(result, dict) and "data" in result:
+                result = result["data"]
+            return result
+        except asyncio.TimeoutError:
+            logger.error(f"GMGN {path} timeout (> {GMGN_TIMEOUT}s)")
+            return {}
         except Exception as e:
             logger.error(f"GMGN {path} error: {e}")
             return {}
@@ -71,23 +95,29 @@ class GMGNClient:
                 await self.rate_limiter.acquire(1)
             auth = self._auth_params()
             full_query = {**(query or {}), **auth}
-            async with AsyncSession(impersonate="chrome") as session:
-                resp = await session.post(
+            session = await self._get_session()
+            resp = await asyncio.wait_for(
+                session.post(
                     f"{self.host}{path}",
                     params=full_query,
                     json=body or {},
                     headers=self._headers(),
                     proxies=self._proxy_dict(),
-                    timeout=15,
-                )
-                if resp.status_code != 200:
-                    logger.warning(f"GMGN POST {path}: HTTP {resp.status_code} - {resp.text[:300]}")
-                    return {}
-                data = resp.json()
-                if data.get("code") != 0:
-                    logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
-                    return {}
-                return data.get("data", data)
+                    timeout=GMGN_TIMEOUT,
+                ),
+                timeout=GMGN_TIMEOUT + 5,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"GMGN POST {path}: HTTP {resp.status_code} - {resp.text[:300]}")
+                return {}
+            data = resp.json()
+            if data.get("code") != 0:
+                logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
+                return {}
+            return data.get("data", data)
+        except asyncio.TimeoutError:
+            logger.error(f"GMGN {path} timeout (> {GMGN_TIMEOUT}s)")
+            return {}
         except Exception as e:
             logger.error(f"GMGN {path} error: {e}")
             return {}

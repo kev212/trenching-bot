@@ -18,6 +18,94 @@ from alerts.formatter import format_exit_alert
 logger = logging.getLogger("position_monitor")
 
 
+async def _process_position(
+    position, executor, position_manager, is_paper,
+    stop_loss_pct, tp1_mult, tp2_mult, extreme_tp_mult,
+    tp1_pct, trailing_pct, min_hold_seconds, time_limit,
+):
+    token_address = position["token_address"]
+
+    if is_paper:
+        current_price = await executor._simulate_paper_price_walk(
+            position, "monitor"
+        )
+    else:
+        current_price = await executor.jupiter.get_token_price_in_sol_with_retry(
+            token_address
+        )
+
+    if current_price <= 0:
+        return
+
+    entry = position["entry_price"]
+    peak = max(position["peak_price"] or 0, current_price)
+    if peak > (position["peak_price"] or 0):
+        position["peak_price"] = peak
+        await position_manager.update_position(position)
+
+    triggered = False
+    last_reason = ""
+    already_partial = bool(position.get("exit_reason")) and \
+        position.get("exit_reason") in ("TP1", "TP2")
+
+    held_so_far = (
+        (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
+        if position.get("entry_time") else 0
+    )
+    in_warmup = held_so_far < min_hold_seconds
+
+    tp1_fire_price = entry * tp1_mult
+    tp2_fire_price = entry * tp2_mult
+    extreme_tp_price = entry * extreme_tp_mult
+
+    if current_price <= entry * (1 - stop_loss_pct / 100):
+        await executor.execute_sell(position, 100, "SL")
+        triggered = True
+        last_reason = "SL"
+    elif not already_partial and current_price >= extreme_tp_price:
+        await executor.execute_sell(position, tp1_pct, "TP1-EXTREME")
+        position["exit_reason"] = "TP1"
+        await position_manager.update_position(position)
+        triggered = True
+        last_reason = "TP1"
+    elif not in_warmup and not already_partial and current_price >= tp1_fire_price:
+        await executor.execute_sell(position, tp1_pct, "TP1")
+        position["exit_reason"] = "TP1"
+        await position_manager.update_position(position)
+        triggered = True
+        last_reason = "TP1"
+    elif not in_warmup and position.get("exit_reason") == "TP1" and \
+            current_price >= tp2_fire_price:
+        remaining_pct = 100 - tp1_pct
+        await executor.execute_sell(position, remaining_pct, "TP2")
+        position["exit_reason"] = "TP2"
+        await position_manager.update_position(position)
+        triggered = True
+        last_reason = "TP2"
+    elif not in_warmup and position.get("exit_reason") in ("TP1", "TP2") and \
+            current_price <= peak * (1 - trailing_pct / 100):
+        await executor.execute_sell(position, 100, "TRAILING")
+        triggered = True
+        last_reason = "TRAILING"
+    else:
+        if time_limit > 0 and held_so_far > time_limit:
+            await executor.execute_sell(position, 100, "TIME")
+            triggered = True
+            last_reason = "TIME"
+
+    if triggered:
+        try:
+            gain = (current_price - entry) / entry * 100
+            alert_text = format_exit_alert(position, last_reason, current_price, gain)
+            await dispatcher.send_alert(alert_text)
+            logger.info(
+                f"[EXIT] {position['token_symbol']} ({token_address[:8]}): "
+                f"{last_reason} at {gain:+.1f}% (price={current_price:.8f})"
+            )
+        except Exception as e:
+            logger.error(f"Exit alert send failed: {e}")
+
+
 async def position_monitor(state, db, position_manager: PositionManager,
                             risk: RiskManager, jupiter: JupiterClient,
                             executor: TradeExecutor, config: dict):
@@ -47,75 +135,19 @@ async def position_monitor(state, db, position_manager: PositionManager,
                 continue
 
             for position in open_positions:
-                token_address = position["token_address"]
-
-                if is_paper:
-                    current_price = await executor._simulate_paper_price_walk(
-                        position, "monitor"
+                try:
+                    await asyncio.wait_for(
+                        _process_position(
+                            position, executor, position_manager, is_paper,
+                            stop_loss_pct, tp1_mult, tp2_mult, extreme_tp_mult,
+                            tp1_pct, trailing_pct, min_hold_seconds, time_limit,
+                        ),
+                        timeout=20,
                     )
-                else:
-                    current_price = await jupiter.get_token_price_in_sol_with_retry(
-                        token_address
-                    )
-
-                if current_price <= 0:
-                    continue
-
-                entry = position["entry_price"]
-                peak = max(position["peak_price"] or 0, current_price)
-                if peak > (position["peak_price"] or 0):
-                    position["peak_price"] = peak
-                    await position_manager.update_position(position)
-
-                triggered = False
-                last_reason = ""
-                already_partial = bool(position.get("exit_reason")) and \
-                    position.get("exit_reason") in ("TP1", "TP2")
-
-                held_so_far = (
-                    (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
-                    if position.get("entry_time") else 0
-                )
-                in_warmup = held_so_far < min_hold_seconds
-
-                tp1_fire_price = entry * tp1_mult
-                tp2_fire_price = entry * tp2_mult
-                extreme_tp_price = entry * extreme_tp_mult
-
-                if current_price <= entry * (1 - stop_loss_pct / 100):
-                    await executor.execute_sell(position, 100, "SL")
-                    triggered = True
-                    last_reason = "SL"
-                elif not already_partial and current_price >= extreme_tp_price:
-                    await executor.execute_sell(position, tp1_pct, "TP1-EXTREME")
-                    position["exit_reason"] = "TP1"
-                    await position_manager.update_position(position)
-                    triggered = True
-                    last_reason = "TP1"
-                elif not in_warmup and not already_partial and current_price >= tp1_fire_price:
-                    await executor.execute_sell(position, tp1_pct, "TP1")
-                    position["exit_reason"] = "TP1"
-                    await position_manager.update_position(position)
-                    triggered = True
-                    last_reason = "TP1"
-                elif not in_warmup and position.get("exit_reason") == "TP1" and \
-                        current_price >= tp2_fire_price:
-                    remaining_pct = 100 - tp1_pct
-                    await executor.execute_sell(position, remaining_pct, "TP2")
-                    position["exit_reason"] = "TP2"
-                    await position_manager.update_position(position)
-                    triggered = True
-                    last_reason = "TP2"
-                elif not in_warmup and position.get("exit_reason") in ("TP1", "TP2") and \
-                        current_price <= peak * (1 - trailing_pct / 100):
-                    await executor.execute_sell(position, 100, "TRAILING")
-                    triggered = True
-                    last_reason = "TRAILING"
-                else:
-                    if time_limit > 0 and held_so_far > time_limit:
-                        await executor.execute_sell(position, 100, "TIME")
-                        triggered = True
-                        last_reason = "TIME"
+                except asyncio.TimeoutError:
+                    logger.warning(f"Position {position['token_address'][:8]} monitor timeout (> 20s)")
+                except Exception as e:
+                    logger.error(f"Position {position['token_address'][:8]} monitor error: {e}")
 
                 if triggered:
                     logger.info(

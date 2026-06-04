@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import re
+from typing import Optional
 from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger("main")
@@ -10,6 +12,17 @@ BASE_URL = "https://api.fxtwitter.com"
 class TwitterClient:
     def __init__(self):
         self.host = BASE_URL
+        self._session: Optional[AsyncSession] = None
+
+    async def _get_session(self) -> AsyncSession:
+        if self._session is None:
+            self._session = AsyncSession(impersonate="chrome")
+        return self._session
+
+    async def close(self):
+        if self._session:
+            await self._session.close()
+            self._session = None
 
     INVALID_PATHS = {"i", "status", "statuses", "search", "home", "notifications", "messages", "explore", "settings", "lists"}
 
@@ -68,20 +81,26 @@ class TwitterClient:
 
     async def _get(self, path: str, params: dict = None) -> dict:
         try:
-            async with AsyncSession(impersonate="chrome") as session:
-                resp = await session.get(
+            session = await self._get_session()
+            resp = await asyncio.wait_for(
+                session.get(
                     f"{self.host}{path}",
                     params=params or {},
                     timeout=10,
-                )
-                if resp.status_code != 200:
-                    logger.warning(f"FxTwitter {path}: HTTP {resp.status_code}")
-                    return {}
-                data = resp.json()
-                if data.get("code") != 200:
-                    logger.warning(f"FxTwitter {path}: {data.get('message')}")
-                    return {}
-                return data
+                ),
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"FxTwitter {path}: HTTP {resp.status_code}")
+                return {}
+            data = resp.json()
+            if data.get("code") != 200:
+                logger.warning(f"FxTwitter {path}: {data.get('message')}")
+                return {}
+            return data
+        except asyncio.TimeoutError:
+            logger.error(f"FxTwitter {path} timeout (> 10s)")
+            return {}
         except Exception as e:
             logger.error(f"FxTwitter {path} error: {e}")
             return {}

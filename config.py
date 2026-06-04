@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import os
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
@@ -9,9 +10,13 @@ CONFIG_DIR = Path(__file__).parent / "config"
 class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
-    mimo_api_key: str = ""
-    mimo_base_url: str = "https://api.xiaomimimo.com/v1"
-    mimo_model: str = "mimo-v2.5-pro"
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.pioneer.ai/v1"
+    llm_model: str = "MiniMaxAI/MiniMax-M3"
+
+    def model_post_init(self, __context):
+        if not self.llm_api_key:
+            self.llm_api_key = os.environ.get("MIMO_API_KEY", "")
     gmgn_api_key: str = ""
     http_proxy: str = ""
     log_level: str = "INFO"

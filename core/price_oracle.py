@@ -33,6 +33,8 @@ SOL_PRICE_CACHE_TTL = 30.0
 class PriceOracle:
     """Async price aggregator. Caches per token, 3s TTL."""
 
+    CACHE_MAX = 500
+
     def __init__(self, gmgn=None, jupiter=None, dexscreener=None,
                  proxy: str = "", timeout: int = 10):
         self.gmgn = gmgn
@@ -43,6 +45,12 @@ class PriceOracle:
         self._session: Optional[aiohttp.ClientSession] = None
         self._cache: dict = {}
         self._sol_price_cache: dict = {}
+
+    def _evict_cache(self):
+        if len(self._cache) > self.CACHE_MAX:
+            oldest_keys = sorted(self._cache, key=lambda k: self._cache[k]["ts"])[:len(self._cache) // 4]
+            for k in oldest_keys:
+                del self._cache[k]
 
     async def init(self) -> None:
         if not self._session:
@@ -68,12 +76,19 @@ class PriceOracle:
         if cached and (now - cached["ts"]) < CACHE_TTL:
             return cached["price"]
 
-        prices = await asyncio.gather(
-            self._from_dexscreener(token_address),
-            self._from_jupiter(token_address),
-            self._from_gmgn(token_address),
-            return_exceptions=True,
-        )
+        try:
+            prices = await asyncio.wait_for(
+                asyncio.gather(
+                    self._from_dexscreener(token_address),
+                    self._from_jupiter(token_address),
+                    self._from_gmgn(token_address),
+                    return_exceptions=True,
+                ),
+                timeout=8,
+            )
+        except asyncio.TimeoutError:
+            logger.debug(f"[ORACLE] timeout for {token_address[:8]}")
+            return cached["price"] if cached else 0.0
         valid = [p for p in prices if isinstance(p, (int, float)) and p > 0]
         if not valid:
             if cached:
@@ -93,6 +108,7 @@ class PriceOracle:
         )
         logger.debug(f"[ORACLE] {token_address[:8]}: median={median:.10f} ({sources})")
         self._cache[token_address] = {"ts": now, "price": median}
+        self._evict_cache()
         return median
 
     async def get_sol_price_usd(self) -> float:

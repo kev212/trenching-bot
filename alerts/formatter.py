@@ -71,7 +71,7 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict,
 💧 Liquidity: ${token.liquidity:,.0f}
 👥 Holders: {token.holders_count}
 {social_text}
-🤖 MiMo Analysis:
+🤖 LLM Analysis:
 "{decision.reasoning}"
 
 🔑 Key Factors: {', '.join(decision.key_factors) if decision.key_factors else 'N/A'}
@@ -109,7 +109,7 @@ def format_recap(recap: dict) -> str:
 
         reason = recap.get("loss_reasons", {}).get(call.token_symbol, "")
         if status == "LOSS" and reason:
-            lines.append(f"  💡 MiMo: \"{reason}\"")
+            lines.append(f"  💡 LLM: \"{reason}\"")
 
         lines.append("")
 

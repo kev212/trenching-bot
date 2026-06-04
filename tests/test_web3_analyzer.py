@@ -1,6 +1,6 @@
 """Tests for web3_analyzer fallback behavior (Stage 4).
 
-Full LLM #3 behavior requires network + real mimo client.
+Full LLM #3 behavior requires network + real LLM client.
 Tests focus on the deterministic parts:
 - Fallback returns 50 (neutral)
 - Red-flag cap applies
@@ -14,8 +14,8 @@ from analysis.models import TokenData
 from core.web3_analyzer import analyze_web3_substance
 
 
-class FakeMiMo:
-    """Minimal mimo client that returns predetermined JSON."""
+class FakePioneer:
+    """Minimal PioneerLLMClient that returns predetermined JSON."""
     def __init__(self, response: dict):
         self.response = response
         self._lock = asyncio.Lock()
@@ -37,8 +37,8 @@ def test_fallback_for_non_web3():
     """Non-web3 tokens skip LLM #3 → fallback 50."""
     async def go():
         token = make_token(project_type="meme")
-        mimo = FakeMiMo({"substance_score": 99, "red_flags": []})
-        result = await analyze_web3_substance(token, mimo)
+        llm = FakePioneer({"substance_score": 99, "red_flags": []})
+        result = await analyze_web3_substance(token, llm)
         assert result["substance_score"] == 50.0, f"Expected 50 fallback, got {result['substance_score']}"
         print(f"✓ fallback_non_web3: substance=50 (expected 50)")
     asyncio.run(go())
@@ -48,7 +48,7 @@ def test_high_substance_score():
     """High substance score (75) for legit web3 project."""
     async def go():
         token = make_token()
-        mimo = FakeMiMo({
+        llm = FakePioneer({
             "substance_score": 75,
             "red_flags": [],
             "reasoning": "Has GitHub, audit, doxxed team",
@@ -57,7 +57,7 @@ def test_high_substance_score():
             "has_audit": True,
             "audit_firm": "CertiK",
         })
-        result = await analyze_web3_substance(token, mimo)
+        result = await analyze_web3_substance(token, llm)
         assert result["substance_score"] == 75
         assert result["team_visible"] is True
         assert result["has_github"] is True
@@ -71,7 +71,7 @@ def test_red_flag_caps_at_40():
     """Critical red flags cap substance at 40 (per rubric)."""
     async def go():
         token = make_token()
-        mimo = FakeMiMo({
+        llm = FakePioneer({
             "substance_score": 80,  # would be 80, but red flag caps it
             "red_flags": ["stolen_team"],
             "reasoning": "Stolen team photos detected",
@@ -80,7 +80,7 @@ def test_red_flag_caps_at_40():
             "has_audit": False,
             "audit_firm": "",
         })
-        result = await analyze_web3_substance(token, mimo)
+        result = await analyze_web3_substance(token, llm)
         assert result["substance_score"] == 40, f"Expected 40 (capped), got {result['substance_score']}"
         assert "stolen_team" in result["red_flags"]
         print(f"✓ red_flag_cap: score=80→40 (capped due to stolen_team)")
@@ -91,7 +91,7 @@ def test_non_critical_red_flag_no_cap():
     """Non-critical red flags don't trigger cap."""
     async def go():
         token = make_token()
-        mimo = FakeMiMo({
+        llm = FakePioneer({
             "substance_score": 60,
             "red_flags": ["vague_roadmap"],
             "reasoning": "Roadmap is unclear but no plagiarism",
@@ -100,7 +100,7 @@ def test_non_critical_red_flag_no_cap():
             "has_audit": False,
             "audit_firm": "",
         })
-        result = await analyze_web3_substance(token, mimo)
+        result = await analyze_web3_substance(token, llm)
         assert result["substance_score"] == 60
         print(f"✓ non_critical_flag: score=60 (no cap)")
     asyncio.run(go())
@@ -110,13 +110,13 @@ def test_score_clamped_0_100():
     """Score clamped to [0, 100]."""
     async def go():
         token = make_token()
-        mimo = FakeMiMo({"substance_score": 150, "red_flags": []})
-        result = await analyze_web3_substance(token, mimo)
+        llm = FakePioneer({"substance_score": 150, "red_flags": []})
+        result = await analyze_web3_substance(token, llm)
         assert result["substance_score"] == 100
         print(f"✓ score_clamped_high: 150→100")
 
-        mimo = FakeMiMo({"substance_score": -10, "red_flags": []})
-        result = await analyze_web3_substance(token, mimo)
+        llm = FakePioneer({"substance_score": -10, "red_flags": []})
+        result = await analyze_web3_substance(token, llm)
         assert result["substance_score"] == 0
         print(f"✓ score_clamped_low: -10→0")
     asyncio.run(go())

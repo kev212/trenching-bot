@@ -10,13 +10,13 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from llm.mimo_client import MiMoClient
+from llm.pioneer_client import PioneerLLMClient
 from llm.prompts import WEB3_SUBSTANCE_SYSTEM, WEB3_SUBSTANCE_USER
 
-logger = logging.getLogger("web3_analyzer")
+logger = logging.getLogger(__name__)
 
 
-async def analyze_web3_substance(token, mimo: MiMoClient) -> dict:
+async def analyze_web3_substance(token, llm: PioneerLLMClient) -> dict:
     """Run LLM #3 to evaluate web3 project substance.
 
     Returns dict:
@@ -68,7 +68,7 @@ async def analyze_web3_substance(token, mimo: MiMoClient) -> dict:
             gmgn_raw=gmgn_raw_str,
         )
 
-        result = await mimo.analyze_token(WEB3_SUBSTANCE_SYSTEM, prompt)
+        result = await llm.analyze_token(WEB3_SUBSTANCE_SYSTEM, prompt)
 
         elapsed_ms = int((time.time() - start) * 1000)
 

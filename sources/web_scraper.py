@@ -1,23 +1,44 @@
+import asyncio
 import logging
 import re
+from typing import Optional
 from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger("main")
 
 
 class WebScraper:
+    def __init__(self):
+        self._session: Optional[AsyncSession] = None
+
+    async def _get_session(self) -> AsyncSession:
+        if self._session is None:
+            self._session = AsyncSession(impersonate="chrome")
+        return self._session
+
+    async def close(self):
+        if self._session:
+            await self._session.close()
+            self._session = None
+
     async def scrape_text(self, url: str, max_length: int = 2000) -> str:
         try:
-            async with AsyncSession(impersonate="chrome") as session:
-                resp = await session.get(url, timeout=5, allow_redirects=True)
-                if resp.status_code != 200:
-                    logger.warning(f"Website scrape failed: HTTP {resp.status_code}")
-                    return ""
+            session = await self._get_session()
+            resp = await asyncio.wait_for(
+                session.get(url, timeout=5, allow_redirects=True),
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Website scrape failed: HTTP {resp.status_code}")
+                return ""
 
-                html = resp.text
-                text = self._extract_text(html)
-                return text[:max_length]
+            html = resp.text
+            text = self._extract_text(html)
+            return text[:max_length]
 
+        except asyncio.TimeoutError:
+            logger.error(f"Website scrape timeout for {url}")
+            return ""
         except Exception as e:
             logger.error(f"Website scrape error for {url}: {e}")
             return ""

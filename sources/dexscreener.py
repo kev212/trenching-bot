@@ -1,10 +1,22 @@
 import asyncio
 import logging
 import aiohttp
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.dexscreener.com"
+
+_shared_session: Optional[aiohttp.ClientSession] = None
+
+
+async def _get_shared_session() -> aiohttp.ClientSession:
+    global _shared_session
+    if _shared_session is None or _shared_session.closed:
+        _shared_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10),
+        )
+    return _shared_session
 
 
 async def dexscreener_poller(queue: asyncio.Queue, state):
@@ -49,16 +61,13 @@ async def dexscreener_poller(queue: asyncio.Queue, state):
 
 async def fetch_trending_boosts() -> list:
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{BASE_URL}/token-boosts/top/v1",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                sol_tokens = [t for t in data if t.get("chainId") == "solana"]
-                return sol_tokens[:20]
+        session = await _get_shared_session()
+        async with session.get(f"{BASE_URL}/token-boosts/top/v1") as resp:
+            if resp.status != 200:
+                return []
+            data = await resp.json()
+            sol_tokens = [t for t in data if t.get("chainId") == "solana"]
+            return sol_tokens[:20]
     except Exception as e:
         logger.error(f"DexScreener boosts error: {e}")
         return []
@@ -66,17 +75,14 @@ async def fetch_trending_boosts() -> list:
 
 async def fetch_pair_data(address: str) -> dict:
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{BASE_URL}/tokens/v1/solana/{address}",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    return {}
-                data = await resp.json()
-                if isinstance(data, list) and len(data) > 0:
-                    return data[0]
+        session = await _get_shared_session()
+        async with session.get(f"{BASE_URL}/tokens/v1/solana/{address}") as resp:
+            if resp.status != 200:
                 return {}
+            data = await resp.json()
+            if isinstance(data, list) and len(data) > 0:
+                return data[0]
+            return {}
     except Exception as e:
         logger.error(f"DexScreener pair error for {address[:10]}: {e}")
         return {}
@@ -84,16 +90,13 @@ async def fetch_pair_data(address: str) -> dict:
 
 async def fetch_new_pairs() -> list:
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{BASE_URL}/token-profiles/latest/v1",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                sol_tokens = [t for t in data if t.get("chainId") == "solana"]
-                return sol_tokens[:20]
+        session = await _get_shared_session()
+        async with session.get(f"{BASE_URL}/token-profiles/latest/v1") as resp:
+            if resp.status != 200:
+                return []
+            data = await resp.json()
+            sol_tokens = [t for t in data if t.get("chainId") == "solana"]
+            return sol_tokens[:20]
     except Exception as e:
         logger.error(f"DexScreener new pairs error: {e}")
         return []
