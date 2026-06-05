@@ -34,8 +34,9 @@ class JupiterClient:
         self._rate_limiter = rate_limiter
         self._session: Optional[aiohttp.ClientSession] = None
 
-    async def init(self) -> None:
-        if not self._session:
+    async def start(self) -> None:
+        """Eagerly initialize HTTP session. Call once at bot startup."""
+        if not self._session or self._session.closed:
             connector = aiohttp.TCPConnector()
             kwargs = {
                 "timeout": aiohttp.ClientTimeout(total=self.timeout),
@@ -47,6 +48,7 @@ class JupiterClient:
             else:
                 logger.warning("[JUP] init WITHOUT proxy (Railway may not resolve DNS)")
             self._session = aiohttp.ClientSession(**kwargs)
+            logger.info("Jupiter: session initialized")
 
     async def close(self) -> None:
         if self._session:

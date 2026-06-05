@@ -28,7 +28,14 @@ class GMGNClient:
         else:
             logger.warning("GMGN: NO proxy")
 
+    async def start(self):
+        """Eagerly initialize HTTP session. Call once at bot startup."""
+        if self._session is None:
+            self._session = AsyncSession(impersonate="chrome")
+            logger.info("GMGN: session initialized")
+
     async def _get_session(self) -> AsyncSession:
+        # Fallback only — start() should have been called
         if self._session is None:
             self._session = AsyncSession(impersonate="chrome")
         return self._session

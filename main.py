@@ -132,6 +132,10 @@ class TrenchingBot:
         self.workers = []
         self.seen_trenches = set()
         self.shutdown_event = asyncio.Event()
+        # C4 fix: store shutdown task reference to prevent GC
+        self._shutdown_task = None
+        # Watchdog: track last activity timestamp
+        self._last_activity = time.monotonic()
 
         # Trading components (Phase 1 paper mode)
         self.trading_config = load_trading_config()
@@ -176,8 +180,19 @@ class TrenchingBot:
 
         await self.db.init()
         await self.state.load_filter_params()
-        await self.jupiter.init()
-        await self.price_oracle.init()
+
+        # C5 fix: eagerly initialize all HTTP sessions to prevent lazy-init race
+        # that can leak AsyncSession instances and exhaust file descriptors.
+        await self.jupiter.start()
+        await self.price_oracle.start()
+        await self.gmgn.start()
+        await self.twitter.start()
+        await self.scraper.start()
+        try:
+            from sources.dexscreener import start_shared_session
+            await start_shared_session()
+        except Exception as e:
+            logger.warning(f"DexScreener eager start failed (non-fatal): {e}")
 
         # Test GMGN connection
         logger.info("Testing GMGN API...")
@@ -188,11 +203,25 @@ class TrenchingBot:
             logger.warning("GMGN API returned no data, will retry")
 
         loop = asyncio.get_event_loop()
+
+        # C4 fix: robust signal handler — store task ref, set event on create_task failure
+        def _on_signal():
+            try:
+                self._shutdown_task = asyncio.create_task(self.shutdown())
+            except RuntimeError as e:
+                logger.error(f"Signal handler create_task failed: {e}; setting shutdown event directly")
+                self.shutdown_event.set()
+            except Exception as e:
+                logger.error(f"Signal handler unexpected error: {e}; setting shutdown event directly")
+                self.shutdown_event.set()
+
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
+                loop.add_signal_handler(sig, _on_signal)
             except NotImplementedError:
                 pass
+
+        self._update_activity()  # initial heartbeat
 
         self.tasks = {
             "gmgn_poller": asyncio.create_task(self._gmgn_poller()),
@@ -208,6 +237,7 @@ class TrenchingBot:
             "metrics": asyncio.create_task(self._metrics_loop()),
             "db_stats": asyncio.create_task(self._db_stats_loop()),
             "position_monitor": asyncio.create_task(self._run_forever("position_monitor", position_monitor, self.position_manager, self.risk_manager, self.jupiter, self.executor, self.trading_config)),
+            "watchdog": asyncio.create_task(self._watchdog_loop()),
         }
 
         logger.info(f"Launched {len(self.tasks)} tasks")
@@ -244,6 +274,7 @@ class TrenchingBot:
         base_delay = 60
 
         while True:
+            self._update_activity()  # watchdog heartbeat
             try:
                 # Backpressure: slow down or skip when queue is deep
                 qsize = self.queue.qsize()
@@ -271,6 +302,10 @@ class TrenchingBot:
                         continue
 
                     if await self.state.is_duplicate(addr):
+                        continue
+
+                    # Skip if currently being processed by a worker (in-flight set, C3 fix)
+                    if await self.state.is_in_flight(addr):
                         continue
 
                     # Skip ALL tokens currently in retry — retry scheduler handles them
@@ -319,6 +354,7 @@ class TrenchingBot:
         base_delay = 30
 
         while True:
+            self._update_activity()  # watchdog heartbeat
             try:
                 # Backpressure: slow down or skip when queue is deep
                 qsize = self.queue.qsize()
@@ -344,6 +380,9 @@ class TrenchingBot:
                     if addr in self.seen_trenches:
                         continue
                     if await self.state.is_duplicate(addr):
+                        continue
+                    # Skip if currently being processed by a worker (in-flight set, C3 fix)
+                    if await self.state.is_in_flight(addr):
                         continue
                     # Skip ALL tokens currently in retry — retry scheduler handles them
                     if addr in self.state.retry_queue:
@@ -429,6 +468,10 @@ class TrenchingBot:
                         delay = get_retry_delay(info["retries"])
                         if now - info["timestamp"] < delay:
                             continue
+                        # C3 fix: skip if currently being processed by a worker
+                        if addr in self.state._in_flight:
+                            skipped += 1
+                            continue
                         if qsize >= 200:
                             skipped += 1
                             continue
@@ -484,30 +527,40 @@ class TrenchingBot:
                 if await self.state.is_duplicate(addr):
                     continue
 
-                if is_retry:
-                    if not await self.state.should_retry(addr):
-                        # Lost race — put back at end of queue, skip for now
-                        # Block briefly waiting for space; if queue stays full
-                        # too long, drop and log (item already dequeued once)
-                        for _ in range(50):
-                            try:
-                                self.queue.put_nowait(token_info)
-                                break
-                            except asyncio.QueueFull:
-                                await asyncio.sleep(0.1)
-                        else:
-                            logger.warning(f"Worker {worker_id}: queue full on retry-back, dropped {addr[:8]}")
-                        continue
+                # C3 fix: atomically claim the address to prevent duplicate processing
+                if not await self.state.claim(addr):
+                    # Another worker is already processing this; skip
+                    continue
 
-                processed += 1
-                retry_count = (await self.state.get_retry_info(addr)).get("retries", 0)
-                logger.info(
-                    f"[W{worker_id}] #{processed} {symbol} ({addr[:8]}...) "
-                    f"retry:{is_retry} ({retry_count}/3) q:{self.queue.qsize()}"
-                )
+                try:
+                    if is_retry:
+                        if not await self.state.should_retry(addr):
+                            # Lost race — put back at end of queue, skip for now
+                            # Block briefly waiting for space; if queue stays full
+                            # too long, drop and log (item already dequeued once)
+                            for _ in range(50):
+                                try:
+                                    self.queue.put_nowait(token_info)
+                                    break
+                                except asyncio.QueueFull:
+                                    await asyncio.sleep(0.1)
+                            else:
+                                logger.warning(f"Worker {worker_id}: queue full on retry-back, dropped {addr[:8]}")
+                            continue
 
-                await self._process_token(addr, token_info)
-                await asyncio.sleep(0.1)
+                    processed += 1
+                    retry_count = (await self.state.get_retry_info(addr)).get("retries", 0)
+                    logger.info(
+                        f"[W{worker_id}] #{processed} {symbol} ({addr[:8]}...) "
+                        f"retry:{is_retry} ({retry_count}/3) q:{self.queue.qsize()}"
+                    )
+
+                    self._update_activity()  # watchdog heartbeat
+                    await self._process_token(addr, token_info)
+                    await asyncio.sleep(0.1)
+                finally:
+                    # C3 fix: always release the in-flight claim
+                    await self.state.release(addr)
 
             except asyncio.CancelledError:
                 break
@@ -847,6 +900,7 @@ class TrenchingBot:
         )
 
         raw = await self.llm_client.analyze_token(DECISION_SYSTEM, prompt)
+        self._update_activity()  # watchdog heartbeat
         logger.debug(f"[LLM-RAW] {token.symbol} ({address[:8]}): {raw}")
         decision = parse_decision(raw)
 
@@ -1178,6 +1232,7 @@ class TrenchingBot:
 
         await self.llm_rate_limiter.acquire()
         social_result = await self.llm_client.analyze_token(SOCIAL_ANALYSIS_SYSTEM, social_prompt)
+        self._update_activity()  # watchdog heartbeat
 
         # 7. Parse LLM #1 response
         llm1_succeeded = social_result is not None
@@ -1273,6 +1328,7 @@ class TrenchingBot:
             await asyncio.sleep(300)
             m = self.state.metrics
             retry_count = len(self.state.retry_queue)
+            self._update_activity()  # watchdog heartbeat
             logger.info(
                 f"STATS | calls:{m.calls_total} ape:{m.calls_ape} watch:{m.calls_watch} "
                 f"skip:{m.calls_skip} perm_skip:{m.calls_skip_permanent} | "
@@ -1282,6 +1338,42 @@ class TrenchingBot:
                 f"q:{self.queue.qsize()} rq:{retry_count} err:{m.errors}"
             )
             await self.state.cleanup_retry_queue()
+
+    def _update_activity(self):
+        """Update last activity timestamp. Call from any processing path."""
+        self._last_activity = time.monotonic()
+
+    async def _watchdog_loop(self):
+        """Watchdog: force-restart bot if no activity for WATCHDOG_TIMEOUT seconds.
+
+        Defends against silent event loop deadlock. Uses os._exit(1) so Railway
+        can restart the container cleanly.
+        """
+        WATCHDOG_TIMEOUT = 300  # 5 min
+        HEARTBEAT_INTERVAL = 60  # check every 60s
+        logger.info(f"Watchdog started (timeout={WATCHDOG_TIMEOUT}s, check={HEARTBEAT_INTERVAL}s)")
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            try:
+                idle = time.monotonic() - self._last_activity
+                in_flight = await self.state.in_flight_count()
+                logger.info(
+                    f"[WATCHDOG] idle={idle:.0f}s in_flight={in_flight} "
+                    f"q={self.queue.qsize()} rq={len(self.state.retry_queue)}"
+                )
+                if idle > WATCHDOG_TIMEOUT and in_flight == 0:
+                    logger.critical(
+                        f"[WATCHDOG] No activity for {idle:.0f}s and no tokens in flight. "
+                        f"Forcing restart via os._exit(1)."
+                    )
+                    import sys
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    os._exit(1)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Watchdog error: {e}")
 
     async def _db_stats_loop(self):
         """Phase E2-Alert: log row counts for the 3 new tables every 5 min."""

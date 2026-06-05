@@ -39,10 +39,12 @@ async def _process_position(
         return {}
 
     entry = position["entry_price"]
-    peak = max(position["peak_price"] or 0, current_price)
-    if peak > (position["peak_price"] or 0):
-        position["peak_price"] = peak
-        await position_manager.update_position(position)
+    pos_lock = position_manager.get_lock(token_address)
+    async with pos_lock:
+        peak = max(position["peak_price"] or 0, current_price)
+        if peak > (position["peak_price"] or 0):
+            position["peak_price"] = peak
+            await position_manager.update_position(position)
 
     triggered = False
     last_reason = ""

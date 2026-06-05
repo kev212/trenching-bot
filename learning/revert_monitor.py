@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from config import load_filter_params, save_filter_params, load_adjustment_rules
+from config import load_filter_params, save_filter_params, load_filter_params_async, save_filter_params_async, load_adjustment_rules
 from alerts.dispatcher import dispatcher
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ async def _revert_adjustment(
         old_value = adj["old_value"]
         new_value = adj["new_value"]
 
-        current_params = load_filter_params()
+        current_params = await load_filter_params_async()
         filters = current_params.get("filters", {})
 
         if filter_name in filters and param_name in filters[filter_name]:
@@ -84,7 +84,7 @@ async def _revert_adjustment(
             current_params["version"] = current_params.get("version", 0) + 1
             current_params["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-            save_filter_params(current_params)
+            await save_filter_params_async(current_params)
             await state.set_filter_params(filters, current_params["version"])
 
             await db.revert_adjustment(

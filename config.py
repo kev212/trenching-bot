@@ -1,4 +1,5 @@
 import json
+import asyncio
 from pathlib import Path
 import os
 from pydantic_settings import BaseSettings
@@ -53,6 +54,24 @@ def save_filter_params(params: dict):
     path = CONFIG_DIR / "filter_params.json"
     with open(path, "w") as f:
         json.dump(params, f, indent=2)
+
+
+async def load_filter_params_async() -> dict:
+    """Async version of load_filter_params — uses thread to avoid blocking event loop."""
+    def _load():
+        path = CONFIG_DIR / "filter_params.json"
+        with open(path) as f:
+            return json.load(f)
+    return await asyncio.to_thread(_load)
+
+
+async def save_filter_params_async(params: dict):
+    """Async version of save_filter_params — uses thread to avoid blocking event loop."""
+    def _save():
+        path = CONFIG_DIR / "filter_params.json"
+        with open(path, "w") as f:
+            json.dump(params, f, indent=2)
+    await asyncio.to_thread(_save)
 
 
 def load_adjustment_rules() -> dict:

@@ -51,6 +51,7 @@ class LRUCache:
 
 RETRY_BACKOFF = {0: 60, 1: 180, 2: 300}  # retry index -> delay in seconds
 MAX_RETRIES = 3
+IN_FLIGHT_TTL = 300  # 5 min — auto-purge stale in-flight entries
 
 
 def get_retry_delay(retries: int) -> int:
@@ -67,6 +68,41 @@ class SharedState:
         self.metrics = Metrics()
         self.queue: asyncio.Queue = None
         self.retry_queue: dict[str, dict] = {}  # {address: {timestamp, retries}}
+        # In-flight set: addresses currently being processed by a worker.
+        # {address: timestamp} — auto-purged after IN_FLIGHT_TTL to prevent leaks.
+        self._in_flight: dict[str, float] = {}
+
+    async def _purge_stale_in_flight(self):
+        """Auto-release in-flight entries older than TTL. Called inside _lock."""
+        now = time.time()
+        stale = [k for k, ts in self._in_flight.items() if now - ts > IN_FLIGHT_TTL]
+        for k in stale:
+            del self._in_flight[k]
+
+    async def is_in_flight(self, address: str) -> bool:
+        """Check if address is currently being processed. Auto-purges stale entries."""
+        async with self._lock:
+            await self._purge_stale_in_flight()
+            return address in self._in_flight
+
+    async def claim(self, address: str) -> bool:
+        """Atomically claim address for processing. Returns True if claimed, False if already in flight."""
+        async with self._lock:
+            await self._purge_stale_in_flight()
+            if address in self._in_flight:
+                return False
+            self._in_flight[address] = time.time()
+            return True
+
+    async def release(self, address: str):
+        """Release address from in-flight set."""
+        async with self._lock:
+            self._in_flight.pop(address, None)
+
+    async def in_flight_count(self) -> int:
+        async with self._lock:
+            await self._purge_stale_in_flight()
+            return len(self._in_flight)
 
     async def is_duplicate(self, address: str) -> bool:
         return await self.processed_cache.has(address)

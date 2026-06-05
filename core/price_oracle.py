@@ -52,12 +52,14 @@ class PriceOracle:
             for k in oldest_keys:
                 del self._cache[k]
 
-    async def init(self) -> None:
-        if not self._session:
+    async def start(self) -> None:
+        """Eagerly initialize HTTP session. Call once at bot startup."""
+        if not self._session or self._session.closed:
             kwargs = {"timeout": aiohttp.ClientTimeout(total=self.timeout)}
             if self.proxy:
                 kwargs["proxy"] = self.proxy
             self._session = aiohttp.ClientSession(**kwargs)
+            logger.info("PriceOracle: session initialized")
 
     async def close(self) -> None:
         if self._session:

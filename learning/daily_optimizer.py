@@ -3,7 +3,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from config import settings, load_filter_params, save_filter_params, load_adjustment_rules
+from config import settings, load_filter_params, save_filter_params, load_filter_params_async, save_filter_params_async, load_adjustment_rules
 from llm.pioneer_client import PioneerLLMClient
 from llm.prompts import OPTIMIZER_SYSTEM, OPTIMIZER_USER
 from llm.parser import parse_optimizer_suggestions
@@ -61,7 +61,7 @@ async def _run_optimization(state, db, llm: PioneerLLMClient):
 
         win_rate = len(wins) / total * 100
 
-        current_params = load_filter_params()
+        current_params = await load_filter_params_async()
 
         loss_data = []
         for call in losses:
@@ -156,7 +156,7 @@ async def _run_optimization(state, db, llm: PioneerLLMClient):
         current_params["version"] = new_version
         current_params["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-        save_filter_params(current_params)
+        await save_filter_params_async(current_params)
         await state.set_filter_params(filters, current_params["version"])
 
         logger.info(f"Optimization complete. Applied {len(valid_suggestions)} adjustments. New version: {current_params['version']}")

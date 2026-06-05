@@ -8,14 +8,35 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://api.dexscreener.com"
 
 _shared_session: Optional[aiohttp.ClientSession] = None
+_session_lock = asyncio.Lock()
+
+
+async def start_shared_session():
+    """Eagerly initialize shared HTTP session. Call once at bot startup."""
+    global _shared_session
+    async with _session_lock:
+        if _shared_session is None or _shared_session.closed:
+            _shared_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            logger.info("DexScreener: shared session initialized")
+
+
+async def close_shared_session():
+    global _shared_session
+    async with _session_lock:
+        if _shared_session and not _shared_session.closed:
+            await _shared_session.close()
+            _shared_session = None
 
 
 async def _get_shared_session() -> aiohttp.ClientSession:
     global _shared_session
-    if _shared_session is None or _shared_session.closed:
-        _shared_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=10),
-        )
+    async with _session_lock:
+        if _shared_session is None or _shared_session.closed:
+            _shared_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
     return _shared_session
 
 

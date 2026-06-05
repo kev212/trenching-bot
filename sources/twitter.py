@@ -14,6 +14,12 @@ class TwitterClient:
         self.host = BASE_URL
         self._session: Optional[AsyncSession] = None
 
+    async def start(self):
+        """Eagerly initialize HTTP session. Call once at bot startup."""
+        if self._session is None:
+            self._session = AsyncSession(impersonate="chrome")
+            logger.info("Twitter: session initialized")
+
     async def _get_session(self) -> AsyncSession:
         if self._session is None:
             self._session = AsyncSession(impersonate="chrome")

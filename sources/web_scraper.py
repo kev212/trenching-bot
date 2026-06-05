@@ -11,6 +11,12 @@ class WebScraper:
     def __init__(self):
         self._session: Optional[AsyncSession] = None
 
+    async def start(self):
+        """Eagerly initialize HTTP session. Call once at bot startup."""
+        if self._session is None:
+            self._session = AsyncSession(impersonate="chrome")
+            logger.info("WebScraper: session initialized")
+
     async def _get_session(self) -> AsyncSession:
         if self._session is None:
             self._session = AsyncSession(impersonate="chrome")

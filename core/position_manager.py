@@ -3,6 +3,7 @@
 Wraps the positions table. The position_monitor calls these to
 advance position state (open → TP1 partial → TP2 partial → trailing close).
 """
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -17,6 +18,20 @@ class PositionManager:
 
     def __init__(self, db: Database):
         self.db = db
+        # Per-address asyncio locks to prevent race conditions on peak_price
+        # and other mutable position state.
+        self._position_locks: dict[str, asyncio.Lock] = {}
+        self._locks_guard = asyncio.Lock()
+
+    def get_lock(self, address: str) -> asyncio.Lock:
+        """Get or create a lock for the given token address. Idempotent."""
+        if address not in self._position_locks:
+            self._position_locks[address] = asyncio.Lock()
+        return self._position_locks[address]
+
+    def cleanup_lock(self, address: str):
+        """Remove lock for closed position. Safe to call multiple times."""
+        self._position_locks.pop(address, None)
 
     async def open_position(self, position) -> int:
         """Save new position, return its DB id."""
