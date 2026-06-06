@@ -29,9 +29,16 @@ class Wallet:
         self._pubkey = PAPER_PUBKEY if paper else None
         self._keypair = None
         self._db = db
+        # B7 fix: the lock is LAZY-init by `_ensure_lock` because
+        # `asyncio.Lock()` requires a running event loop on Python 3.9/3.10.
+        # Tests construct Wallet() outside the event loop; production code
+        # always constructs inside a loop (main.py:_build_state).
+        # The lazy pattern is safe for live mode IF the first call site is
+        # the only init path — guarded by `_ensure_lock()` returning the
+        # same Lock object on every subsequent call.
         self._lock: Optional[asyncio.Lock] = None
 
-    def _get_lock(self) -> asyncio.Lock:
+    def _ensure_lock(self) -> asyncio.Lock:
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
@@ -49,7 +56,7 @@ class Wallet:
         """Decrease balance. Returns False if insufficient (after reserve)."""
         if amount <= 0:
             return False
-        async with self._get_lock():
+        async with self._ensure_lock():
             if amount > self._sol_balance - RESERVE_SOL:
                 logger.warning(
                     f"[WALLET] Debit rejected: {amount:.4f} > available "
@@ -68,7 +75,7 @@ class Wallet:
     async def credit(self, amount: float, reason: str) -> None:
         if amount <= 0:
             return
-        async with self._get_lock():
+        async with self._ensure_lock():
             self._sol_balance += amount
             if self._db:
                 await self._log_balance()

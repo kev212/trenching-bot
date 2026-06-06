@@ -1,3 +1,10 @@
+"""DexScreener client. Used by `tracking/price_monitor` for USD price lookups
+on legacy alert calls.
+
+A5: The previously-defined `dexscreener_poller` was dead code — it was never
+launched from `main.py`. It has been removed. The shared session below is
+still used by `fetch_*` helpers (called from `tracking/price_monitor._check_single_call`).
+"""
 import asyncio
 import logging
 import aiohttp
@@ -38,46 +45,6 @@ async def _get_shared_session() -> aiohttp.ClientSession:
                 timeout=aiohttp.ClientTimeout(total=10),
             )
     return _shared_session
-
-
-async def dexscreener_poller(queue: asyncio.Queue, state):
-    logger.info("DexScreener Poller starting...")
-    seen = set()
-    poll_count = 0
-
-    while True:
-        try:
-            tokens = await fetch_trending_boosts()
-            new_count = 0
-            for token in tokens:
-                addr = token.get("tokenAddress")
-                if addr and addr not in seen and not await state.is_duplicate(addr):
-                    seen.add(addr)
-                    token_data = {
-                        "address": addr,
-                        "name": token.get("description", "")[:50],
-                        "symbol": _extract_symbol(token),
-                        "event_type": "boosted",
-                        "source": "dexscreener",
-                        "market_cap": 0,
-                        "volume_24h": 0,
-                        "price": 0,
-                        "raw": token,
-                    }
-                    await queue.put((1, token_data))
-                    new_count += 1
-
-            poll_count += 1
-            if new_count > 0:
-                logger.info(f"DexScreener poll #{poll_count}: {new_count} new (queue: {queue.qsize()})")
-
-            if len(seen) > 10000:
-                seen.clear()
-
-        except Exception as e:
-            logger.error(f"DexScreener poller error: {e}")
-
-        await asyncio.sleep(10)
 
 
 async def fetch_trending_boosts() -> list:
@@ -157,13 +124,6 @@ def extract_pair_info(pair_data: dict) -> dict:
         "boosts": pair_data.get("boosts", {}).get("active", 0),
         "raw": pair_data,
     }
-
-
-def _extract_symbol(token: dict) -> str:
-    url = token.get("url", "")
-    if "/" in url:
-        return url.split("/")[-1][:10]
-    return token.get("tokenAddress", "")[:6]
 
 
 class DexScreenerClient:

@@ -23,22 +23,35 @@ class GMGNClient:
         self.proxy = proxy or os.environ.get("GMGN_PROXY") or os.environ.get("HTTP_PROXY") or ""
         self.rate_limiter = rate_limiter
         self._session: Optional[AsyncSession] = None
+        # C1 fix: protect session init against concurrent first-call.
+        # Lazy init pattern (B7-style) — `asyncio.Lock()` requires a
+        # running event loop on Python 3.9/3.10, and tests construct
+        # GMGNClient outside the loop. Created on first .start() call.
+        self._session_lock: Optional[asyncio.Lock] = None
         if self.proxy:
             logger.warning(f"GMGN proxy: {self.proxy[:50]}...")
         else:
             logger.warning("GMGN: NO proxy")
 
+    def _ensure_lock(self) -> asyncio.Lock:
+        if self._session_lock is None:
+            self._session_lock = asyncio.Lock()
+        return self._session_lock
+
     async def start(self):
         """Eagerly initialize HTTP session. Call once at bot startup."""
-        if self._session is None:
-            self._session = AsyncSession(impersonate="chrome")
-            logger.info("GMGN: session initialized")
+        async with self._ensure_lock():
+            if self._session is None:
+                self._session = AsyncSession(impersonate="chrome")
+                logger.info("GMGN: session initialized")
 
     async def _get_session(self) -> AsyncSession:
-        # Fallback only — start() should have been called
-        if self._session is None:
-            self._session = AsyncSession(impersonate="chrome")
-        return self._session
+        # C1 fix: lock around the fallback init path.
+        async with self._ensure_lock():
+            if self._session is None:
+                # Fallback only — start() should have been called
+                self._session = AsyncSession(impersonate="chrome")
+            return self._session
 
     async def close(self):
         if self._session:

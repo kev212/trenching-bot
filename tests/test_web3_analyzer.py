@@ -34,13 +34,15 @@ def make_token(project_type="web3_project", name="Magpie", symbol="MAG") -> Toke
 
 
 def test_fallback_for_non_web3():
-    """Non-web3 tokens skip LLM #3 → fallback 50."""
+    """Non-web3 tokens skip LLM #3 → fallback 0 (B3 fix: missing-data signal)."""
     async def go():
         token = make_token(project_type="meme")
         llm = FakePioneer({"substance_score": 99, "red_flags": []})
         result = await analyze_web3_substance(token, llm)
-        assert result["substance_score"] == 50.0, f"Expected 50 fallback, got {result['substance_score']}"
-        print(f"✓ fallback_non_web3: substance=50 (expected 50)")
+        # B3: was 50 (neutral-bias), now 0 (no-signal). The neutral-50
+        # biased tokens toward WATCH; 0 lets downstream filters decide.
+        assert result["substance_score"] == 0.0, f"Expected 0 fallback (B3), got {result['substance_score']}"
+        print(f"✓ fallback_non_web3: substance=0 (B3 fix: no-signal, not bias)")
     asyncio.run(go())
 
 

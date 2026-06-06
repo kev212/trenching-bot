@@ -162,10 +162,7 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        cursor = await db.db.execute(
-            "SELECT * FROM positions WHERE status = 'OPEN' ORDER BY entry_time DESC"
-        )
-        rows = await cursor.fetchall()
+        rows = await db.get_open_positions()
     except Exception as e:
         await update.message.reply_text(f"DB error: {e}")
         return
@@ -213,45 +210,23 @@ async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        cursor = await db.db.execute(
-            "SELECT COUNT(*) as n, "
-            "COALESCE(SUM(pnl_sol), 0) as realized_sol, "
-            "COALESCE(AVG(pnl_pct), 0) as avg_pnl_pct, "
-            "COALESCE(SUM(CASE WHEN pnl_sol > 0 THEN 1 ELSE 0 END), 0) as wins, "
-            "COALESCE(SUM(CASE WHEN pnl_sol <= 0 THEN 1 ELSE 0 END), 0) as losses "
-            "FROM positions WHERE status = 'CLOSED'"
-        )
-        row = await cursor.fetchone()
-        wins = row["wins"] or 0
-        losses = row["losses"] or 0
-        win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0.0
-
-        cursor = await db.db.execute(
-            "SELECT COUNT(*) as n, COALESCE(SUM(current_amount_token * entry_price), 0) as deployed "
-            "FROM positions WHERE status = 'OPEN'"
-        )
-        open_row = await cursor.fetchone()
-        open_count = open_row["n"] or 0
-        deployed = open_row["deployed"] or 0.0
-
-        cursor = await db.db.execute(
-            "SELECT snapshot_time, sol_balance FROM wallet_balances "
-            "WHERE paper = 1 ORDER BY snapshot_time DESC LIMIT 1"
-        )
-        bal_row = await cursor.fetchone()
-        wallet_balance = bal_row["sol_balance"] if bal_row else None
+        pnl = await db.get_pnl_summary()
     except Exception as e:
         await update.message.reply_text(f"DB error: {e}")
         return
 
+    wins = pnl["wins"]
+    losses = pnl["losses"]
+    win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0.0
+
     lines = [
         "💰 PnL SUMMARY (PAPER)\n",
-        f"Closed trades: {row['n'] or 0} (W:{wins} / L:{losses}, WR={win_rate:.0f}%)",
-        f"Realized: {row['realized_sol'] or 0:+.4f} SOL (avg {row['avg_pnl_pct'] or 0:+.1f}%)",
-        f"Open: {open_count} positions, {deployed:.4f} SOL deployed",
+        f"Closed trades: {pnl['closed_count']} (W:{wins} / L:{losses}, WR={win_rate:.0f}%)",
+        f"Realized: {pnl['realized_sol']:+.4f} SOL (avg {pnl['avg_pnl_pct']:+.1f}%)",
+        f"Open: {pnl['open_count']} positions, {pnl['deployed_sol']:.4f} SOL deployed",
     ]
-    if wallet_balance is not None:
-        lines.append(f"Wallet: {wallet_balance:.4f} SOL")
+    if pnl["wallet_balance"] is not None:
+        lines.append(f"Wallet: {pnl['wallet_balance']:.4f} SOL")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -265,11 +240,7 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        cursor = await db.db.execute(
-            "SELECT * FROM positions WHERE status = 'CLOSED' "
-            "ORDER BY exit_time DESC LIMIT 15"
-        )
-        rows = await cursor.fetchall()
+        rows = await db.get_closed_positions(limit=15)
     except Exception as e:
         await update.message.reply_text(f"DB error: {e}")
         return
@@ -450,6 +421,16 @@ async def bot_handler(state, db):
 
     global _bot_app
 
+    # A3 fix: guarantee only ONE Application + webhook at a time.
+    # If a previous attempt left state behind (crash, hot-reload), clean up
+    # first to avoid "Conflict: terminated by other getUpdates" on restart.
+    if _bot_app is not None:
+        try:
+            await _bot_app.shutdown()
+        except Exception as e:
+            logger.warning(f"[BOT] Previous app shutdown failed (continuing): {e}")
+        _bot_app = None
+
     _bot_app = Application.builder().token(settings.telegram_bot_token).build()
     _bot_app.bot_data["state"] = state
     _bot_app.bot_data["db"] = db
@@ -520,6 +501,22 @@ async def bot_handler(state, db):
         except Exception as e:
             logger.warning(f"Webhook set error (attempt {attempt+1}/5): {e}")
         await asyncio.sleep(2)
+    else:
+        # D14 fix: if all 5 attempts failed, alert the user via Telegram
+        # (best-effort, swallow any error) and raise so the watcher restarts
+        # the bot. Previously the failure was silently logged — leaving the
+        # user with no idea their commands weren't working.
+        try:
+            from alerts.dispatcher import dispatcher
+            await dispatcher.send_message(
+                f"🚨 BOT STARTUP FAILED\n\n"
+                f"Could not register Telegram webhook at {webhook_url} "
+                f"after 5 attempts. Bot is running but /commands will not work.\n"
+                f"Check RAILWAY_PUBLIC_DOMAIN env var + Telegram bot permissions."
+            )
+        except Exception:
+            pass
+        raise RuntimeError(f"Webhook set failed after 5 attempts: {webhook_url}")
 
     logger.info("Telegram webhook bot ready")
 
@@ -551,5 +548,15 @@ async def bot_handler(state, db):
     except asyncio.CancelledError:
         pass
     finally:
-        await _bot_app.shutdown()
-        await runner.cleanup()
+        try:
+            if _bot_app is not None:
+                await _bot_app.shutdown()
+        except Exception as e:
+            logger.warning(f"[BOT] shutdown error: {e}")
+        try:
+            await runner.cleanup()
+        except Exception as e:
+            logger.warning(f"[BOT] runner cleanup error: {e}")
+        # A3 fix: clear module-level ref so a future restart (via _run_forever)
+        # doesn't see stale state and try to re-use a dead Application.
+        _bot_app = None

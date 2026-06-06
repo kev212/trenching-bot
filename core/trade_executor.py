@@ -38,8 +38,37 @@ class TradeExecutor:
         self.price_oracle = price_oracle
         self.max_price_impact_pct = config.get("max_price_impact_pct", 5.0)
         self.slippage_bps = config.get("slippage_bps", DEFAULT_SLIPPAGE_BPS)
-        self._paper_price_cache: dict = {}
+        # B1 fix: bounded LRU cache. Unbounded dict leaked memory over
+        # long-running sessions (one entry per traded token forever).
+        # Capped at MAX_PAPER_CACHE entries; LRU eviction on overflow.
+        from collections import OrderedDict
+        self._paper_price_cache: "OrderedDict[str, dict]" = OrderedDict()
         self._paper_price_cache_ttl = 5.0
+        self.MAX_PAPER_CACHE = 500
+
+    def _paper_cache_get(self, key: str):
+        entry = self._paper_price_cache.get(key)
+        if entry is None:
+            return None
+        # LRU touch
+        self._paper_price_cache.move_to_end(key)
+        return entry
+
+    def _paper_cache_set(self, key: str, value: dict):
+        if key in self._paper_price_cache:
+            self._paper_price_cache.move_to_end(key)
+        self._paper_price_cache[key] = value
+        # Evict oldest 25% when over capacity
+        while len(self._paper_price_cache) > self.MAX_PAPER_CACHE:
+            n_to_evict = max(1, self.MAX_PAPER_CACHE // 4)
+            for _ in range(n_to_evict):
+                if not self._paper_price_cache:
+                    break
+                self._paper_price_cache.popitem(last=False)
+
+    def _paper_cache_drop(self, key: str):
+        """Remove a key from the cache (called when a position is closed)."""
+        self._paper_price_cache.pop(key, None)
 
     async def execute_buy(self, token: TokenData, size_sol: float,
                           filter_params_version: int = 0) -> Optional[Position]:

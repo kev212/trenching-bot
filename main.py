@@ -253,7 +253,7 @@ class TrenchingBot:
         while True:
             try:
                 await coro_func(self.state, self.db, *args)
-                retries = 0  # reset on success
+                retries = 0
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -450,13 +450,16 @@ class TrenchingBot:
                 else:
                     scan_interval = base_interval
 
+                # A1: take an atomic snapshot of in_flight + processed_cache
+                # so we can use them inside the retry_queue iteration without
+                # re-acquiring SharedState._lock (deadlock avoidance).
+                in_flight_snapshot = await self.state.snapshot_in_flight()
+                processed_snapshot = await self.state.snapshot_processed()
+
                 async with self.state._lock:
                     for addr, info in list(self.state.retry_queue.items()):
                         if info["retries"] >= MAX_RETRIES:
                             dead_letter += 1
-                            expired.append(addr)
-                            continue
-                        if await self.state.is_duplicate(addr):
                             expired.append(addr)
                             continue
                         if is_permanent_failure(info.get("failed_filters", [])):
@@ -465,11 +468,15 @@ class TrenchingBot:
                             dsym = info.get("symbol", "?")
                             logger.info(f"[DEAD-LETTER] {dsym} ({addr[:8]}): permanent filter, skipping retry")
                             continue
+                        # A2: check duplicate from snapshot (atomic enough — cache is append-mostly)
+                        if addr in processed_snapshot:
+                            expired.append(addr)
+                            continue
                         delay = get_retry_delay(info["retries"])
                         if now - info["timestamp"] < delay:
                             continue
-                        # C3 fix: skip if currently being processed by a worker
-                        if addr in self.state._in_flight:
+                        # A1: use snapshot of in_flight (consistent with the lock we hold)
+                        if addr in in_flight_snapshot:
                             skipped += 1
                             continue
                         if qsize >= 200:
@@ -917,6 +924,12 @@ class TrenchingBot:
             final_verdict = Verdict.WATCH
         else:
             final_verdict = Verdict.SKIP
+
+        # B4 fix: record original LLM verdict before override. The formatter
+        # uses this to note "(LLM said: X, overridden by scoring)" so users
+        # see WHY a token was upgraded from SKIP→WATCH or downgraded APE→WATCH
+        # by the 50:50 rule (their reasoning said something different).
+        decision._llm_original_verdict = decision.verdict.value
 
         decision.verdict = final_verdict
         decision.confidence = final_score / 100.0

@@ -820,6 +820,92 @@ def test_paper_price_walk_uses_oracle_first():
     asyncio.run(go())
 
 
+def test_paper_price_walk_returns_zero_on_total_failure():
+    """C4 fix: when all price sources fail, return 0 (not entry_price).
+
+    Returning 0 is critical — the position_monitor uses `current_price <= 0`
+    as the signal to evaluate TIME exit only. A 0 return prevents SL from
+    silently breaking on a long price blackout.
+    """
+    from core.trade_executor import TradeExecutor
+    from core.wallet import Wallet
+    from core.risk_manager import RiskManager
+
+    class FakeJupiter:
+        async def get_quote(self, *a, **k): return {}
+        async def get_token_price_in_sol_with_retry(self, *a, **k): return 0.0
+
+    class FakePM:
+        db = None
+        async def open_position(self, p): return 1
+        async def record_trade(self, t): return 1
+
+    class FakeOracle:
+        async def get_price_in_sol(self, addr): return 0.0  # fail
+
+    class FakeGmgn:
+        async def get_token_info(self, addr): return {}  # fail
+
+    async def go():
+        executor = TradeExecutor(
+            paper=True,
+            wallet=Wallet(paper=True, starting_balance_sol=10.0),
+            jupiter=FakeJupiter(),
+            positions=FakePM(),
+            risk=RiskManager({}),
+            config={},
+            gmgn=FakeGmgn(),
+            price_oracle=FakeOracle(),
+        )
+        position = {
+            "token_address": "FAIL_TOKEN",
+            "entry_price": 0.0001,
+            "current_amount_token": 1000.0,
+            "raw_gmgn_json": "",
+        }
+        price = await executor._simulate_paper_price_walk(position, "test")
+        assert price == 0.0, f"expected 0 on total failure, got {price}"
+    asyncio.run(go())
+
+
+def test_paper_cache_bounded_lru():
+    """B1 fix: _paper_price_cache should be LRU-bounded to MAX_PAPER_CACHE."""
+    from core.trade_executor import TradeExecutor
+    from core.wallet import Wallet
+    from core.risk_manager import RiskManager
+
+    class FakeJupiter:
+        async def get_quote(self, *a, **k): return {}
+        async def get_token_price_in_sol_with_retry(self, *a, **k): return 0.0
+    class FakePM:
+        async def open_position(self, p): return 1
+        async def record_trade(self, t): return 1
+    class FakeOracle:
+        async def get_price_in_sol(self, addr): return 0.0
+    class FakeGmgn:
+        async def get_token_info(self, addr): return {}
+
+    async def go():
+        executor = TradeExecutor(
+            paper=True,
+            wallet=Wallet(paper=True, starting_balance_sol=10.0),
+            jupiter=FakeJupiter(),
+            positions=FakePM(),
+            risk=RiskManager({}),
+            config={},
+            gmgn=FakeGmgn(),
+            price_oracle=FakeOracle(),
+        )
+        assert hasattr(executor, "MAX_PAPER_CACHE")
+        assert executor.MAX_PAPER_CACHE > 0
+        # Insert more than MAX_PAPER_CACHE entries; verify size bound
+        executor.MAX_PAPER_CACHE = 10
+        for i in range(50):
+            executor._paper_cache_set(f"addr_{i}", {"price": float(i)})
+        assert len(executor._paper_price_cache) <= executor.MAX_PAPER_CACHE
+    asyncio.run(go())
+
+
 def test_executor_buy_uses_oracle_first():
     """execute_buy should use oracle price when available."""
     from core.trade_executor import TradeExecutor

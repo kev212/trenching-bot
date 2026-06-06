@@ -32,10 +32,14 @@ async def analyze_web3_substance(token, llm: PioneerLLMClient) -> dict:
         }
     """
     start = time.time()
+    # B3 fix: was 50 (neutral) which biased tokens toward WATCH. A failed
+    # LLM #3 means we have *no* signal — treat that as missing data and
+    # let downstream filters make the call. Substance score 0 with no
+    # red flags is the correct representation of "we don't know".
     fallback = {
-        "substance_score": 50.0,  # neutral fallback so token isn't auto-rejected
+        "substance_score": 0.0,  # missing-data signal, not bias
         "red_flags": [],
-        "reasoning": "LLM #3 fallback (neutral)",
+        "reasoning": "LLM #3 fallback (no signal)",
         "team_visible": False,
         "has_github": False,
         "has_audit": False,
@@ -72,18 +76,17 @@ async def analyze_web3_substance(token, llm: PioneerLLMClient) -> dict:
 
         elapsed_ms = int((time.time() - start) * 1000)
 
-        # LLM #3 failure is a separate signal from a 0 score. Return
-        # neutral defaults so the caller can decide (vs. falsely failing
-        # the substance path on a transient API error).
+        # LLM #3 failure is a separate signal from a 0 score. B3 fix:
+        # don't bias toward WATCH with neutral 50 — return missing-data 0.
         if result is None:
             logger.warning(
                 f"[LLM-3-FAIL] {token.symbol}: LLM #3 returned no result; "
-                "defaulting to neutral substance 50, no red flags"
+                "defaulting to substance 0 (no signal), no red flags"
             )
             return {
-                "substance_score": 50.0,
+                "substance_score": 0.0,
                 "red_flags": [],
-                "reasoning": "LLM error",
+                "reasoning": "LLM error (no signal)",
                 "team_visible": False,
                 "has_github": False,
                 "has_audit": False,

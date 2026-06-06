@@ -397,6 +397,22 @@ class Database:
             )
             await self.db.commit()
 
+    async def update_call_max_gain(self, call_id: int, max_gain: float) -> None:
+        """A4: snapshot-only helper. Updates max_gain without changing status.
+
+        price_monitor calls this instead of update_call_status because it
+        must NOT resolve calls (that was the dual-exit-system bug).
+        """
+        async with self._lock:
+            now = datetime.now(timezone.utc).isoformat()
+            await self.db.execute(
+                """UPDATE calls SET max_gain = MAX(max_gain, ?),
+                 max_gain_time = CASE WHEN ? > max_gain THEN ? ELSE max_gain_time END
+                 WHERE id = ?""",
+                (max_gain, max_gain, now, call_id),
+            )
+            await self.db.commit()
+
     async def save_price_snapshot(self, snapshot: PriceSnapshot):
         async with self._lock:
             await self.db.execute(
@@ -721,6 +737,53 @@ class Database:
             )
             rows = await cursor.fetchall()
         return [self._row_to_position(r) for r in rows]
+
+    # ----- B6 fix: replace raw `db.db.execute` calls in alerts/bot.py -----
+
+    async def get_closed_positions(self, limit: int = 15) -> list:
+        """Return last N CLOSED positions for /history. Uses self._lock."""
+        async with self._lock:
+            cursor = await self.db.execute(
+                "SELECT * FROM positions WHERE status = 'CLOSED' "
+                "ORDER BY exit_time DESC LIMIT ?",
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+        return [self._row_to_position(r) for r in rows]
+
+    async def get_pnl_summary(self) -> dict:
+        """Return aggregated PnL summary for /pnl. Uses self._lock."""
+        async with self._lock:
+            cursor = await self.db.execute(
+                "SELECT COUNT(*) as n, "
+                "COALESCE(SUM(pnl_sol), 0) as realized_sol, "
+                "COALESCE(AVG(pnl_pct), 0) as avg_pnl_pct, "
+                "COALESCE(SUM(CASE WHEN pnl_sol > 0 THEN 1 ELSE 0 END), 0) as wins, "
+                "COALESCE(SUM(CASE WHEN pnl_sol <= 0 THEN 1 ELSE 0 END), 0) as losses "
+                "FROM positions WHERE status = 'CLOSED'"
+            )
+            row = await cursor.fetchone()
+            cursor = await self.db.execute(
+                "SELECT COUNT(*) as n, "
+                "COALESCE(SUM(current_amount_token * entry_price), 0) as deployed "
+                "FROM positions WHERE status = 'OPEN'"
+            )
+            open_row = await cursor.fetchone()
+            cursor = await self.db.execute(
+                "SELECT sol_balance FROM wallet_balances WHERE paper = 1 "
+                "ORDER BY snapshot_time DESC LIMIT 1"
+            )
+            bal_row = await cursor.fetchone()
+        return {
+            "closed_count": row["n"] or 0,
+            "realized_sol": row["realized_sol"] or 0.0,
+            "avg_pnl_pct": row["avg_pnl_pct"] or 0.0,
+            "wins": row["wins"] or 0,
+            "losses": row["losses"] or 0,
+            "open_count": open_row["n"] or 0,
+            "deployed_sol": open_row["deployed"] or 0.0,
+            "wallet_balance": bal_row["sol_balance"] if bal_row else None,
+        }
 
     async def save_trade(self, trade) -> int:
         """Save a Trade (BUY or SELL). Returns row id."""

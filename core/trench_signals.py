@@ -122,11 +122,18 @@ def detect_negative_signals(token) -> int:
 
     texts = _tweet_texts(token)
 
-    if not texts and not (token.name or token.symbol):
-        return 0
-
+    # C2 fix: tokens with ZERO social data and a name/symbol that is not
+    # suspicious are not auto-penalized. The original `return 0` when both
+    # texts and name are empty masked a real edge: a token with no tweet
+    # data but a clearly suspicious name (e.g. "elonofficialv2") still
+    # needed the suspicious_name check to fire. Branch accordingly.
     name = getattr(token, "name", "") or ""
     symbol = getattr(token, "symbol", "") or ""
+
+    if not texts and not (name or symbol):
+        # Truly nothing to evaluate — return neutral 0. The downstream
+        # filter (no_social_data hard gate) handles "empty token" cases.
+        return 0
 
     # Signal 1: Scam keywords (co-occurrence in same text, conservative)
     if texts and _has_keyword_match(texts, SCAM_KEYWORDS, min_count=2):
@@ -141,13 +148,15 @@ def detect_negative_signals(token) -> int:
         penalty += 5
         signals_fired.append("wash_trading")
 
-    # Signal 3: Suspicious name (impersonation attempt)
+    # Signal 3: Suspicious name (impersonation attempt) — fires even
+    # without social data; the name alone is the signal.
     if _suspicious_name(name, symbol):
         penalty += 10
         signals_fired.append("suspicious_name")
 
-    # Signal 4: Bot pattern (same handle 3+ tweets in <5 min)
-    if _bot_pattern(token):
+    # Signal 4: Bot pattern (same handle 3+ tweets in <5 min) — requires
+    # tweets to evaluate, so guarded by `texts`.
+    if texts and _bot_pattern(token):
         penalty += 5
         signals_fired.append("bot_pattern")
 

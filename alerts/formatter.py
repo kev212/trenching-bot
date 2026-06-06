@@ -8,6 +8,17 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict,
 
     score_bar = _score_bar(int(decision.confidence * 100))
 
+    # B4 fix: signal when the verdict came from the post-LLM override
+    # (50:50 social+data scoring) rather than the LLM's own verdict.
+    # The LLM's `decision.reasoning` is unchanged from its raw output and
+    # may describe a *different* verdict (e.g. "SKIP this rug"), which
+    # is confusing when we then display APE. Add a small header note
+    # when override happened.
+    override_note = ""
+    if hasattr(decision, "_llm_original_verdict") and decision._llm_original_verdict and \
+            decision._llm_original_verdict != decision.verdict.value:
+        override_note = f"  (LLM said: {decision._llm_original_verdict}, overridden by scoring)\n"
+
     filters_text = ""
     filter_names = {
         "min_total_fee": "⛽ Min Fee",
@@ -60,7 +71,7 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict,
   Data (LLM #2):    {data_score}/100 × 50% = {data_score*0.5:.1f}
   ─────────────────────────────
   Final Score:       {final_score:.1f}/100
-  Verdict:           {decision.verdict.value} {verdict_emoji}"""
+  Verdict:           {decision.verdict.value} {verdict_emoji}{override_note}"""
 
     msg = f"""{verdict_emoji} {decision.verdict.value} ALERT — ${token.symbol or token.name}
 

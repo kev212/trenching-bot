@@ -44,6 +44,8 @@ async def _process_position(
         )
         if time_limit > 0 and held_so_far > time_limit:
             await executor.execute_sell(position, 100, "TIME")
+            # B2 fix: cleanup lock after TIME exit
+            position_manager.cleanup_lock(token_address)
             return {
                 "triggered": True,
                 "current_price": 0.0,
@@ -56,64 +58,76 @@ async def _process_position(
 
     entry = position["entry_price"]
     pos_lock = position_manager.get_lock(token_address)
-    async with pos_lock:
-        peak = max(position["peak_price"] or 0, current_price)
-        if peak > (position["peak_price"] or 0):
-            position["peak_price"] = peak
-            await position_manager.update_position(position)
 
     triggered = False
     last_reason = ""
-    already_partial = bool(position.get("exit_reason")) and \
-        position.get("exit_reason") in ("TP1", "TP2")
+    peak = position.get("peak_price") or 0
 
-    held_so_far = (
-        (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
-        if position.get("entry_time") else 0
-    )
-    in_warmup = held_so_far < min_hold_seconds
+    # B5 fix: entire RMW (read peak → update peak → evaluate SL/TP → execute_sell →
+    # update position state) must be inside the lock. Previously the lock was
+    # released before SL/TP evaluation, allowing two concurrent iterations
+    # to both fire `execute_sell` on the same position (the bug logged as
+    # `[POS-MON] trailing after TP1 race`).
+    async with pos_lock:
+        peak = max(position.get("peak_price") or 0, current_price)
+        if peak > (position.get("peak_price") or 0):
+            position["peak_price"] = peak
+            await position_manager.update_position(position)
 
-    tp1_fire_price = entry * tp1_mult
-    tp2_fire_price = entry * tp2_mult
-    extreme_tp_price = entry * extreme_tp_mult
+        already_partial = bool(position.get("exit_reason")) and \
+            position.get("exit_reason") in ("TP1", "TP2")
 
-    if current_price <= entry * (1 - stop_loss_pct / 100):
-        await executor.execute_sell(position, 100, "SL")
-        triggered = True
-        last_reason = "SL"
-    elif not already_partial and current_price >= extreme_tp_price:
-        await executor.execute_sell(position, tp1_pct, "TP1-EXTREME")
-        position["exit_reason"] = "TP1"
-        await position_manager.update_position(position)
-        triggered = True
-        last_reason = "TP1"
-    elif not in_warmup and not already_partial and current_price >= tp1_fire_price:
-        await executor.execute_sell(position, tp1_pct, "TP1")
-        position["exit_reason"] = "TP1"
-        await position_manager.update_position(position)
-        triggered = True
-        last_reason = "TP1"
-    elif not in_warmup and position.get("exit_reason") == "TP1" and \
-            current_price >= tp2_fire_price:
-        remaining_pct = 100 - tp1_pct
-        await executor.execute_sell(position, remaining_pct, "TP2")
-        position["exit_reason"] = "TP2"
-        await position_manager.update_position(position)
-        triggered = True
-        last_reason = "TP2"
-    elif not in_warmup and position.get("exit_reason") in ("TP1", "TP2") and \
-            current_price <= peak * (1 - trailing_pct / 100):
-        await executor.execute_sell(position, 100, "TRAILING")
-        triggered = True
-        last_reason = "TRAILING"
-    else:
-        if time_limit > 0 and held_so_far > time_limit:
-            await executor.execute_sell(position, 100, "TIME")
+        held_so_far = (
+            (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
+            if position.get("entry_time") else 0
+        )
+        in_warmup = held_so_far < min_hold_seconds
+
+        tp1_fire_price = entry * tp1_mult
+        tp2_fire_price = entry * tp2_mult
+        extreme_tp_price = entry * extreme_tp_mult
+
+        if current_price <= entry * (1 - stop_loss_pct / 100):
+            await executor.execute_sell(position, 100, "SL")
             triggered = True
-            last_reason = "TIME"
+            last_reason = "SL"
+        elif not already_partial and current_price >= extreme_tp_price:
+            await executor.execute_sell(position, tp1_pct, "TP1-EXTREME")
+            position["exit_reason"] = "TP1"
+            await position_manager.update_position(position)
+            triggered = True
+            last_reason = "TP1"
+        elif not in_warmup and not already_partial and current_price >= tp1_fire_price:
+            await executor.execute_sell(position, tp1_pct, "TP1")
+            position["exit_reason"] = "TP1"
+            await position_manager.update_position(position)
+            triggered = True
+            last_reason = "TP1"
+        elif not in_warmup and position.get("exit_reason") == "TP1" and \
+                current_price >= tp2_fire_price:
+            remaining_pct = 100 - tp1_pct
+            await executor.execute_sell(position, remaining_pct, "TP2")
+            position["exit_reason"] = "TP2"
+            await position_manager.update_position(position)
+            triggered = True
+            last_reason = "TP2"
+        elif not in_warmup and position.get("exit_reason") in ("TP1", "TP2") and \
+                current_price <= peak * (1 - trailing_pct / 100):
+            await executor.execute_sell(position, 100, "TRAILING")
+            triggered = True
+            last_reason = "TRAILING"
+        else:
+            if time_limit > 0 and held_so_far > time_limit:
+                await executor.execute_sell(position, 100, "TIME")
+                triggered = True
+                last_reason = "TIME"
 
     if not triggered:
         return {}
+
+    # B2 fix: cleanup lock on every successful exit path
+    if last_reason in ("SL", "TP1-EXTREME", "TP1", "TP2", "TRAILING", "TIME"):
+        position_manager.cleanup_lock(token_address)
 
     gain = (current_price - entry) / entry * 100
     logger.info(

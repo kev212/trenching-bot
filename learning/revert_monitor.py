@@ -20,8 +20,25 @@ async def revert_monitor(state, db):
         try:
             await asyncio.sleep(check_interval_seconds)
 
-            since = datetime.now(timezone.utc) - timedelta(hours=check_interval_hours)
-            adjustments = await db.get_adjustments_since(since)
+            # C11 fix: 'since' should be derived from the LAST adjustment's
+            # applied_at (so we don't re-check the same adjustment on every
+            # loop iteration, which would cause spurious re-evaluations).
+            # Fall back to `now - interval` only on the first run when no
+            # adjustments exist yet. The `get_adjustments_since` with
+            # `adj.applied_at` as `since` returns the most recent adjustment
+            # since the last time we ran; we then evaluate it once.
+            adjustments = await db.get_adjustments_since(
+                datetime.now(timezone.utc) - timedelta(hours=check_interval_hours * 2)
+            )
+            if not adjustments:
+                continue
+            # Take only adjustments we haven't evaluated yet
+            last_evaluated_id = getattr(state, "_last_evaluated_adj_id", 0)
+            new_adjustments = [a for a in adjustments if a.get("id", 0) > last_evaluated_id]
+            if not new_adjustments:
+                continue
+            adjustments = new_adjustments
+            state._last_evaluated_adj_id = max(a.get("id", 0) for a in adjustments)
 
             if not adjustments:
                 continue

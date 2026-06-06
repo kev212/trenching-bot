@@ -44,6 +44,16 @@ class LRUCache:
             for k in expired:
                 del self._cache[k]
 
+    async def keys_snapshot(self) -> set:
+        """Atomic snapshot of all non-expired keys.
+
+        For callers that need to read membership without acquiring the lock
+        themselves (lock-free read path). Returns a fresh set.
+        """
+        async with self._lock:
+            now = time.time()
+            return {k for k, (ts, _) in self._cache.items() if now - ts <= self.ttl}
+
     @property
     def size(self) -> int:
         return len(self._cache)
@@ -104,6 +114,25 @@ class SharedState:
             await self._purge_stale_in_flight()
             return len(self._in_flight)
 
+    async def snapshot_in_flight(self) -> set:
+        """Atomic snapshot of current in-flight addresses.
+
+        For callers that need to read is_in_flight without re-acquiring the lock
+        (e.g. when the caller is ALREADY holding it for a different operation).
+        Returns a fresh set so callers can mutate freely.
+        """
+        async with self._lock:
+            await self._purge_stale_in_flight()
+            return set(self._in_flight.keys())
+
+    async def snapshot_processed(self) -> set:
+        """Atomic snapshot of processed (already-handled) addresses.
+
+        For callers that need to read is_duplicate without re-acquiring locks.
+        Returns a fresh set; safe to mutate.
+        """
+        return set(await self.processed_cache.keys_snapshot())
+
     async def is_duplicate(self, address: str) -> bool:
         return await self.processed_cache.has(address)
 
@@ -113,13 +142,22 @@ class SharedState:
     async def add_retry(self, address: str, symbol: str = "?", name: str = "?", failed_filters: list[str] = None):
         async with self._lock:
             if address in self.retry_queue:
-                self.retry_queue[address]["retries"] += 1
-                self.retry_queue[address]["timestamp"] = time.time()
+                # C8 fix: accumulate failed_filters across attempts (set union).
+                # Previously `failed_filters` was OVERWRITTEN each call, so
+                # a retry that passed filter A but failed filter B would
+                # lose the A pass history. is_permanent_failure() then
+                # could not correctly see all historical failures.
+                existing = self.retry_queue[address]
+                merged = set(existing.get("failed_filters", []) or []) | \
+                         set(failed_filters or [])
+                existing["retries"] += 1
+                existing["timestamp"] = time.time()
+                existing["failed_filters"] = list(merged)
             else:
                 self.retry_queue[address] = {
                     "timestamp": time.time(), "retries": 0,
                     "symbol": symbol, "name": name,
-                    "failed_filters": failed_filters or [],
+                    "failed_filters": list(failed_filters or []),
                 }
 
     async def should_retry(self, address: str) -> bool:

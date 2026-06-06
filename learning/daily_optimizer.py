@@ -155,6 +155,13 @@ async def _run_optimization(state, db, llm: PioneerLLMClient):
         current_params["filters"] = filters
         current_params["version"] = new_version
         current_params["updated_at"] = datetime.now(timezone.utc).isoformat()
+        # C12 fix: record cohort_boundary_ts so revert_monitor and
+        # subsequent daily_optimizer runs know which calls were made
+        # under the NEW parameters. Calls made before this boundary
+        # should be excluded from the new-version cohort — otherwise
+        # old-param noise is attributed to the new params and can
+        # cause spurious reverts.
+        current_params["cohort_boundary_ts"] = datetime.now(timezone.utc).isoformat()
 
         await save_filter_params_async(current_params)
         await state.set_filter_params(filters, current_params["version"])
