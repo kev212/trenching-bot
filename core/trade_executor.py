@@ -1,5 +1,12 @@
 """Trade executor: orchestrates buy/sell flows with Jupiter quotes.
 
+USD-canonical price model (v2):
+- All price storage/comparison in USD (entry_price, current_price = USD)
+- Wallet debit/credit stays in SOL (we buy/sell with SOL)
+- PnL tracked in both USD (canonical) and SOL (display)
+- `sol_usd_at_entry` and `sol_usd_at_exit` stored per position for
+  accurate PnL conversion (avoids stale-conversion error)
+
 Paper mode (Phase 1): builds positions, records trades, debits/credits
 simulated wallet. No real transactions. Uses GMGN price + simulated slippage.
 
@@ -22,8 +29,16 @@ from analysis.models import Position, Trade
 logger = logging.getLogger("executor")
 
 
+# Sanity range for entry_price (USD per token). Meme coins typically fall
+# in this range. Outside = unit mismatch (e.g. SOL read as USD) or junk.
+MIN_VALID_USD_PRICE = 0.00000001  # 1e-8 USD = very small token
+MAX_VALID_USD_PRICE = 100.0       # 100 USD per token = whale-tier cap
+
+
 class TradeExecutor:
-    """Orchestrates buy/sell. Respects paper_mode (no signing/submit in paper)."""
+    """Orchestrates buy/sell. Respects paper_mode (no signing/submit in paper).
+    All prices in USD; SOL math applied for wallet/amount conversion only.
+    """
 
     def __init__(self, paper: bool, wallet: Wallet, jupiter: JupiterClient,
                  positions: PositionManager, risk: RiskManager, config: dict,
@@ -38,9 +53,6 @@ class TradeExecutor:
         self.price_oracle = price_oracle
         self.max_price_impact_pct = config.get("max_price_impact_pct", 5.0)
         self.slippage_bps = config.get("slippage_bps", DEFAULT_SLIPPAGE_BPS)
-        # B1 fix: bounded LRU cache. Unbounded dict leaked memory over
-        # long-running sessions (one entry per traded token forever).
-        # Capped at MAX_PAPER_CACHE entries; LRU eviction on overflow.
         from collections import OrderedDict
         self._paper_price_cache: "OrderedDict[str, dict]" = OrderedDict()
         self._paper_price_cache_ttl = 5.0
@@ -50,7 +62,6 @@ class TradeExecutor:
         entry = self._paper_price_cache.get(key)
         if entry is None:
             return None
-        # LRU touch
         self._paper_price_cache.move_to_end(key)
         return entry
 
@@ -58,7 +69,6 @@ class TradeExecutor:
         if key in self._paper_price_cache:
             self._paper_price_cache.move_to_end(key)
         self._paper_price_cache[key] = value
-        # Evict oldest 25% when over capacity
         while len(self._paper_price_cache) > self.MAX_PAPER_CACHE:
             n_to_evict = max(1, self.MAX_PAPER_CACHE // 4)
             for _ in range(n_to_evict):
@@ -67,48 +77,85 @@ class TradeExecutor:
                 self._paper_price_cache.popitem(last=False)
 
     def _paper_cache_drop(self, key: str):
-        """Remove a key from the cache (called when a position is closed)."""
         self._paper_price_cache.pop(key, None)
 
     async def execute_buy(self, token: TokenData, size_sol: float,
                           filter_params_version: int = 0) -> Optional[Position]:
         """Validate, get quote (or estimate in paper), simulate swap, create Position.
 
-        Paper mode (Phase 1): skip Jupiter, use GMGN price + simulated slippage.
+        Paper mode (Phase 1): skip Jupiter, use GMGN USD price + simulated slippage.
         Live mode (Phase 2): require real Jupiter quote, fail if unavailable.
-        Returns Position or None.
+
+        All price math in USD. Stores:
+        - entry_price (USD)
+        - entry_amount_sol (SOL spent)
+        - entry_amount_token (token count, derived)
+        - sol_usd_at_entry (for PnL conversion at exit)
         """
         if size_sol <= 0:
             return None
 
         token_decimals = self._infer_decimals(token)
         amount_token = 0.0
-        entry_price = 0.0
+        entry_price_usd = 0.0
         price_impact = 0.0
+        sol_usd_at_entry = 0.0
 
         if self.paper:
-            entry_price = 0.0
+            entry_price_usd = 0.0
             if self.price_oracle:
                 try:
-                    entry_price = await self.price_oracle.get_price_in_sol(token.address)
+                    entry_price_usd = await self.price_oracle.get_price_in_usd(token.address)
                 except Exception as e:
                     logger.debug(f"[EXEC] oracle buy price error: {e}")
-            if entry_price <= 0:
-                entry_price = await self._gmgn_price_in_sol(token)
-            if entry_price <= 0:
+            if entry_price_usd <= 0:
+                entry_price_usd = await self._gmgn_price_in_usd(token)
+            if entry_price_usd <= 0:
                 logger.warning(
                     f"[EXEC] TRADE-SKIPPED {token.symbol} ({token.address[:8]}): "
-                    f"no GMGN price for paper buy"
+                    f"no USD price for paper buy"
                 )
                 if self.positions.db:
                     await self.positions.db.save_risk_event(
-                        "GMGN_PRICE_MISSING", token.address,
+                        "USD_PRICE_MISSING", token.address,
                         f"symbol={token.symbol}, size={size_sol:.4f} SOL, paper=True"
                     )
                 return None
+
+            # Sanity range check (USD canonical).
+            if not (MIN_VALID_USD_PRICE <= entry_price_usd <= MAX_VALID_USD_PRICE):
+                logger.warning(
+                    f"[EXEC] TRADE-SKIPPED {token.symbol} ({token.address[:8]}): "
+                    f"entry_price_usd {entry_price_usd:.10f} outside sanity range "
+                    f"[{MIN_VALID_USD_PRICE}, {MAX_VALID_USD_PRICE}]"
+                )
+                if self.positions.db:
+                    await self.positions.db.save_risk_event(
+                        "PRICE_OUT_OF_RANGE", token.address,
+                        f"symbol={token.symbol}, price={entry_price_usd:.10f} USD, "
+                        f"range=[{MIN_VALID_USD_PRICE}, {MAX_VALID_USD_PRICE}]"
+                    )
+                return None
+
+            # Get SOL/USD for amount_token math.
+            if self.price_oracle:
+                sol_usd_at_entry = await self.price_oracle.get_sol_price_usd()
+            if sol_usd_at_entry <= 0:
+                logger.warning(
+                    f"[EXEC] TRADE-SKIPPED {token.symbol} ({token.address[:8]}): "
+                    f"no SOL/USD rate for paper buy"
+                )
+                if self.positions.db:
+                    await self.positions.db.save_risk_event(
+                        "SOL_USD_MISSING", token.address,
+                        f"symbol={token.symbol}, size={size_sol:.4f} SOL, paper=True"
+                    )
+                return None
+
             simulated_slippage_pct = 1.0
-            effective_price = entry_price * (1 + simulated_slippage_pct / 100)
-            amount_token = size_sol / effective_price
+            effective_price_usd = entry_price_usd * (1 + simulated_slippage_pct / 100)
+            # amount_token = (size_sol × SOL_USD) / price_per_token_USD
+            amount_token = (size_sol * sol_usd_at_entry) / effective_price_usd
             price_impact = simulated_slippage_pct
             raw_gmgn_json = json.dumps(getattr(token, "raw_gmgn", {}) or {}, default=str)
         else:
@@ -147,7 +194,11 @@ class TradeExecutor:
                 return None
 
             amount_token = out_amount / (10 ** token_decimals)
-            entry_price = size_sol / amount_token if amount_token > 0 else 0.0
+            # Live mode: derive USD price from SOL/quote.
+            entry_price_sol = size_sol / amount_token if amount_token > 0 else 0.0
+            if self.price_oracle:
+                sol_usd_at_entry = await self.price_oracle.get_sol_price_usd()
+            entry_price_usd = entry_price_sol * sol_usd_at_entry if sol_usd_at_entry > 0 else 0.0
             raw_gmgn_json = ""
 
         if not await self.wallet.debit(size_sol, f"BUY {token.symbol}"):
@@ -160,16 +211,17 @@ class TradeExecutor:
             token_address=token.address,
             token_symbol=token.symbol,
             entry_tx_sig=tx_sig,
-            entry_price=entry_price,
+            entry_price=entry_price_usd,  # SEMANTIC CHANGE: now USD
             entry_amount_sol=size_sol,
             entry_amount_token=amount_token,
             entry_time=now,
-            peak_price=entry_price,
+            peak_price=entry_price_usd,  # SEMANTIC CHANGE: now USD
             current_amount_token=amount_token,
             status="OPEN",
             filter_params_version=filter_params_version,
             paper=self.paper,
             raw_gmgn_json=raw_gmgn_json,
+            sol_usd_at_entry=sol_usd_at_entry,
         )
 
         position_id = await self.positions.open_position(position)
@@ -181,7 +233,7 @@ class TradeExecutor:
             tx_signature=tx_sig,
             amount_in=size_sol,
             amount_out=amount_token,
-            price=entry_price,
+            price=entry_price_usd,
             slippage_bps=self.slippage_bps,
             status="CONFIRMED" if self.paper else "PENDING",
         )
@@ -190,57 +242,40 @@ class TradeExecutor:
         mode_tag = "PAPER" if self.paper else "LIVE"
         logger.info(
             f"[EXEC] {mode_tag} BUY {token.symbol} "
-            f"@ {entry_price:.10f} SOL, size={size_sol:.4f} SOL, "
-            f"tokens={amount_token:.2f}, impact={price_impact:.2f}%"
+            f"@ ${entry_price_usd:.10f} (size={size_sol:.4f} SOL, "
+            f"tokens={amount_token:.2f}, sol_usd={sol_usd_at_entry:.2f}, "
+            f"impact={price_impact:.2f}%)"
         )
 
-        if self.paper and entry_price > 0:
+        # Warm paper price cache with USD price.
+        if self.paper and entry_price_usd > 0:
             self._paper_price_cache[token.address] = {
                 "ts": time.time(),
-                "price": entry_price,
+                "price": entry_price_usd,
             }
             logger.debug(
-                f"[EXEC] warmed price cache for {token.symbol} @ {entry_price:.10f} "
+                f"[EXEC] warmed USD price cache for {token.symbol} @ ${entry_price_usd:.10f} "
                 f"(5s grace before any exit check)"
             )
 
         return position
 
-    async def _gmgn_price_in_sol(self, token: TokenData) -> float:
-        """Get token price in SOL from GMGN's info payload (paper mode only).
+    async def _gmgn_price_in_usd(self, token: TokenData) -> float:
+        """Get token price in USD from GMGN's info payload.
 
-        Priority:
-        1. raw_gmgn.price.native_token.price (SOL — preferred)
-        2. raw_gmgn.price.price (USD) ÷ SOL/USD rate
-        3. 0.0 (caller treats as failure)
+        Returns USD value of raw_gmgn.price.price field. Returns 0 on failure.
         """
         raw = getattr(token, "raw_gmgn", {}) or {}
         price_obj = raw.get("price", {}) if isinstance(raw.get("price"), dict) else {}
-
-        native_token = price_obj.get("native_token")
-        if isinstance(native_token, dict):
-            nt_price = native_token.get("price")
-            if nt_price and float(nt_price) > 0:
-                return float(nt_price)
-
         price_val = price_obj.get("price")
         if price_val and float(price_val) > 0:
-            sol_usd = 0.0
-            if self.price_oracle:
-                try:
-                    sol_usd = await self.price_oracle.get_sol_price_usd()
-                except Exception:
-                    pass
-            if sol_usd > 0:
-                return float(price_val) / sol_usd
             return float(price_val)
-
         return 0.0
 
     async def _simulate_paper_price_walk(self, position: dict, reason: str) -> float:
-        """Get current token price for paper mode with 5s cache.
+        """Get current token price in USD for paper mode with 5s cache.
 
-        Priority: oracle (3-source median) > GMGN info > raw_gmgn_json.
+        Priority: oracle (3-source median USD) > GMGN info (USD).
         Returns 0.0 on total failure (do NOT fall back to entry_price — that
         would mask SL exits). Caches price per token_address to avoid
         hammering sources at 4×/sec.
@@ -256,7 +291,7 @@ class TradeExecutor:
 
         if self.price_oracle:
             try:
-                price = await self.price_oracle.get_price_in_sol(token_address)
+                price = await self.price_oracle.get_price_in_usd(token_address)
             except Exception as e:
                 logger.debug(f"[EXEC] oracle paper price error: {e}")
 
@@ -264,57 +299,27 @@ class TradeExecutor:
             try:
                 info = await self.gmgn.get_token_info(token_address)
                 price_obj = info.get("price", {}) if isinstance(info.get("price"), dict) else {}
-                native_token = price_obj.get("native_token")
-                if isinstance(native_token, dict):
-                    nt_price = native_token.get("price")
-                    if nt_price and float(nt_price) > 0:
-                        price = float(nt_price)
-                if price <= 0:
-                    price_val = price_obj.get("price")
-                    if price_val and float(price_val) > 0:
-                        sol_usd = 0.0
-                        if self.price_oracle:
-                            try:
-                                sol_usd = await self.price_oracle.get_sol_price_usd()
-                            except Exception:
-                                pass
-                        if sol_usd > 0:
-                            price = float(price_val) / sol_usd
-                        else:
-                            price = float(price_val)
+                price_val = price_obj.get("price")
+                if price_val and float(price_val) > 0:
+                    price = float(price_val)
             except Exception as e:
                 logger.debug(f"[EXEC] paper price fetch error: {e}")
 
         if price <= 0:
+            # Final fallback: position's raw_gmgn_json (USD already).
             try:
                 raw_json = position.get("raw_gmgn_json", "")
                 if raw_json:
                     raw = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
                     price_obj = raw.get("price", {}) if isinstance(raw.get("price"), dict) else {}
-                    native_token = price_obj.get("native_token")
-                    if isinstance(native_token, dict):
-                        nt_price = native_token.get("price")
-                        if nt_price and float(nt_price) > 0:
-                            price = float(nt_price)
-                    if price <= 0:
-                        price_val = price_obj.get("price")
-                        if price_val and float(price_val) > 0:
-                            sol_usd = 0.0
-                            if self.price_oracle:
-                                try:
-                                    sol_usd = await self.price_oracle.get_sol_price_usd()
-                                except Exception:
-                                    pass
-                            if sol_usd > 0:
-                                price = float(price_val) / sol_usd
-                            else:
-                                price = float(price_val)
+                    price_val = price_obj.get("price")
+                    if price_val and float(price_val) > 0:
+                        price = float(price_val)
             except Exception as e:
                 logger.debug(f"[EXEC] paper price walk parse error: {e}")
 
         if price <= 0:
             # Fix #1: do NOT fall back to entry_price — that would make SL never fire.
-            # Return 0 so position_monitor skips SL/TP checks for this tick.
             return 0.0
 
         self._paper_price_cache[token_address] = {"ts": now, "price": price}
@@ -324,6 +329,11 @@ class TradeExecutor:
     async def execute_sell(self, position: dict, sell_pct: float,
                             reason: str) -> Optional[Trade]:
         """Sell `sell_pct`% of position. Returns Trade or None.
+
+        All price math in USD. Computes:
+        - sol_received = (amount_token × current_price_usd) / sol_usd_now
+        - pnl_usd = (current_price_usd - entry_price_usd) × amount_token
+        - pnl_sol = pnl_usd / sol_usd_now
 
         `position` is the dict shape returned by get_open_positions.
         Paper mode: simulates price walk from entry (no live price needed).
@@ -335,16 +345,19 @@ class TradeExecutor:
             return None
 
         if self.paper:
-            current_price = await self._simulate_paper_price_walk(position, reason)
+            current_price_usd = await self._simulate_paper_price_walk(position, reason)
         else:
-            current_price = await self.jupiter.get_token_price_in_sol_with_retry(
+            # Live mode: get SOL price from Jupiter, convert to USD.
+            current_price_sol = await self.jupiter.get_token_price_in_sol_with_retry(
                 position["token_address"]
             )
+            sol_usd_now = await self.price_oracle.get_sol_price_usd() if self.price_oracle else 0.0
+            current_price_usd = current_price_sol * sol_usd_now if sol_usd_now > 0 else 0.0
 
-        if current_price <= 0:
+        if current_price_usd <= 0:
             logger.warning(
                 f"[EXEC] SELL-SKIPPED {position['token_symbol']} "
-                f"({position['token_address'][:8]}): no price, "
+                f"({position['token_address'][:8]}): no USD price, "
                 f"sell_pct={sell_pct:.0f}%, reason={reason}, paper={self.paper}"
             )
             if self.positions.db:
@@ -355,9 +368,33 @@ class TradeExecutor:
                 )
             return None
 
+        # Get current SOL/USD for SOL math.
+        sol_usd_now = 0.0
+        if self.price_oracle:
+            try:
+                sol_usd_now = await self.price_oracle.get_sol_price_usd()
+            except Exception as e:
+                logger.debug(f"[EXEC] get_sol_price_usd error: {e}")
+        if sol_usd_now <= 0:
+            sol_usd_now = position.get("sol_usd_at_entry", 0.0) or 0.0
+        if sol_usd_now <= 0:
+            # Last resort: assume a reasonable rate (will be slightly off)
+            sol_usd_now = 150.0
+            logger.warning(
+                f"[EXEC] no SOL/USD available for {position['token_symbol']} sell, "
+                f"using fallback ${sol_usd_now:.2f}"
+            )
+
         sell_amount_token = position["current_amount_token"] * (sell_pct / 100)
-        sol_received = sell_amount_token * current_price
-        position["total_sold_sol"] = position.get("total_sold_sol", 0.0) + sol_received
+        # SOL received = (tokens × USD-per-token) / SOL-USD rate
+        sol_received = (sell_amount_token * current_price_usd) / sol_usd_now
+
+        # Track total sold in BOTH units.
+        prev_total_sold_sol = position.get("total_sold_sol", 0.0) or 0.0
+        prev_total_sold_usd = position.get("total_sold_usd", 0.0) or 0.0
+        this_sell_usd = sell_amount_token * current_price_usd
+        position["total_sold_sol"] = prev_total_sold_sol + sol_received
+        position["total_sold_usd"] = prev_total_sold_usd + this_sell_usd
 
         tx_sig = self.wallet.generate_paper_signature() if self.paper else ""
         trade = Trade(
@@ -366,7 +403,7 @@ class TradeExecutor:
             tx_signature=tx_sig,
             amount_in=sell_amount_token,
             amount_out=sol_received,
-            price=current_price,
+            price=current_price_usd,
             slippage_bps=self.slippage_bps,
             status="CONFIRMED" if self.paper else "PENDING",
         )
@@ -374,12 +411,21 @@ class TradeExecutor:
 
         await self.wallet.credit(sol_received, f"SELL {position['token_symbol']} ({reason})")
 
+        # Compute PnL on close.
         if sell_pct >= 100 or position["current_amount_token"] - sell_amount_token < 0.001:
             entry_sol = position.get("entry_amount_sol", 0.0) or 0.0
-            total_sold = position.get("total_sold_sol", 0.0) or 0.0
-            pnl_sol = total_sold - entry_sol
-            pnl_pct = ((total_sold / entry_sol) - 1) * 100 if entry_sol > 0 else 0.0
-            await self.positions.close_position(position, reason, current_price, pnl_sol, pnl_pct)
+            entry_usd = entry_sol * (position.get("sol_usd_at_entry", 0.0) or 0.0)
+            # Use latest total_sold_*, or fallback to accumulated
+            total_sold_sol = position["total_sold_sol"]
+            total_sold_usd = position["total_sold_usd"]
+            pnl_sol = total_sold_sol - entry_sol
+            pnl_usd = total_sold_usd - entry_usd
+            pnl_pct = ((total_sold_sol / entry_sol) - 1) * 100 if entry_sol > 0 else 0.0
+            await self.positions.close_position(
+                position, reason, current_price_usd,
+                pnl_sol=pnl_sol, pnl_usd=pnl_usd, pnl_pct=pnl_pct,
+                sol_usd_at_exit=sol_usd_now,
+            )
             self.risk.record_trade_result(pnl_sol)
         else:
             remaining = position["current_amount_token"] - sell_amount_token
@@ -387,8 +433,8 @@ class TradeExecutor:
 
         logger.info(
             f"[EXEC] {'PAPER ' if self.paper else ''}SELL {position['token_symbol']} "
-            f"@ {current_price:.10f} SOL ({sell_pct:.0f}%, {reason}), "
-            f"sol_out={sol_received:.4f}"
+            f"@ ${current_price_usd:.10f} ({sell_pct:.0f}%, {reason}), "
+            f"sol_out={sol_received:.4f}, sol_usd={sol_usd_now:.2f}"
         )
         return trade
 

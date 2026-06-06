@@ -1,5 +1,12 @@
 """Position state machine: SL / TP1 / TP2 / trailing / time exits.
 
+USD-canonical price model (v2):
+- All entry_price / peak_price / current_price fields are USD
+- SL/TP/trailing comparisons in USD (single unit, no mismatch bug)
+- Phantom-SL guard rejects extreme 1-tick drops (95%+) as likely
+  data-quality or unit issues
+- 4x/sec polling; STUCK auto-close after 3s blackout
+
 Runs 4x/sec. Reads open positions, fetches current price via Jupiter,
 advances each position toward its exit trigger. Sends Telegram alerts
 on every exit.
@@ -17,25 +24,38 @@ from alerts.formatter import format_exit_alert
 
 logger = logging.getLogger("position_monitor")
 
+# Phantom-SL guard: a single-tick drop > 95% is almost always either:
+#   - Unit mismatch (entry SOL, current USD or vice versa) — fix unit refactor
+#     makes this vanishingly rare, but defense in depth
+#   - Real instant rug — confirming on next tick is fine
+# Skip this tick's SL/TP evaluation; let the next tick re-evaluate.
+PHANTOM_SL_THRESHOLD = 0.05  # 5% of entry price (i.e. -95% drop)
+
 
 async def _process_position(
     position, executor, position_manager, is_paper,
     stop_loss_pct, tp1_mult, tp2_mult, extreme_tp_mult,
     tp1_pct, trailing_pct, min_hold_seconds, time_limit,
+    sol_usd_now,
 ) -> dict:
-    """Returns exit state dict if triggered, empty dict otherwise."""
+    """Returns exit state dict if triggered, empty dict otherwise.
+
+    All SL/TP/trailing comparisons in USD (entry_price field = USD).
+    """
     token_address = position["token_address"]
 
     if is_paper:
-        current_price = await executor._simulate_paper_price_walk(
+        current_price_usd = await executor._simulate_paper_price_walk(
             position, "monitor"
         )
     else:
-        current_price = await executor.jupiter.get_token_price_in_sol_with_retry(
+        # Live mode: SOL from Jupiter × SOL/USD = USD.
+        current_price_sol = await executor.jupiter.get_token_price_in_sol_with_retry(
             token_address
         )
+        current_price_usd = current_price_sol * (sol_usd_now or 0.0)
 
-    if current_price <= 0:
+    if current_price_usd <= 0:
         # Fix #2: when price source is down, evaluate TIME exit only —
         # never fall back to entry_price (that would silently break SL).
         held_so_far = (
@@ -44,7 +64,6 @@ async def _process_position(
         )
         if time_limit > 0 and held_so_far > time_limit:
             await executor.execute_sell(position, 100, "TIME")
-            # B2 fix: cleanup lock after TIME exit
             position_manager.cleanup_lock(token_address)
             return {
                 "triggered": True,
@@ -56,20 +75,26 @@ async def _process_position(
             }
         return {}
 
-    entry = position["entry_price"]
+    entry = position["entry_price"]  # USD
     pos_lock = position_manager.get_lock(token_address)
 
     triggered = False
     last_reason = ""
     peak = position.get("peak_price") or 0
 
-    # B5 fix: entire RMW (read peak → update peak → evaluate SL/TP → execute_sell →
-    # update position state) must be inside the lock. Previously the lock was
-    # released before SL/TP evaluation, allowing two concurrent iterations
-    # to both fire `execute_sell` on the same position (the bug logged as
-    # `[POS-MON] trailing after TP1 race`).
+    # Phantom-SL guard: detect extreme 1-tick drops that suggest data quality
+    # issues (e.g. unit mismatch, stale GMGN response). Skip this tick;
+    # next tick will either confirm (real crash) or recover (data blip).
+    if current_price_usd < entry * PHANTOM_SL_THRESHOLD:
+        logger.warning(
+            f"[POS-MON] PHANTOM-SL GUARD: {position['token_symbol']} "
+            f"({token_address[:8]}) current=${current_price_usd:.10f} < "
+            f"5% of entry=${entry:.10f} — likely data issue, skipping this tick"
+        )
+        return {}
+
     async with pos_lock:
-        peak = max(position.get("peak_price") or 0, current_price)
+        peak = max(position.get("peak_price") or 0, current_price_usd)
         if peak > (position.get("peak_price") or 0):
             position["peak_price"] = peak
             await position_manager.update_position(position)
@@ -87,24 +112,24 @@ async def _process_position(
         tp2_fire_price = entry * tp2_mult
         extreme_tp_price = entry * extreme_tp_mult
 
-        if current_price <= entry * (1 - stop_loss_pct / 100):
+        if current_price_usd <= entry * (1 - stop_loss_pct / 100):
             await executor.execute_sell(position, 100, "SL")
             triggered = True
             last_reason = "SL"
-        elif not already_partial and current_price >= extreme_tp_price:
+        elif not already_partial and current_price_usd >= extreme_tp_price:
             await executor.execute_sell(position, tp1_pct, "TP1-EXTREME")
             position["exit_reason"] = "TP1"
             await position_manager.update_position(position)
             triggered = True
             last_reason = "TP1"
-        elif not in_warmup and not already_partial and current_price >= tp1_fire_price:
+        elif not in_warmup and not already_partial and current_price_usd >= tp1_fire_price:
             await executor.execute_sell(position, tp1_pct, "TP1")
             position["exit_reason"] = "TP1"
             await position_manager.update_position(position)
             triggered = True
             last_reason = "TP1"
         elif not in_warmup and position.get("exit_reason") == "TP1" and \
-                current_price >= tp2_fire_price:
+                current_price_usd >= tp2_fire_price:
             remaining_pct = 100 - tp1_pct
             await executor.execute_sell(position, remaining_pct, "TP2")
             position["exit_reason"] = "TP2"
@@ -112,7 +137,7 @@ async def _process_position(
             triggered = True
             last_reason = "TP2"
         elif not in_warmup and position.get("exit_reason") in ("TP1", "TP2") and \
-                current_price <= peak * (1 - trailing_pct / 100):
+                current_price_usd <= peak * (1 - trailing_pct / 100):
             await executor.execute_sell(position, 100, "TRAILING")
             triggered = True
             last_reason = "TRAILING"
@@ -129,34 +154,42 @@ async def _process_position(
     if last_reason in ("SL", "TP1-EXTREME", "TP1", "TP2", "TRAILING", "TIME"):
         position_manager.cleanup_lock(token_address)
 
-    gain = (current_price - entry) / entry * 100
+    gain = (current_price_usd - entry) / entry * 100 if entry > 0 else 0.0
     logger.info(
         f"[EXIT] {position['token_symbol']} ({token_address[:8]}): "
-        f"{last_reason} at {gain:+.1f}% (price={current_price:.8f})"
+        f"{last_reason} at {gain:+.1f}% (price=${current_price_usd:.8f})"
     )
 
     entry_tokens = position.get("entry_amount_token", 0) or 0
     current_tokens = position.get("current_amount_token", 0) or 0
     entry_sol = position.get("entry_amount_sol", 0.0) or 0.0
-    total_sold = position.get("total_sold_sol", 0.0) or 0.0
+    total_sold_sol = position.get("total_sold_sol", 0.0) or 0.0
+    total_sold_usd = position.get("total_sold_usd", 0.0) or 0.0
 
+    # PnL comes from execute_sell's close_position. For display, recompute here.
     if last_reason in ("TP1", "TP1-EXTREME"):
         pre_sell_tokens = entry_tokens
         sold_tokens = entry_tokens - current_tokens
-        pnl_sol = (current_price - entry) * sold_tokens
-        pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0.0
+        pnl_sol = (current_price_usd - entry) / (sol_usd_now or 150.0) * sold_tokens
+        pnl_usd = (current_price_usd - entry) * sold_tokens
+        pnl_pct = ((current_price_usd / entry) - 1) * 100 if entry > 0 else 0.0
     elif last_reason == "TP2":
         pre_sell_tokens = current_tokens
         sold_tokens = pre_sell_tokens - (position.get("current_amount_token", 0) or 0)
-        pnl_sol = (current_price - entry) * sold_tokens
-        pnl_pct = ((current_price / entry) - 1) * 100 if entry > 0 else 0.0
+        pnl_sol = (current_price_usd - entry) / (sol_usd_now or 150.0) * sold_tokens
+        pnl_usd = (current_price_usd - entry) * sold_tokens
+        pnl_pct = ((current_price_usd / entry) - 1) * 100 if entry > 0 else 0.0
     elif last_reason in ("SL", "TRAILING", "TIME"):
-        pnl_sol = total_sold - entry_sol
-        pnl_pct = ((total_sold / entry_sol) - 1) * 100 if entry_sol > 0 else 0.0
+        # Close: total_sold_sol - entry_sol (SOL); total_sold_usd - entry_usd (USD)
+        entry_usd = entry_sol * (position.get("sol_usd_at_entry", 0.0) or 0.0)
+        pnl_sol = total_sold_sol - entry_sol
+        pnl_usd = total_sold_usd - entry_usd
+        pnl_pct = ((total_sold_sol / entry_sol) - 1) * 100 if entry_sol > 0 else 0.0
         sold_tokens = entry_tokens
     else:
         sold_tokens = 0
         pnl_sol = 0.0
+        pnl_usd = 0.0
         pnl_pct = 0.0
 
     sold_pct = (sold_tokens / entry_tokens * 100) if entry_tokens > 0 else 0.0
@@ -166,8 +199,9 @@ async def _process_position(
             symbol=position["token_symbol"],
             address=position["token_address"],
             entry_price=entry,
-            exit_price=current_price,
+            exit_price=current_price_usd,
             pnl_sol=pnl_sol,
+            pnl_usd=pnl_usd,
             pnl_pct=pnl_pct,
             reason=last_reason,
             hold_seconds=held_so_far,
@@ -184,7 +218,7 @@ async def _process_position(
 
     return {
         "triggered": True,
-        "current_price": current_price,
+        "current_price": current_price_usd,
         "entry": entry,
         "peak": peak,
         "held_so_far": held_so_far,
@@ -209,15 +243,20 @@ async def position_monitor(state, db, position_manager: PositionManager,
     min_hold_seconds = config.get("min_hold_seconds", 30)
     extreme_tp_mult = config.get("extreme_tp_mult", 2.0)
 
-    # Fix #4: track consecutive invalid-price or timeout iterations per position.
-    # After MAX_CONSECUTIVE_FAILURES failures, force-close at entry_price (worst-case
-    # 0% return) to free capital instead of letting the position linger forever.
     MAX_CONSECUTIVE_FAILURES = 12  # 12 * 0.25s = 3s of blacked-out price feed
     consecutive_failures: dict[str, int] = {}
 
     while True:
         await asyncio.sleep(check_interval)
         try:
+            # Fetch SOL/USD once per tick to keep SL/TP math consistent.
+            sol_usd_now = 0.0
+            if executor and executor.price_oracle:
+                try:
+                    sol_usd_now = await executor.price_oracle.get_sol_price_usd()
+                except Exception:
+                    sol_usd_now = 0.0
+
             open_positions = await position_manager.get_open_positions()
             if not open_positions:
                 continue
@@ -230,20 +269,20 @@ async def position_monitor(state, db, position_manager: PositionManager,
                             position, executor, position_manager, is_paper,
                             stop_loss_pct, tp1_mult, tp2_mult, extreme_tp_mult,
                             tp1_pct, trailing_pct, min_hold_seconds, time_limit,
+                            sol_usd_now,
                         ),
                         timeout=20,
                     )
                     if result and result.get("triggered"):
                         logger.info(
                             f"[POS-MON] {position['token_symbol']} exit: "
-                            f"price={result['current_price']:.10f}, "
-                            f"entry={result['entry']:.10f}, "
-                            f"peak={result['peak']:.10f}, "
+                            f"price=${result['current_price']:.10f}, "
+                            f"entry=${result['entry']:.10f}, "
+                            f"peak=${result['peak']:.10f}, "
                             f"paper={is_paper}, hold={result['held_so_far']:.0f}s"
                         )
                         consecutive_failures.pop(token_address, None)
                     else:
-                        # Price was returned but no trigger fired — normal operation
                         consecutive_failures.pop(token_address, None)
                 except asyncio.TimeoutError:
                     consecutive_failures[token_address] = consecutive_failures.get(token_address, 0) + 1
@@ -255,7 +294,6 @@ async def position_monitor(state, db, position_manager: PositionManager,
                     consecutive_failures[token_address] = consecutive_failures.get(token_address, 0) + 1
                     logger.error(f"Position {token_address[:8]} monitor error: {e}")
 
-                # Fix #4: force-close stuck position
                 if consecutive_failures.get(token_address, 0) >= MAX_CONSECUTIVE_FAILURES:
                     held = (
                         (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()

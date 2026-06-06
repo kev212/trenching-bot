@@ -146,8 +146,12 @@ def format_exit_alert(symbol: str, address: str, entry_price: float,
                        reason: str, hold_seconds: float, paper: bool = True,
                        position_size_sol: float = 0.0, total_tokens: float = 0.0,
                        sold_pct: float = 100.0, sold_tokens: float = 0.0,
-                       remaining_tokens: float = 0.0) -> str:
-    """Format a position exit alert (SL / TP1 / TP2 / TRAILING / TIME)."""
+                       remaining_tokens: float = 0.0,
+                       pnl_usd: float = 0.0) -> str:
+    """Format a position exit alert (SL / TP1 / TP2 / TRAILING / TIME).
+
+    USD-canonical: entry_price/exit_price in USD. PnL shown in BOTH SOL and USD.
+    """
     reason_emojis = {
         "SL": "🛑",
         "TP1": "🎯",
@@ -177,9 +181,9 @@ def format_exit_alert(symbol: str, address: str, entry_price: float,
         lines.append(f"  Size:   {size_str}")
 
     lines.extend([
-        f"  Entry:  {entry_price:.10f}",
-        f"  Exit:   {exit_price:.10f}",
-        f"  PnL: {pnl_emoji} {pnl_sol:+.4f} SOL ({pnl_pct:+.1f}%)",
+        f"  Entry:  ${entry_price:.10f} USD",
+        f"  Exit:   ${exit_price:.10f} USD",
+        f"  PnL: {pnl_emoji} {pnl_sol:+.4f} SOL (${pnl_usd:+.2f} USD, {pnl_pct:+.1f}%)",
         f"  Hold:   {hold_str}",
         f"  Token:  {address[:8]}...",
     ])
@@ -188,9 +192,10 @@ def format_exit_alert(symbol: str, address: str, entry_price: float,
 
 
 def format_trade_alert(position, side: str) -> str:
-    """Format a trade alert (BUY/SELL) for Telegram."""
+    """Format a trade alert (BUY/SELL) for Telegram. USD-canonical."""
     emoji = "🟢" if side == "BUY" else "🔴"
     pnl_sol = getattr(position, "pnl_sol", 0.0) or 0.0
+    pnl_usd = getattr(position, "pnl_usd", 0.0) or 0.0
     pnl_pct = getattr(position, "pnl_pct", 0.0) or 0.0
     paper_tag = " [PAPER]" if getattr(position, "paper", True) else " [LIVE]"
 
@@ -200,15 +205,15 @@ def format_trade_alert(position, side: str) -> str:
         f"  Token: {position.token_symbol} ({position.token_address[:8]}...)",
         f"  Size: {position.entry_amount_sol:.4f} SOL",
         f"  Tokens: {position.entry_amount_token:.2f}",
-        f"  Entry: {position.entry_price:.10f} SOL",
+        f"  Entry: ${position.entry_price:.10f} USD",
     ]
 
     if side == "BUY":
         lines.append(f"  TX: `{position.entry_tx_sig[:16]}...`")
     else:
         exit_reason = getattr(position, "exit_reason", "") or ""
-        lines.append(f"  Exit: {position.exit_price:.10f} SOL ({exit_reason})")
+        lines.append(f"  Exit: ${position.exit_price:.10f} USD ({exit_reason})")
         pnl_emoji = "📈" if pnl_sol >= 0 else "📉"
-        lines.append(f"  PnL: {pnl_emoji} {pnl_sol:+.4f} SOL ({pnl_pct:+.1f}%)")
+        lines.append(f"  PnL: {pnl_emoji} {pnl_sol:+.4f} SOL (${pnl_usd:+.2f} USD, {pnl_pct:+.1f}%)")
 
     return "\n".join(lines)

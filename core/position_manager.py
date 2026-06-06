@@ -74,8 +74,14 @@ class PositionManager:
         )
 
     async def close_position(self, position, exit_reason: str,
-                              exit_price: float, pnl_sol: float, pnl_pct: float) -> None:
-        """Mark position as CLOSED and persist final PnL. Works on dict or dataclass."""
+                              exit_price: float, pnl_sol: float = 0.0,
+                              pnl_pct: float = 0.0, pnl_usd: float = 0.0,
+                              sol_usd_at_exit: float = 0.0) -> None:
+        """Mark position as CLOSED and persist final PnL. Works on dict or dataclass.
+
+        USD-canonical: persists both pnl_usd (canonical) and pnl_sol (display).
+        sol_usd_at_exit captured for accurate PnL conversion if needed later.
+        """
         now = datetime.now(timezone.utc)
         entry_time = self._get(position, "entry_time")
         hold_seconds = int((now - entry_time).total_seconds()) if entry_time else 0
@@ -85,15 +91,17 @@ class PositionManager:
         self._set(position, "exit_price", exit_price)
         self._set(position, "exit_time", now)
         self._set(position, "pnl_sol", pnl_sol)
+        self._set(position, "pnl_usd", pnl_usd)
         self._set(position, "pnl_pct", pnl_pct)
+        self._set(position, "sol_usd_at_exit", sol_usd_at_exit)
         self._set(position, "hold_seconds", hold_seconds)
 
         await self.db.update_position(position)
         logger.info(
             f"[POS] CLOSE {self._get(position, 'token_symbol', '?')} "
             f"({self._get(position, 'token_address', '?')[:8]}): "
-            f"reason={exit_reason}, exit={exit_price:.8f}, "
-            f"pnl={pnl_sol:+.4f} SOL ({pnl_pct:+.1f}%), "
+            f"reason={exit_reason}, exit=${exit_price:.8f}, "
+            f"pnl={pnl_sol:+.4f} SOL (${pnl_usd:+.2f} USD, {pnl_pct:+.1f}%), "
             f"hold={hold_seconds}s"
         )
 

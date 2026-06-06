@@ -289,7 +289,7 @@ def test_executor_paper_skips_jupiter_when_no_price():
 
 
 def test_executor_paper_uses_gmgn_price():
-    """Paper buy with valid GMGN price should succeed and debit wallet."""
+    """Paper buy with valid GMGN USD price should succeed and debit wallet."""
     from core.trade_executor import TradeExecutor
     from core.wallet import Wallet
     from core.jupiter_client import JupiterClient
@@ -300,6 +300,10 @@ def test_executor_paper_uses_gmgn_price():
     class FakeJupiter:
         async def get_quote(self, *a, **k): return {}
         async def get_token_price_in_sol_with_retry(self, *a, **k): return 0.0
+
+    class FakeOracle:
+        async def get_price_in_usd(self, addr): return 0.0  # fall through to GMGN
+        async def get_sol_price_usd(self): return 150.0  # USD-canonical needs SOL/USD
 
     captured = {}
 
@@ -320,19 +324,23 @@ def test_executor_paper_uses_gmgn_price():
             positions=FakePM(),
             risk=RiskManager({}),
             config={},
+            price_oracle=FakeOracle(),
         )
         token = TokenData(address="X", symbol="TST", name="Test")
-        token.raw_gmgn = {"price": {"price": 0.001}}
+        token.raw_gmgn = {"price": {"price": 0.001}}  # USD
         result = await executor.execute_buy(token, 0.05)
         assert result is not None
-        assert captured["position"].entry_price == 0.001
+        assert captured["position"].entry_price == 0.001  # USD
         assert captured["position"].entry_amount_token > 0
+        # amount_token = (size_sol * sol_usd) / entry_price_usd
+        # = (0.05 * 150) / 0.001 * 1.01 (slippage) = 7500 / 1.01 = 7425.74
+        assert captured["position"].sol_usd_at_entry == 150.0
         assert captured["position"].raw_gmgn_json != ""
     asyncio.run(go())
 
 
 def test_executor_paper_simulated_slippage():
-    """Paper buy with GMGN price 0.001 should apply ~1% slippage."""
+    """Paper buy with USD price 0.001 should apply ~1% slippage in USD math."""
     from core.trade_executor import TradeExecutor
     from core.wallet import Wallet
     from core.jupiter_client import JupiterClient
@@ -343,6 +351,10 @@ def test_executor_paper_simulated_slippage():
     class FakeJupiter:
         async def get_quote(self, *a, **k): return {}
         async def get_token_price_in_sol_with_retry(self, *a, **k): return 0.0
+
+    class FakeOracle:
+        async def get_price_in_usd(self, addr): return 0.0
+        async def get_sol_price_usd(self): return 150.0
 
     captured = {}
 
@@ -363,14 +375,16 @@ def test_executor_paper_simulated_slippage():
             positions=FakePM(),
             risk=RiskManager({}),
             config={},
+            price_oracle=FakeOracle(),
         )
         token = TokenData(address="X", symbol="TST", name="Test")
-        token.raw_gmgn = {"price": {"price": 0.001}}
+        token.raw_gmgn = {"price": {"price": 0.001}}  # USD
         await executor.execute_buy(token, 0.05)
-        effective_price = 0.001 * 1.01
-        expected_tokens = 0.05 / effective_price
+        # USD-canonical math: amount_token = (size_sol × sol_usd) / (entry_usd × slippage)
+        # = (0.05 * 150) / (0.001 * 1.01) = 7.5 / 0.00101 = 7425.74
+        expected_tokens = (0.05 * 150.0) / (0.001 * 1.01)
         actual_tokens = captured["position"].entry_amount_token
-        assert abs(actual_tokens - expected_tokens) < 0.01
+        assert abs(actual_tokens - expected_tokens) < 1.0
     asyncio.run(go())
 
 
@@ -654,6 +668,10 @@ def test_paper_buy_warms_price_cache():
         async def get_quote(self, *a, **k): return {}
         async def get_token_price_in_sol_with_retry(self, *a, **k): return 0.0
 
+    class FakeOracle:
+        async def get_price_in_usd(self, addr): return 0.0
+        async def get_sol_price_usd(self): return 150.0
+
     class FakePM:
         db = None
         async def open_position(self, p): return 1
@@ -667,9 +685,10 @@ def test_paper_buy_warms_price_cache():
             positions=FakePM(),
             risk=RiskManager({}),
             config={},
+            price_oracle=FakeOracle(),
         )
         token = TokenData(address="HuJuQYaZ", symbol="DATBIHGAH", name="D")
-        token.raw_gmgn = {"price": {"price": 0.0000806914}}
+        token.raw_gmgn = {"price": {"price": 0.0000806914}}  # USD
         await executor.execute_buy(token, 0.05)
         cached = executor._paper_price_cache.get("HuJuQYaZ")
         assert cached is not None
@@ -755,7 +774,7 @@ def test_price_oracle_median_of_two():
         oracle._session = FakeSession()
         sol_usd = await oracle.get_sol_price_usd()
         assert sol_usd == 150.0
-        price = await oracle.get_price_in_sol("ADDR123")
+        price = await oracle.get_price_in_usd("ADDR123")
         assert price > 0
     asyncio.run(go())
 
@@ -769,7 +788,7 @@ def test_price_oracle_cache_ttl():
     oracle._session = AsyncMock()
     oracle._cache["ADDR"] = {"ts": __import__("time").time(), "price": 0.0001}
     import asyncio
-    price = asyncio.run(oracle.get_price_in_sol("ADDR"))
+    price = asyncio.run(oracle.get_price_in_usd("ADDR"))
     assert price == 0.0001
     assert CACHE_TTL == 3.0
 
@@ -792,7 +811,7 @@ def test_paper_price_walk_uses_oracle_first():
         async def record_trade(self, t): return 1
 
     class FakeOracle:
-        async def get_price_in_sol(self, addr): return 0.0005
+        async def get_price_in_usd(self, addr): return 0.0005
 
     class FakeGmgn:
         async def get_token_info(self, addr):
@@ -841,7 +860,7 @@ def test_paper_price_walk_returns_zero_on_total_failure():
         async def record_trade(self, t): return 1
 
     class FakeOracle:
-        async def get_price_in_sol(self, addr): return 0.0  # fail
+        async def get_price_in_usd(self, addr): return 0.0  # fail
 
     class FakeGmgn:
         async def get_token_info(self, addr): return {}  # fail
@@ -881,7 +900,7 @@ def test_paper_cache_bounded_lru():
         async def open_position(self, p): return 1
         async def record_trade(self, t): return 1
     class FakeOracle:
-        async def get_price_in_sol(self, addr): return 0.0
+        async def get_price_in_usd(self, addr): return 0.0
     class FakeGmgn:
         async def get_token_info(self, addr): return {}
 
@@ -907,7 +926,7 @@ def test_paper_cache_bounded_lru():
 
 
 def test_executor_buy_uses_oracle_first():
-    """execute_buy should use oracle price when available."""
+    """execute_buy should use oracle USD price when available (USD-canonical)."""
     from core.trade_executor import TradeExecutor
     from core.wallet import Wallet
     from core.jupiter_client import JupiterClient
@@ -925,7 +944,8 @@ def test_executor_buy_uses_oracle_first():
         async def record_trade(self, t): return 1
 
     class FakeOracle:
-        async def get_price_in_sol(self, addr): return 0.001
+        async def get_price_in_usd(self, addr): return 0.001  # USD
+        async def get_sol_price_usd(self): return 150.0
 
     async def go():
         executor = TradeExecutor(
@@ -941,9 +961,12 @@ def test_executor_buy_uses_oracle_first():
         token.raw_gmgn = {"price": {"price": 0.00001}}
         position = await executor.execute_buy(token, 0.05)
         assert position is not None
+        # USD-canonical: entry_price from oracle (0.001 USD)
         assert abs(position.entry_price - 0.001) < 1e-9
-        expected_tokens = 0.05 / (0.001 * 1.01)
-        assert abs(position.entry_amount_token - expected_tokens) < 1e-6
+        # amount_token = (size_sol × sol_usd) / (entry_usd × slippage)
+        # = (0.05 * 150) / (0.001 * 1.01) = 7.5 / 0.00101 = 7425.74
+        expected_tokens = (0.05 * 150.0) / (0.001 * 1.01)
+        assert abs(position.entry_amount_token - expected_tokens) < 1.0
     asyncio.run(go())
 
 

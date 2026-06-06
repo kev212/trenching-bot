@@ -180,6 +180,8 @@ CREATE INDEX IF NOT EXISTS idx_loss_analyses_call_id ON loss_analyses(call_id);
 CREATE INDEX IF NOT EXISTS idx_loss_analyses_analyzed_at ON loss_analyses(analyzed_at);
 
 -- Trading bot tables (Phase 1: paper mode)
+-- USD-canonical (v2): entry_price/exit_price/peak_price are USD per token.
+-- pnl_sol and pnl_usd both tracked. sol_usd_at_entry/exit for PnL conversion.
 CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_address TEXT NOT NULL UNIQUE,
@@ -193,17 +195,21 @@ CREATE TABLE IF NOT EXISTS positions (
     peak_price REAL DEFAULT 0.0,
     current_amount_token REAL NOT NULL,
     total_sold_sol REAL DEFAULT 0.0,
+    total_sold_usd REAL DEFAULT 0.0,
     status TEXT DEFAULT 'OPEN',
     exit_tx_sig TEXT,
     exit_price REAL,
     exit_time TIMESTAMP,
     pnl_sol REAL,
+    pnl_usd REAL DEFAULT 0.0,
     pnl_pct REAL,
     hold_seconds INTEGER,
     exit_reason TEXT,
     filter_params_version INTEGER,
     paper INTEGER DEFAULT 1,
     raw_gmgn_json TEXT DEFAULT '',
+    sol_usd_at_entry REAL DEFAULT 0.0,
+    sol_usd_at_exit REAL DEFAULT 0.0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -268,11 +274,19 @@ class Database:
             await self.db.commit()
 
     async def _migrate(self):
-        """Lightweight ALTER TABLE migrations for existing DBs."""
+        """Lightweight ALTER TABLE migrations for existing DBs.
+
+        USD-canonical (v2) migrations add: total_sold_usd, pnl_usd,
+        sol_usd_at_entry, sol_usd_at_exit to positions.
+        """
         migrations = [
             ("positions", "raw_gmgn_json", "TEXT DEFAULT ''"),
             ("positions", "total_sold_sol", "REAL DEFAULT 0.0"),
             ("filter_adjustments", "resulting_version", "INTEGER"),
+            ("positions", "total_sold_usd", "REAL DEFAULT 0.0"),
+            ("positions", "pnl_usd", "REAL DEFAULT 0.0"),
+            ("positions", "sol_usd_at_entry", "REAL DEFAULT 0.0"),
+            ("positions", "sol_usd_at_exit", "REAL DEFAULT 0.0"),
         ]
         for table, column, typedef in migrations:
             try:
@@ -680,32 +694,34 @@ class Database:
     # Phase 1: trading bot persistence (paper mode)
 
     async def save_position(self, position) -> int:
-        """Save new position. Returns row id."""
+        """Save new position. Returns row id. USD-canonical."""
         async with self._lock:
             cursor = await self.db.execute(
                 """INSERT INTO positions
                 (token_address, token_symbol, side, entry_tx_sig, entry_price,
                  entry_amount_sol, entry_amount_token, entry_time, peak_price,
-                 current_amount_token, total_sold_sol, status, filter_params_version, paper,
-                 raw_gmgn_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 current_amount_token, total_sold_sol, total_sold_usd, status,
+                 filter_params_version, paper, raw_gmgn_json, sol_usd_at_entry)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     position.token_address, position.token_symbol, position.side,
                     position.entry_tx_sig, position.entry_price,
                     position.entry_amount_sol, position.entry_amount_token,
                     position.entry_time.isoformat() if position.entry_time else None,
                     position.peak_price, position.current_amount_token,
-                    position.total_sold_sol,
+                    getattr(position, "total_sold_sol", 0.0) or 0.0,
+                    getattr(position, "total_sold_usd", 0.0) or 0.0,
                     position.status, position.filter_params_version,
                     1 if position.paper else 0,
                     getattr(position, "raw_gmgn_json", "") or "",
+                    getattr(position, "sol_usd_at_entry", 0.0) or 0.0,
                 ),
             )
             await self.db.commit()
         return cursor.lastrowid
 
     async def update_position(self, position) -> None:
-        """Update mutable position fields. Accepts dict or dataclass."""
+        """Update mutable position fields. Accepts dict or dataclass. USD-canonical."""
         def _g(key, default=None):
             if isinstance(position, dict):
                 return position.get(key, default)
@@ -714,17 +730,22 @@ class Database:
             exit_time = _g("exit_time")
             await self.db.execute(
                 """UPDATE positions SET
-                peak_price = ?, current_amount_token = ?, total_sold_sol = ?, status = ?,
-                exit_tx_sig = ?, exit_price = ?, exit_time = ?,
-                pnl_sol = ?, pnl_pct = ?, hold_seconds = ?, exit_reason = ?
+                peak_price = ?, current_amount_token = ?, total_sold_sol = ?, total_sold_usd = ?,
+                status = ?, exit_tx_sig = ?, exit_price = ?, exit_time = ?,
+                pnl_sol = ?, pnl_usd = ?, pnl_pct = ?, hold_seconds = ?, exit_reason = ?,
+                sol_usd_at_exit = ?
                 WHERE id = ?""",
                 (
                     _g("peak_price", 0), _g("current_amount_token", 0),
-                    _g("total_sold_sol", 0), _g("status", "OPEN"),
+                    _g("total_sold_sol", 0), _g("total_sold_usd", 0),
+                    _g("status", "OPEN"),
                     _g("exit_tx_sig", ""), _g("exit_price", 0),
                     exit_time.isoformat() if exit_time else None,
-                    _g("pnl_sol", 0), _g("pnl_pct", 0), _g("hold_seconds", 0),
-                    _g("exit_reason", ""), _g("id"),
+                    _g("pnl_sol", 0), _g("pnl_usd", 0),
+                    _g("pnl_pct", 0), _g("hold_seconds", 0),
+                    _g("exit_reason", ""),
+                    _g("sol_usd_at_exit", 0),
+                    _g("id"),
                 ),
             )
             await self.db.commit()
@@ -823,24 +844,28 @@ class Database:
             "token_symbol": row["token_symbol"],
             "side": row["side"],
             "entry_tx_sig": row["entry_tx_sig"] or "",
-            "entry_price": row["entry_price"] or 0.0,
+            "entry_price": row["entry_price"] or 0.0,  # USD (canonical)
             "entry_amount_sol": row["entry_amount_sol"] or 0.0,
             "entry_amount_token": row["entry_amount_token"] or 0.0,
             "entry_time": datetime.fromisoformat(row["entry_time"]) if row["entry_time"] else None,
-            "peak_price": row["peak_price"] or 0.0,
+            "peak_price": row["peak_price"] or 0.0,  # USD (canonical)
             "current_amount_token": row["current_amount_token"] or 0.0,
             "total_sold_sol": row["total_sold_sol"] if row["total_sold_sol"] is not None else 0.0,
+            "total_sold_usd": row["total_sold_usd"] if "total_sold_usd" in row.keys() and row["total_sold_usd"] is not None else 0.0,
             "status": row["status"],
             "exit_tx_sig": row["exit_tx_sig"] or "",
-            "exit_price": row["exit_price"] or 0.0,
+            "exit_price": row["exit_price"] or 0.0,  # USD (canonical)
             "exit_time": datetime.fromisoformat(row["exit_time"]) if row["exit_time"] else None,
             "pnl_sol": row["pnl_sol"] or 0.0,
+            "pnl_usd": row["pnl_usd"] if "pnl_usd" in row.keys() and row["pnl_usd"] is not None else 0.0,
             "pnl_pct": row["pnl_pct"] or 0.0,
             "hold_seconds": row["hold_seconds"] or 0,
             "exit_reason": row["exit_reason"] or "",
             "filter_params_version": row["filter_params_version"] or 0,
             "raw_gmgn_json": row["raw_gmgn_json"] or "",
             "paper": bool(row["paper"]),
+            "sol_usd_at_entry": row["sol_usd_at_entry"] if "sol_usd_at_entry" in row.keys() and row["sol_usd_at_entry"] is not None else 0.0,
+            "sol_usd_at_exit": row["sol_usd_at_exit"] if "sol_usd_at_exit" in row.keys() and row["sol_usd_at_exit"] is not None else 0.0,
         }
 
     def _row_to_call(self, row) -> CallRecord:

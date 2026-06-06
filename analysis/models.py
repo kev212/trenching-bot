@@ -174,24 +174,29 @@ class Position:
     token_symbol: str = ""
     side: str = "BUY"
     entry_tx_sig: str = ""
-    entry_price: float = 0.0
+    # USD-canonical: entry_price/exit_price/peak_price are USD per token.
+    entry_price: float = 0.0  # USD
     entry_amount_sol: float = 0.0
     entry_amount_token: float = 0.0
     entry_time: Optional[datetime] = None
-    peak_price: float = 0.0
+    peak_price: float = 0.0  # USD
     current_amount_token: float = 0.0
     total_sold_sol: float = 0.0
+    total_sold_usd: float = 0.0
     status: str = "OPEN"
     exit_tx_sig: str = ""
-    exit_price: float = 0.0
+    exit_price: float = 0.0  # USD
     exit_time: Optional[datetime] = None
     pnl_sol: float = 0.0
+    pnl_usd: float = 0.0
     pnl_pct: float = 0.0
     hold_seconds: int = 0
     exit_reason: str = ""
     filter_params_version: int = 0
     paper: bool = True
     raw_gmgn_json: str = ""
+    sol_usd_at_entry: float = 0.0
+    sol_usd_at_exit: float = 0.0
     id: int = 0
 
 

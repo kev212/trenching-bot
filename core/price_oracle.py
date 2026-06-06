@@ -1,15 +1,16 @@
 """Multi-source price oracle: DexScreener → Jupiter → GMGN, take median.
 
-Why: GMGN's `info.price.price` is USD-denominated and sometimes inconsistent
-on fresh meme coins. DexScreener `priceNative` is always in SOL and reliable.
-Jupiter Price API v6 is a public endpoint that aggregates DEX prices.
+All prices returned in USD (canonical unit for the bot). SOL unit is derived
+at display/PnL-conversion time only.
 
-For paper trading, we use this to:
-1. Get a more accurate price at BUY time (so entry is correct)
-2. Get a more accurate price at every monitor tick (so SL/TP don't fire
-   on phantom data)
+Why USD as canonical:
+- USD prices are MORE available for fresh meme coins (~95% vs ~70% for SOL)
+- Eliminates the entire unit-mismatch bug class (no more "USD-as-SOL" silent
+  fallbacks at oracle level)
+- Single comparison unit across SL/TP/trailing checks
+- Live mode safe (same code path)
 
-Cache: 3s per token. If all 3 sources fail, return last cached price or 0.
+Cache: 3s per token. If all 3 sources fail, return 0 (fail-closed).
 """
 import asyncio
 import json
@@ -31,7 +32,7 @@ SOL_PRICE_CACHE_TTL = 30.0
 
 
 class PriceOracle:
-    """Async price aggregator. Caches per token, 3s TTL."""
+    """Async price aggregator. Caches per token, 3s TTL. Returns USD."""
 
     CACHE_MAX = 500
 
@@ -43,7 +44,7 @@ class PriceOracle:
         self.proxy = proxy
         self.timeout = timeout
         self._session: Optional[aiohttp.ClientSession] = None
-        self._cache: dict = {}
+        self._cache: dict = {}  # token_address -> {"ts": float, "price": float (USD)}
         self._sol_price_cache: dict = {}
 
     def _evict_cache(self):
@@ -53,7 +54,12 @@ class PriceOracle:
                 del self._cache[k]
 
     async def start(self) -> None:
-        """Eagerly initialize HTTP session. Call once at bot startup."""
+        """Eagerly initialize HTTP session + pre-warm SOL/USD rate.
+
+        Pre-warming sol_usd eliminates the race where the first BUY call
+        happens before SOL/USD is cached, forcing a fallback path that
+        previously could return USD-as-SOL silently.
+        """
         if not self._session or self._session.closed:
             kwargs = {"timeout": aiohttp.ClientTimeout(total=self.timeout)}
             if self.proxy:
@@ -61,15 +67,25 @@ class PriceOracle:
             self._session = aiohttp.ClientSession(**kwargs)
             logger.info("PriceOracle: session initialized")
 
+        try:
+            sol_usd = await self.get_sol_price_usd()
+            if sol_usd > 0:
+                logger.info(f"PriceOracle: pre-warmed SOL/USD = ${sol_usd:.2f}")
+            else:
+                logger.warning("PriceOracle: SOL/USD pre-warm failed (will retry on first call)")
+        except Exception as e:
+            logger.warning(f"PriceOracle: pre-warm error: {e}")
+
     async def close(self) -> None:
         if self._session:
             await self._session.close()
             self._session = None
 
-    async def get_price_in_sol(self, token_address: str) -> float:
-        """Get token price in SOL, using multi-source aggregation.
+    async def get_price_in_usd(self, token_address: str) -> float:
+        """Get token price in USD (CANONICAL unit). Returns 0 on total failure.
 
-        Returns 0 on total failure. Cache 3s per token.
+        Multi-source aggregation: DexScreener priceUsd, Jupiter Price v6,
+        GMGN info.price. Returns median of valid sources. Cache 3s per token.
         """
         if not token_address:
             return 0.0
@@ -81,9 +97,9 @@ class PriceOracle:
         try:
             prices = await asyncio.wait_for(
                 asyncio.gather(
-                    self._from_dexscreener(token_address),
-                    self._from_jupiter(token_address),
-                    self._from_gmgn(token_address),
+                    self._from_dexscreener_usd(token_address),
+                    self._from_jupiter_usd(token_address),
+                    self._from_gmgn_usd(token_address),
                     return_exceptions=True,
                 ),
                 timeout=8,
@@ -108,7 +124,7 @@ class PriceOracle:
                 ["dex", "jup", "gmgn"], prices
             ) if isinstance(p, (int, float)) and p > 0
         )
-        logger.debug(f"[ORACLE] {token_address[:8]}: median={median:.10f} ({sources})")
+        logger.debug(f"[ORACLE] {token_address[:8]}: median=${median:.10f} ({sources})")
         self._cache[token_address] = {"ts": now, "price": median}
         self._evict_cache()
         return median
@@ -139,7 +155,8 @@ class PriceOracle:
             return cached["price"]
         return 0.0
 
-    async def _from_dexscreener(self, token_address: str) -> float:
+    async def _from_dexscreener_usd(self, token_address: str) -> float:
+        """DexScreener priceUsd (USD per token)."""
         if not self._session:
             return 0.0
         try:
@@ -155,14 +172,15 @@ class PriceOracle:
                     pairs,
                     key=lambda p: float((p.get("liquidity") or {}).get("usd", 0) or 0),
                 )
-                native = pair.get("priceNative")
-                if native and float(native) > 0:
-                    return float(native)
+                price_usd = pair.get("priceUsd")
+                if price_usd and float(price_usd) > 0:
+                    return float(price_usd)
         except Exception as e:
             logger.debug(f"[ORACLE] dexscreener {token_address[:8]}: {e}")
         return 0.0
 
-    async def _from_jupiter(self, token_address: str) -> float:
+    async def _from_jupiter_usd(self, token_address: str) -> float:
+        """Jupiter Price API v6 — returns USD directly."""
         if not self._session:
             return 0.0
         try:
@@ -175,35 +193,23 @@ class PriceOracle:
                 entry = (data.get("data") or {}).get(token_address)
                 if entry and "price" in entry:
                     usd = float(entry["price"])
-                    sol_usd = await self.get_sol_price_usd()
-                    if sol_usd > 0:
-                        return usd / sol_usd
-                    return usd
+                    if usd > 0:
+                        return usd
         except Exception as e:
             logger.debug(f"[ORACLE] jupiter {token_address[:8]}: {e}")
         return 0.0
 
-    async def _from_gmgn(self, token_address: str) -> float:
+    async def _from_gmgn_usd(self, token_address: str) -> float:
+        """GMGN info.price (USD per token). Cap 5s for oracle-level timeout."""
         if not self.gmgn:
             return 0.0
         try:
-            # Fix #5: cap GMGN price call independently to 5s. The gmgn client
-            # has its own 45s gather timeout — if we wait for that, oracle's
-            # outer 8s wait_for never gets a chance to short-circuit cleanly.
             info = await asyncio.wait_for(
                 self.gmgn.get_token_info(token_address), timeout=5.0
             )
             price_obj = info.get("price", {}) if isinstance(info.get("price"), dict) else {}
-            native_token = price_obj.get("native_token")
-            if isinstance(native_token, dict):
-                nt_price = native_token.get("price")
-                if nt_price and float(nt_price) > 0:
-                    return float(nt_price)
             raw_price = price_obj.get("price")
             if raw_price and float(raw_price) > 0:
-                sol_usd = await self.get_sol_price_usd()
-                if sol_usd > 0:
-                    return float(raw_price) / sol_usd
                 return float(raw_price)
         except asyncio.TimeoutError:
             logger.debug(f"[ORACLE] gmgn {token_address[:8]}: timeout 5s")
