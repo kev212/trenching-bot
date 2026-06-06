@@ -187,7 +187,12 @@ class PriceOracle:
         if not self.gmgn:
             return 0.0
         try:
-            info = await self.gmgn.get_token_info(token_address)
+            # Fix #5: cap GMGN price call independently to 5s. The gmgn client
+            # has its own 45s gather timeout — if we wait for that, oracle's
+            # outer 8s wait_for never gets a chance to short-circuit cleanly.
+            info = await asyncio.wait_for(
+                self.gmgn.get_token_info(token_address), timeout=5.0
+            )
             price_obj = info.get("price", {}) if isinstance(info.get("price"), dict) else {}
             native_token = price_obj.get("native_token")
             if isinstance(native_token, dict):
@@ -200,6 +205,8 @@ class PriceOracle:
                 if sol_usd > 0:
                     return float(raw_price) / sol_usd
                 return float(raw_price)
+        except asyncio.TimeoutError:
+            logger.debug(f"[ORACLE] gmgn {token_address[:8]}: timeout 5s")
         except Exception as e:
             logger.debug(f"[ORACLE] gmgn {token_address[:8]}: {e}")
         return 0.0

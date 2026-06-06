@@ -211,8 +211,10 @@ class TradeExecutor:
     async def _simulate_paper_price_walk(self, position: dict, reason: str) -> float:
         """Get current token price for paper mode with 5s cache.
 
-        Priority: oracle (3-source median) > GMGN info > raw_gmgn_json > entry_price.
-        Caches price per token_address to avoid hammering sources at 4×/sec.
+        Priority: oracle (3-source median) > GMGN info > raw_gmgn_json.
+        Returns 0.0 on total failure (do NOT fall back to entry_price — that
+        would mask SL exits). Caches price per token_address to avoid
+        hammering sources at 4×/sec.
         """
         import time
         token_address = position.get("token_address", "")
@@ -282,10 +284,11 @@ class TradeExecutor:
                 logger.debug(f"[EXEC] paper price walk parse error: {e}")
 
         if price <= 0:
-            price = position.get("entry_price", 0.0) or 0.0
+            # Fix #1: do NOT fall back to entry_price — that would make SL never fire.
+            # Return 0 so position_monitor skips SL/TP checks for this tick.
+            return 0.0
 
-        if price > 0:
-            self._paper_price_cache[token_address] = {"ts": now, "price": price}
+        self._paper_price_cache[token_address] = {"ts": now, "price": price}
 
         return price
 

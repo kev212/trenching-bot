@@ -36,6 +36,22 @@ async def _process_position(
         )
 
     if current_price <= 0:
+        # Fix #2: when price source is down, evaluate TIME exit only —
+        # never fall back to entry_price (that would silently break SL).
+        held_so_far = (
+            (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
+            if position.get("entry_time") else 0
+        )
+        if time_limit > 0 and held_so_far > time_limit:
+            await executor.execute_sell(position, 100, "TIME")
+            return {
+                "triggered": True,
+                "current_price": 0.0,
+                "entry": position["entry_price"],
+                "peak": position.get("peak_price", 0) or 0,
+                "held_so_far": held_so_far,
+                "last_reason": "TIME",
+            }
         return {}
 
     entry = position["entry_price"]
@@ -179,6 +195,12 @@ async def position_monitor(state, db, position_manager: PositionManager,
     min_hold_seconds = config.get("min_hold_seconds", 30)
     extreme_tp_mult = config.get("extreme_tp_mult", 2.0)
 
+    # Fix #4: track consecutive invalid-price or timeout iterations per position.
+    # After MAX_CONSECUTIVE_FAILURES failures, force-close at entry_price (worst-case
+    # 0% return) to free capital instead of letting the position linger forever.
+    MAX_CONSECUTIVE_FAILURES = 12  # 12 * 0.25s = 3s of blacked-out price feed
+    consecutive_failures: dict[str, int] = {}
+
     while True:
         await asyncio.sleep(check_interval)
         try:
@@ -187,6 +209,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
                 continue
 
             for position in open_positions:
+                token_address = position["token_address"]
                 try:
                     result = await asyncio.wait_for(
                         _process_position(
@@ -204,10 +227,37 @@ async def position_monitor(state, db, position_manager: PositionManager,
                             f"peak={result['peak']:.10f}, "
                             f"paper={is_paper}, hold={result['held_so_far']:.0f}s"
                         )
+                        consecutive_failures.pop(token_address, None)
+                    else:
+                        # Price was returned but no trigger fired — normal operation
+                        consecutive_failures.pop(token_address, None)
                 except asyncio.TimeoutError:
-                    logger.warning(f"Position {position['token_address'][:8]} monitor timeout (> 20s)")
+                    consecutive_failures[token_address] = consecutive_failures.get(token_address, 0) + 1
+                    logger.warning(
+                        f"Position {token_address[:8]} monitor timeout (> 20s) "
+                        f"[{consecutive_failures[token_address]}/{MAX_CONSECUTIVE_FAILURES}]"
+                    )
                 except Exception as e:
-                    logger.error(f"Position {position['token_address'][:8]} monitor error: {e}")
+                    consecutive_failures[token_address] = consecutive_failures.get(token_address, 0) + 1
+                    logger.error(f"Position {token_address[:8]} monitor error: {e}")
+
+                # Fix #4: force-close stuck position
+                if consecutive_failures.get(token_address, 0) >= MAX_CONSECUTIVE_FAILURES:
+                    held = (
+                        (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
+                        if position.get("entry_time") else 0
+                    )
+                    logger.warning(
+                        f"[POS-MON] {position['token_symbol']} ({token_address[:8]}) "
+                        f"force-closing after {consecutive_failures[token_address]} consecutive failures "
+                        f"(held {held:.0f}s) — price feed blacked out"
+                    )
+                    try:
+                        await executor.execute_sell(position, 100, "STUCK")
+                    except Exception as e:
+                        logger.error(f"Force-close failed: {e}")
+                    consecutive_failures.pop(token_address, None)
+                    position_manager.cleanup_lock(token_address)
 
         except Exception as e:
             logger.error(f"Position monitor error: {e}")
