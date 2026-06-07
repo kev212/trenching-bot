@@ -42,10 +42,10 @@ Verdict:
 ### Position Management
 ```
 SL:      -50% from entry
-TP1:     +50% → sell 33%
-TP2:     +100% → sell 67% of remaining
+TP1:     +30% → sell 80%
+TP2:     +100% → sell remaining 20%
 Trailing: -20% from peak (after TP1/TP2)
-Moon bag: ~22% stays until trailing/time
+Moon bag: 0% — full exit by TP2
 ```
 
 ### Price Oracle
