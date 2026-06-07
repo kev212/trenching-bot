@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     private_key_encrypted: str = ""
     wallet_pubkey: str = ""
     paper_starting_balance_sol: float = 10.0
-    confidence_auto_execute: float = 0.70
+    confidence_auto_execute: float = 0.60
     enable_trenches_poller: bool = True
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
