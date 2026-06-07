@@ -689,12 +689,11 @@ class TrenchingBot:
         # (rate limiter 15 req/min serializes calls; 4 parallel → risk > 30s)
         try:
             from sources.gmgn import GMGN_GATHER_TIMEOUT
-            batch1 = await asyncio.wait_for(
-                asyncio.gather(
-                    self.gmgn.get_token_info(address),
-                    self.gmgn.get_token_security(address),
-                    return_exceptions=True,
-                ),
+            from utils.helpers import safe_gather
+
+            batch1 = await safe_gather(
+                self.gmgn.get_token_info(address),
+                self.gmgn.get_token_security(address),
                 timeout=GMGN_GATHER_TIMEOUT,
             )
             info_r, security_r = batch1
@@ -705,12 +704,9 @@ class TrenchingBot:
             if isinstance(security_r, Exception):
                 logger.warning(f"GMGN security error for {address[:10]}: {security_r}")
 
-            batch2 = await asyncio.wait_for(
-                asyncio.gather(
-                    self.gmgn.get_token_holders(address),
-                    self.gmgn.get_token_ath(address),
-                    return_exceptions=True,
-                ),
+            batch2 = await safe_gather(
+                self.gmgn.get_token_holders(address),
+                self.gmgn.get_token_ath(address),
                 timeout=GMGN_GATHER_TIMEOUT,
             )
             holders_r, ath_r = batch2
@@ -720,9 +716,6 @@ class TrenchingBot:
                 logger.warning(f"GMGN holders error for {address[:10]}: {holders_r}")
             if isinstance(ath_r, Exception):
                 logger.warning(f"GMGN ath error for {address[:10]}: {ath_r}")
-        except asyncio.TimeoutError:
-            logger.warning(f"GMGN batch timeout for {address[:10]}")
-            info, security, holders, ath_data = {}, {}, {}, {}
         except Exception as e:
             logger.warning(f"GMGN gather error for {address[:10]}: {e}")
             info, security, holders, ath_data = {}, {}, {}, {}

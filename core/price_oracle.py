@@ -113,30 +113,21 @@ class PriceOracle:
         # If Jupiter is backed off, skip Jupiter + DexScreener, fall through to GMGN only
         jupiter_blocked = self._jupiter_backoff_active()
 
-        try:
-            if jupiter_blocked:
-                # Skip Jupiter sources, only fetch from GMGN (uses different endpoint)
-                prices = await asyncio.wait_for(
-                    asyncio.gather(
-                        self._from_gmgn_usd(token_address),
-                        return_exceptions=True,
-                    ),
-                    timeout=8,
-                )
-                prices = [0.0, 0.0] + list(prices)  # pad for sources list below
-            else:
-                prices = await asyncio.wait_for(
-                    asyncio.gather(
-                        self._from_dexscreener_usd(token_address),
-                        self._from_jupiter_usd(token_address),
-                        self._from_gmgn_usd(token_address),
-                        return_exceptions=True,
-                    ),
-                    timeout=8,
-                )
-        except asyncio.TimeoutError:
-            logger.debug(f"[ORACLE] timeout for {token_address[:8]}")
-            return cached["price"] if cached else 0.0
+        from utils.helpers import safe_gather
+
+        if jupiter_blocked:
+            prices = await safe_gather(
+                self._from_gmgn_usd(token_address),
+                timeout=8,
+            )
+            prices = [0.0, 0.0] + list(prices)  # pad for sources list below
+        else:
+            prices = await safe_gather(
+                self._from_dexscreener_usd(token_address),
+                self._from_jupiter_usd(token_address),
+                self._from_gmgn_usd(token_address),
+                timeout=8,
+            )
         valid = [p for p in prices if isinstance(p, (int, float)) and p > 0]
         if not valid:
             if cached:

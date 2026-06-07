@@ -1,4 +1,5 @@
 import asyncio
+from asyncio import FIRST_COMPLETED
 import logging
 import time
 from collections import defaultdict
@@ -60,3 +61,54 @@ async def safe_task(name: str, coro_func, *args, max_retries: int = 5):
             await asyncio.sleep(min(2 ** retries, 60))
     if retries >= max_retries:
         logger.critical(f"{name} failed after {max_retries} retries")
+
+
+async def _wrap_coro(coro):
+    """Wrap a coroutine so exceptions are returned as values (not raised).
+    Needed because asyncio.wait(FIRST_COMPLETED) doesn't support
+    return_exceptions natively like asyncio.gather does.
+    """
+    try:
+        return await coro
+    except BaseException as e:
+        return e
+
+
+async def safe_gather(*coros, timeout: float = None):
+    """asyncio.gather dengan timeout yang handle cancellation cleanly
+    AND bisa return partial results.
+
+    Workaround untuk Python 3.9-3.11 bug (cpython#102988): 
+    ``asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=N)``
+    gak ngerapihin CancelledError di inner tasks saat timeout, ngehasilin
+    ``_GatheringFuture exception was never retrieved`` warning.
+
+    Pakai ``asyncio.wait(FIRST_COMPLETED)`` instead, yang secara natural
+    ngebalikin partial results (coros yang kaburu selesai) + TimeoutError
+    placeholder untuk yang belum selesai.
+    """
+    if not coros:
+        return []
+
+    wrapped = [_wrap_coro(c) for c in coros]
+
+    if timeout is None:
+        return await asyncio.gather(*wrapped)
+
+    tasks = [asyncio.ensure_future(w) for w in wrapped]
+    done, pending = await asyncio.wait(tasks, timeout=timeout,
+                                       return_when=FIRST_COMPLETED)
+    for t in pending:
+        t.cancel()
+        try:
+            await t
+        except BaseException:
+            pass
+
+    results = []
+    for t in tasks:
+        if t in done and not t.cancelled():
+            results.append(t.result())
+        else:
+            results.append(asyncio.TimeoutError())
+    return results

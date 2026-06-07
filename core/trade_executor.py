@@ -12,6 +12,7 @@ simulated wallet. No real transactions. Uses GMGN price + simulated slippage.
 
 Live mode (Phase 2): also builds, signs, submits via Helius RPC.
 """
+import asyncio
 import json
 import logging
 import time
@@ -297,11 +298,16 @@ class TradeExecutor:
 
         if price <= 0 and self.gmgn:
             try:
-                info = await self.gmgn.get_token_info(token_address)
+                info = await asyncio.wait_for(
+                    self.gmgn.get_token_info(token_address),
+                    timeout=5.0,
+                )
                 price_obj = info.get("price", {}) if isinstance(info.get("price"), dict) else {}
                 price_val = price_obj.get("price")
                 if price_val and float(price_val) > 0:
                     price = float(price_val)
+            except asyncio.TimeoutError:
+                logger.debug(f"[EXEC] paper price gmgn timeout for {token_address[:8]}")
             except Exception as e:
                 logger.debug(f"[EXEC] paper price fetch error: {e}")
 

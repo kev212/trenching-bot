@@ -45,14 +45,30 @@ async def _process_position(
     token_address = position["token_address"]
 
     if is_paper:
-        current_price_usd = await executor._simulate_paper_price_walk(
-            position, "monitor"
-        )
+        try:
+            current_price_usd = await asyncio.wait_for(
+                executor._simulate_paper_price_walk(position, "monitor"),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[POS-MON] paper price walk timeout for {token_address[:8]}, "
+                "returning 0 (will skip SL/TP this tick)"
+            )
+            current_price_usd = 0.0
     else:
         # Live mode: SOL from Jupiter × SOL/USD = USD.
-        current_price_sol = await executor.jupiter.get_token_price_in_sol_with_retry(
-            token_address
-        )
+        try:
+            current_price_sol = await asyncio.wait_for(
+                executor.jupiter.get_token_price_in_sol_with_retry(token_address),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[POS-MON] jupiter price timeout for {token_address[:8]}, "
+                "returning 0 (will skip SL/TP this tick)"
+            )
+            current_price_sol = 0.0
         current_price_usd = current_price_sol * (sol_usd_now or 0.0)
 
     if current_price_usd <= 0:
