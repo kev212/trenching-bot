@@ -177,22 +177,43 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         entry_tokens = r["entry_amount_token"] or 0
         remaining_tokens = r["current_amount_token"] or 0
         remain_pct = (remaining_tokens / entry_tokens * 100) if entry_tokens > 0 else 100
-        remaining_sol = remaining_tokens * entry_price
+        # M4 fix: remaining_tokens * entry_price = USD (entry_price is USD/token),
+        # not SOL. Convert to actual SOL using sol_usd_at_entry (captured at
+        # buy time — the only conversion rate we have on the position row).
+        remaining_usd = remaining_tokens * entry_price
+        sol_usd = r.get("sol_usd_at_entry") or 0.0
+        if sol_usd <= 0:
+            sol_usd = 150.0  # last-resort fallback (matches trade_executor)
+        remaining_actual_sol = remaining_usd / sol_usd if sol_usd > 0 else 0.0
         peak = r["peak_price"] or 0
-        peak_pct = ((peak / entry_price) - 1) * 100 if entry_price > 0 else 0
+        # L9 fix: peak_pct = -100% when peak==0 (newly opened). Default to 0.
+        if peak <= 0 or entry_price <= 0:
+            peak_pct = 0.0
+        else:
+            peak_pct = ((peak / entry_price) - 1) * 100
         exit_reason = r["exit_reason"] or ""
         age_sec = 0
         if r["entry_time"]:
+            # M5 fix: `Z`-suffixed ISO strings fail on Py3.7-3.10.
+            # Normalize to `+00:00` and log on unparseable instead of
+            # silently showing age=0.
+            entry_str = r["entry_time"]
+            if isinstance(entry_str, str) and entry_str.endswith("Z"):
+                entry_str = entry_str[:-1] + "+00:00"
             try:
-                entry_dt = datetime.fromisoformat(r["entry_time"])
+                entry_dt = datetime.fromisoformat(entry_str)
                 age_sec = (datetime.now(timezone.utc) - entry_dt).total_seconds()
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.warning(
+                    f"[BOT] Unparseable entry_time for position {r.get('id')}: "
+                    f"{r['entry_time']!r} — showing age=0 ({e})"
+                )
+                age_sec = 0
         paper_tag = " [PAPER]" if r["paper"] else " [LIVE]"
         tp_tag = f" | {exit_reason} taken" if exit_reason else ""
         lines.append(
             f"• {r['token_symbol']} ({r['token_address'][:8]}...){paper_tag}\n"
-            f"  Size: {remaining_sol:.4f} SOL ({remain_pct:.0f}% remain) @ {entry_price:.10f}\n"
+            f"  Size: {remaining_actual_sol:.4f} SOL (${remaining_usd:.2f} USD, {remain_pct:.0f}% remain) @ {entry_price:.10f}\n"
             f"  Peak: {peak_pct:+.1f}% | Age: {age_sec/60:.1f}m\n"
             f"  ID: {r['id']}{tp_tag}"
         )
@@ -275,11 +296,18 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         exit_time_short = ""
         if r["exit_time"]:
+            # M5 fix: handle `Z`-suffixed ISO strings (Py3.7-3.10 compat).
+            exit_str = r["exit_time"]
+            if isinstance(exit_str, str) and exit_str.endswith("Z"):
+                exit_str = exit_str[:-1] + "+00:00"
             try:
-                dt = datetime.fromisoformat(r["exit_time"])
+                dt = datetime.fromisoformat(exit_str)
                 exit_time_short = dt.strftime("%m-%d %H:%M")
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.warning(
+                    f"[BOT] Unparseable exit_time for position {r.get('id')}: "
+                    f"{r['exit_time']!r} — skipping ({e})"
+                )
 
         lines.append(
             f"{pnl_emoji} {r['token_symbol']} ({exit_reason}){paper_tag} {exit_time_short}\n"

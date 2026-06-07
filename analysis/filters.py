@@ -14,8 +14,8 @@ PERMANENT_FILTERS = frozenset({
 # Compound rule: token (pre or post migrate) older than COMPOUND_AGE_MINUTES
 # with fee below COMPOUND_FEE_MIN_SOL has had enough time to prove traction
 # but hasn't — skip permanently.
-COMPOUND_FEE_MIN_SOL = 1.0
-COMPOUND_AGE_MINUTES = 30.0
+COMPOUND_FEE_MIN_SOL = 1.0   # 1.0 SOL — token hasn't earned enough fees
+COMPOUND_AGE_MINUTES = 30.0  # 30 min — token has had enough time
 
 
 def is_permanent_failure(failures: list[str]) -> bool:

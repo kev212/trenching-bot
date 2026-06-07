@@ -14,7 +14,7 @@ import aiohttp
 logger = logging.getLogger("jupiter")
 
 QUOTE_API = "https://quote-api.jup.ag/v6"
-PRICE_API = "https://price.jup.ag/v6"
+PRICE_API = "https://lite-api.jup.ag/price/v3"   # migrated from deprecated price.jup.ag/v6
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -108,18 +108,25 @@ class JupiterClient:
         return {}
 
     async def get_token_price_usd(self, token_mint: str) -> float:
-        """Get current token price in USD via Jupiter Price API. Returns 0 on miss."""
+        """Get current token price in USD via Jupiter Price API. Returns 0 on miss.
+
+        Uses the v3 endpoint (lite-api.jup.ag/price/v3) which returns:
+          { "So11...": { "usdPrice": 150.0 } }
+        """
         if not self._session:
             return 0.0
         try:
-            async with self._session.get(f"{PRICE_API}/price",
+            async with self._session.get(f"{PRICE_API}",
                                           params={"ids": token_mint}) as resp:
                 if resp.status != 200:
                     return 0.0
                 data = await resp.json()
-                entry = data.get("data", {}).get(token_mint)
-                if entry and "price" in entry:
-                    return float(entry["price"])
+                # v3 response: { mint: { "usdPrice": 150.0 } } (no "data" wrapper)
+                entry = data.get(token_mint) or data.get("data", {}).get(token_mint)
+                if entry:
+                    usd = entry.get("usdPrice") or entry.get("price")
+                    if usd and float(usd) > 0:
+                        return float(usd)
         except Exception as e:
             logger.debug(f"[JUP] price usd error for {token_mint[:8]}: {e}")
         return 0.0

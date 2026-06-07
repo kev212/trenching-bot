@@ -150,8 +150,14 @@ async def _process_position(
     if not triggered:
         return {}
 
-    # B2 fix: cleanup lock on every successful exit path
-    if last_reason in ("SL", "TP1-EXTREME", "TP1", "TP2", "TRAILING", "TIME"):
+    # B2 fix + L3 audit fix: cleanup lock ONLY on full-close exits.
+    # Partial sells (TP1, TP2) leave the position open with remaining
+    # tokens — keeping the lock preserves lock continuity for the next
+    # tick. Removing it on TP1 would force get_lock() to create a new
+    # Lock object on the next tick, losing the original lock's state
+    # and creating a (mostly harmless) identity discontinuity.
+    _FULL_CLOSE_REASONS = ("SL", "TP1-EXTREME", "TP2", "TRAILING", "TIME")
+    if last_reason in _FULL_CLOSE_REASONS:
         position_manager.cleanup_lock(token_address)
 
     gain = (current_price_usd - entry) / entry * 100 if entry > 0 else 0.0
@@ -166,31 +172,33 @@ async def _process_position(
     total_sold_sol = position.get("total_sold_sol", 0.0) or 0.0
     total_sold_usd = position.get("total_sold_usd", 0.0) or 0.0
 
-    # PnL comes from execute_sell's close_position. For display, recompute here.
+    # L8 audit fix: read PnL from `position` (set by execute_sell ->
+    # close_position) instead of recomputing. Recomputation can drift
+    # from the stored value if sol_usd_now changes between execute_sell
+    # and here, causing alert to show different numbers than /history.
+    # For partial sells (TP1/TP2) the stored pnl_* reflects only this
+    # leg's contribution (close is only set when full close), so we
+    # fall back to the partial-sell math for those.
+    pnl_sol = position.get("pnl_sol") or 0.0
+    pnl_usd = position.get("pnl_usd") or 0.0
+    pnl_pct = position.get("pnl_pct") or 0.0
+
     if last_reason in ("TP1", "TP1-EXTREME"):
-        pre_sell_tokens = entry_tokens
-        sold_tokens = entry_tokens - current_tokens
-        pnl_sol = (current_price_usd - entry) / (sol_usd_now or 150.0) * sold_tokens
-        pnl_usd = (current_price_usd - entry) * sold_tokens
-        pnl_pct = ((current_price_usd / entry) - 1) * 100 if entry > 0 else 0.0
+        sold_tokens = entry_tokens - (position.get("current_amount_token", 0) or 0)
+        # For partial sells, pnl_* fields aren't yet meaningful (close
+        # hasn't been called). Compute this-leg's PnL for the alert.
+        if not pnl_sol:
+            pnl_sol = (current_price_usd - entry) / (sol_usd_now or 150.0) * sold_tokens
+            pnl_usd = (current_price_usd - entry) * sold_tokens
+            pnl_pct = ((current_price_usd / entry) - 1) * 100 if entry > 0 else 0.0
     elif last_reason == "TP2":
-        pre_sell_tokens = current_tokens
-        sold_tokens = pre_sell_tokens - (position.get("current_amount_token", 0) or 0)
-        pnl_sol = (current_price_usd - entry) / (sol_usd_now or 150.0) * sold_tokens
-        pnl_usd = (current_price_usd - entry) * sold_tokens
-        pnl_pct = ((current_price_usd / entry) - 1) * 100 if entry > 0 else 0.0
+        # TP2 is a full close (remaining < 0.001 tokens in execute_sell).
+        # Use stored PnL (set by close_position).
+        sold_tokens = entry_tokens
     elif last_reason in ("SL", "TRAILING", "TIME"):
-        # Close: total_sold_sol - entry_sol (SOL); total_sold_usd - entry_usd (USD)
-        entry_usd = entry_sol * (position.get("sol_usd_at_entry", 0.0) or 0.0)
-        pnl_sol = total_sold_sol - entry_sol
-        pnl_usd = total_sold_usd - entry_usd
-        pnl_pct = ((total_sold_sol / entry_sol) - 1) * 100 if entry_sol > 0 else 0.0
         sold_tokens = entry_tokens
     else:
         sold_tokens = 0
-        pnl_sol = 0.0
-        pnl_usd = 0.0
-        pnl_pct = 0.0
 
     sold_pct = (sold_tokens / entry_tokens * 100) if entry_tokens > 0 else 0.0
 
@@ -210,7 +218,7 @@ async def _process_position(
             total_tokens=entry_tokens,
             sold_pct=sold_pct,
             sold_tokens=sold_tokens,
-            remaining_tokens=current_tokens if last_reason in ("TP1", "TP2") else 0,
+            remaining_tokens=position.get("current_amount_token", 0) or 0,
         )
         await dispatcher.send_alert(exit_msg)
     except Exception as e:

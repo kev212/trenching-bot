@@ -10,6 +10,68 @@ logger = logging.getLogger(__name__)
 LLM_TIMEOUT = 60
 BATCH_TIMEOUT = 90
 
+# Circuit breaker tuning
+CB_THRESHOLD = 5        # failures to open the circuit
+CB_COOLDOWN_S = 60.0    # how long the circuit stays open
+
+
+class CircuitBreaker:
+    """Lightweight async circuit breaker.
+
+    After `threshold` consecutive failures, the breaker opens for
+    `cooldown` seconds. While open, all calls return immediately (the
+    caller decides what `None`/empty means). First success after the
+    cooldown closes the breaker.
+
+    Defends against API outages: without it, an LLM outage causes
+    `retries × timeout` per call = 184s of stall per worker. With it,
+    each call returns in microseconds during the open period, so
+    other work (filtering, social analysis without LLM, retries) can
+    continue normally.
+    """
+
+    def __init__(self, threshold: int = CB_THRESHOLD, cooldown: float = CB_COOLDOWN_S):
+        self.threshold = threshold
+        self.cooldown = cooldown
+        self._failures = 0
+        self._open_until = 0.0
+        # threading.Lock (not asyncio.Lock) so the breaker can be constructed
+        # in sync contexts (tests, import-time). State is mutated only from
+        # coroutines running in the same loop, so a regular lock is enough.
+        import threading
+        self._lock = threading.Lock()
+
+    async def is_open(self) -> bool:
+        with self._lock:
+            if time.time() < self._open_until:
+                return True
+            # Cooldown expired — auto-close (next call will be a fresh attempt).
+            if self._open_until > 0:
+                logger.info("[LLM-CB] Cooldown elapsed, circuit auto-closed")
+                self._open_until = 0.0
+                self._failures = 0
+            return False
+
+    async def record_failure(self):
+        with self._lock:
+            self._failures += 1
+            if self._failures >= self.threshold and self._open_until == 0.0:
+                self._open_until = time.time() + self.cooldown
+                logger.error(
+                    f"[LLM-CB] OPEN for {self.cooldown}s after "
+                    f"{self._failures} consecutive failures"
+                )
+
+    async def record_success(self):
+        with self._lock:
+            if self._failures > 0 or self._open_until > 0:
+                logger.info(
+                    f"[LLM-CB] CLOSED after success "
+                    f"(prev failures={self._failures}, open={self._open_until > 0})"
+                )
+            self._failures = 0
+            self._open_until = 0.0
+
 
 class PioneerLLMClient:
     """OpenAI-compatible LLM client for Pioneer API (or any OpenAI endpoint).
@@ -26,11 +88,21 @@ class PioneerLLMClient:
         )
         self.model = settings.llm_model
         self._semaphore = asyncio.Semaphore(4)
+        self._cb = CircuitBreaker()
+
+    @property
+    def circuit_breaker(self) -> CircuitBreaker:
+        return self._cb
 
     async def analyze_token(
         self, system_prompt: str, user_prompt: str, temperature: float = 0.3, retries: int = 3
     ) -> dict:
         start = time.time()
+        # Circuit breaker check: return None immediately when open.
+        if await self._cb.is_open():
+            logger.debug("[LLM] circuit breaker open, returning None immediately")
+            return None
+
         for attempt in range(retries + 1):
             try:
                 async with self._semaphore:
@@ -58,10 +130,12 @@ class PioneerLLMClient:
                         await asyncio.sleep(wait)
                         continue
                     logger.error(f"LLM empty content after {retries+1} attempts")
+                    await self._cb.record_failure()
                     return None
 
                 result = json.loads(content)
                 result["_processing_time_ms"] = elapsed_ms
+                await self._cb.record_success()
                 return result
 
             except json.JSONDecodeError as e:
@@ -71,6 +145,7 @@ class PioneerLLMClient:
                     await asyncio.sleep(wait)
                     continue
                 logger.error(f"LLM invalid JSON after {retries+1} attempts: {e}")
+                await self._cb.record_failure()
                 return None
             except asyncio.TimeoutError:
                 if attempt < retries:
@@ -79,6 +154,7 @@ class PioneerLLMClient:
                     await asyncio.sleep(wait)
                     continue
                 logger.error(f"LLM timeout after {retries+1} attempts")
+                await self._cb.record_failure()
                 return None
             except Exception as e:
                 if attempt < retries:
@@ -87,6 +163,7 @@ class PioneerLLMClient:
                     await asyncio.sleep(wait)
                     continue
                 logger.error(f"LLM API error after {retries+1} attempts: {e}")
+                await self._cb.record_failure()
                 return None
 
         return None

@@ -32,6 +32,12 @@ class TwitterClient:
 
     INVALID_PATHS = {"i", "status", "statuses", "search", "home", "notifications", "messages", "explore", "settings", "lists"}
 
+    # In-memory cache: community_id -> (handle, ts). Community creators
+    # rarely change, and scraping launches a fresh Chromium each time
+    # (~2-5s startup, memory pressure). TTL 24h is generous.
+    _COMMUNITY_CACHE_TTL_S = 24 * 3600
+    _community_cache: dict[str, tuple[str, float]] = {}
+
     def parse_twitter_input(self, raw: str) -> dict:
         """Parse raw Twitter input into structured data.
         Returns: {handle, tweet_id, community_id, raw_type}
@@ -137,7 +143,21 @@ class TwitterClient:
         """Scrape community page via Playwright to extract creator handle.
 
         Returns handle (e.g. 'derpserk_ai') or empty string on failure.
+
+        Caches result in-memory (TTL 24h) — community creators don't change
+        and launching a fresh Chromium per call costs ~2-5s + memory.
         """
+        import time
+
+        # Cache hit (and not expired)?
+        cached = self._community_cache.get(community_id)
+        if cached is not None:
+            handle, ts = cached
+            if (time.time() - ts) < self._COMMUNITY_CACHE_TTL_S:
+                logger.debug(f"[COMMUNITY] {community_id}: cache hit creator=@{handle}")
+                return handle
+            # Expired — fall through to re-scrape.
+
         try:
             from playwright.async_api import async_playwright
         except ImportError:
@@ -174,9 +194,11 @@ class TwitterClient:
                 if match:
                     handle = match.group(1)
                     logger.info(f"[COMMUNITY] {community_id}: creator=@{handle}")
+                    self._community_cache[community_id] = (handle, time.time())
                     return handle
 
                 logger.warning(f"[COMMUNITY] {community_id}: no creator found in About tab")
+                # Don't cache negative results — they may be transient.
                 return ""
 
         except Exception as e:

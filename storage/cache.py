@@ -218,6 +218,10 @@ class SharedState:
             return self._filter_params_version
 
     async def save_active_calls(self):
+        """No-op: state.active_calls is in-memory only (Telegram /active sources
+        from db.get_active_calls() instead — DB is the source of truth, this
+        dict is reserved for future use).
+        """
         pass
 
     async def load_filter_params(self):
