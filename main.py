@@ -700,9 +700,9 @@ class TrenchingBot:
             info = info_r if not isinstance(info_r, Exception) else {}
             security = security_r if not isinstance(security_r, Exception) else {}
             if isinstance(info_r, Exception):
-                logger.warning(f"GMGN info error for {address[:10]}: {info_r}")
+                logger.debug(f"GMGN info error for {address[:10]}: {info_r}")
             if isinstance(security_r, Exception):
-                logger.warning(f"GMGN security error for {address[:10]}: {security_r}")
+                logger.debug(f"GMGN security error for {address[:10]}: {security_r}")
 
             batch2 = await safe_gather(
                 self.gmgn.get_token_holders(address),
@@ -713,9 +713,9 @@ class TrenchingBot:
             holders = holders_r if not isinstance(holders_r, Exception) else {}
             ath_data = ath_r if not isinstance(ath_r, Exception) else {}
             if isinstance(holders_r, Exception):
-                logger.warning(f"GMGN holders error for {address[:10]}: {holders_r}")
+                logger.debug(f"GMGN holders error for {address[:10]}: {holders_r}")
             if isinstance(ath_r, Exception):
-                logger.warning(f"GMGN ath error for {address[:10]}: {ath_r}")
+                logger.debug(f"GMGN ath error for {address[:10]}: {ath_r}")
         except Exception as e:
             logger.warning(f"GMGN gather error for {address[:10]}: {e}")
             info, security, holders, ath_data = {}, {}, {}, {}
