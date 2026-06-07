@@ -160,26 +160,30 @@ class PriceOracle:
         return median
 
     async def get_sol_price_usd(self) -> float:
-        """Get current SOL price in USD. 10s cache, 2-tier fallback (v3 → v6).
+        """Get current SOL price in USD. 10s cache, 3-tier fallback.
+
+        Sources (tried in order):
+        1. Jupiter v3 (lite-api) — primary, most reliable
+        2. Jupiter v6 (price.jup.ag) — legacy fallback
+        3. DexScreener — independent rate-limit pool, last resort
 
         Returns 0 only on total failure AND no cached value. If backoff is
-        active, returns stale cache (or 0) without making HTTP calls.
+        active on Jupiter, skips Jupiter sources and tries DexScreener.
         """
         now = time.time()
         cached = self._sol_price_cache.get("SOL")
         if cached and (now - cached["ts"]) < SOL_PRICE_CACHE_TTL:
             return cached["price"]
 
-        # If Jupiter is backed off, return stale cache (don't add to rate-limit pressure)
-        if self._jupiter_backoff_active():
-            if cached:
-                return cached["price"]
-            return 0.0
-
-        sources = [
-            ("jupiter_v3", self._fetch_sol_v3),
-            ("jupiter_v6", self._fetch_sol_v6),
-        ]
+        # Build source list — skip Jupiter sources if backed off.
+        sources = []
+        if not self._jupiter_backoff_active():
+            sources.extend([
+                ("jupiter_v3", self._fetch_sol_v3),
+                ("jupiter_v6", self._fetch_sol_v6),
+            ])
+        # DexScreener uses a different rate-limit pool, always try it
+        sources.append(("dexscreener", self._fetch_sol_dexscreener))
 
         for name, fetch_fn in sources:
             try:
@@ -196,6 +200,37 @@ class PriceOracle:
         if cached:
             logger.debug(f"[SOL-USD] all sources failed, returning stale ${cached['price']:.2f}")
             return cached["price"]
+        logger.warning("[SOL-USD] all sources failed AND no cache — returning 0 (no SOL/USD rate)")
+        return 0.0
+
+    async def _fetch_sol_dexscreener(self) -> float:
+        """DexScreener SOL/USD price. Last-resort fallback when Jupiter is down.
+
+        Endpoint: /latest/dex/tokens/SOL_MINT — uses the same endpoint as
+        token prices but with SOL as the address. Independent rate-limit
+        pool from Jupiter so it survives Jupiter backoffs.
+        """
+        if not self._session:
+            return 0.0
+        try:
+            url = f"{DEXSCREENER_PRICE}/{SOL_MINT}"
+            async with self._session.get(url) as resp:
+                if resp.status != 200:
+                    return 0.0
+                data = await resp.json()
+                pairs = data.get("pairs") or []
+                if not pairs:
+                    return 0.0
+                # Pick highest-liquidity pair to get the most reliable price
+                pair = max(
+                    pairs,
+                    key=lambda p: float((p.get("liquidity") or {}).get("usd", 0) or 0),
+                )
+                price_usd = pair.get("priceUsd")
+                if price_usd and float(price_usd) > 0:
+                    return float(price_usd)
+        except Exception as e:
+            logger.debug(f"[SOL-USD] dexscreener failed: {e}")
         return 0.0
 
     async def _fetch_sol_v3(self) -> float:

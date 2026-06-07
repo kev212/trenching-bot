@@ -207,7 +207,7 @@ def format_exit_alert(symbol: str, address: str, entry_price: float,
         f"  Exit:   ${exit_price:.10f} USD",
         f"  PnL: {pnl_emoji} {pnl_sol:+.4f} SOL (${pnl_usd:+.2f} USD, {pnl_pct:+.1f}%)",
         f"  Hold:   {hold_str}",
-        f"  Token:  {address[:8]}...",
+        f"  Token:  {_escape_markdown(address[:8])}...",
     ])
 
     return "\n".join(lines)
@@ -231,7 +231,8 @@ def format_trade_alert(position, side: str) -> str:
     ]
 
     if side == "BUY":
-        lines.append(f"  TX: `{_escape_markdown(position.entry_tx_sig[:16])}...`")
+        if position.entry_tx_sig:
+            lines.append(f"  TX: `{_escape_markdown(position.entry_tx_sig[:16])}...`")
     else:
         exit_reason = getattr(position, "exit_reason", "") or ""
         lines.append(f"  Exit: ${position.exit_price:.10f} USD ({_escape_markdown(exit_reason)})")
