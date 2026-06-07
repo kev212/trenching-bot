@@ -141,6 +141,62 @@ def test_position_monitor_fires_alert_as_task():
         "should define a safe wrapper that swallows exceptions"
 
 
+def test_safe_send_alert_does_not_access_local_vars():
+    """Regression: the original cycle-3 edit accidentally placed the final
+    `return {...}` block inside `_safe_send_alert` (which references
+    `current_price_usd` from `_process_position`'s scope). That produced
+    `NameError: name 'current_price_usd' is not defined` at runtime.
+
+    This test guards against re-introducing that mistake by parsing the
+    AST and verifying:
+      1. `_process_position` returns a dict with `current_price` key
+      2. `_safe_send_alert` does NOT contain any Name references to
+         `_process_position`'s locals (current_price_usd, entry, peak,
+         pnl_sol, pnl_usd, pnl_pct, held_so_far, last_reason)
+    """
+    import ast
+    from tracking import position_monitor as pm
+
+    with open(pm.__file__) as f:
+        src = f.read()
+    tree = ast.parse(src)
+
+    # Locate the two functions
+    fns = {n.name: n for n in tree.body
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert "_process_position" in fns
+    assert "_safe_send_alert" in fns
+
+    # Collect Name ids referenced in _safe_send_alert body
+    local_names = {"current_price_usd", "entry", "peak", "pnl_sol",
+                   "pnl_usd", "pnl_pct", "held_so_far", "last_reason",
+                   "exit_msg", "position", "executor", "position_manager",
+                   "is_paper", "stop_loss_pct", "tp1_mult", "tp2_mult",
+                   "extreme_tp_mult", "tp1_pct", "trailing_pct",
+                   "min_hold_seconds", "time_limit", "sol_usd_now",
+                   "pos_lock", "entry_sol", "entry_tokens"}
+
+    used_locals = set()
+    for node in ast.walk(fns["_safe_send_alert"]):
+        if isinstance(node, ast.Name):
+            used_locals.add(node.id)
+
+    leaked = used_locals & local_names
+    assert not leaked, \
+        f"_safe_send_alert must NOT reference _process_position locals: {leaked}"
+
+    # Verify _process_position has a return statement with dict literal
+    has_return_dict = False
+    for node in ast.walk(fns["_process_position"]):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+            keys = [k.value for k in node.value.keys if isinstance(k, ast.Constant)]
+            if "current_price" in keys:
+                has_return_dict = True
+                break
+    assert has_return_dict, \
+        "_process_position must return a dict with 'current_price' key"
+
+
 # --- Fix #4: per-step timeouts in twitter community scrape -----------------
 
 

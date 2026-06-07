@@ -229,6 +229,15 @@ async def _process_position(
     except Exception as e:
         logger.error(f"Exit alert format/schedule failed: {e}")
 
+    return {
+        "triggered": True,
+        "current_price": current_price_usd,
+        "entry": entry,
+        "peak": peak,
+        "held_so_far": held_so_far,
+        "last_reason": last_reason,
+    }
+
 
 async def _safe_send_alert(text: str) -> None:
     """Best-effort send. Logs failures but never raises — keeps the
@@ -238,15 +247,6 @@ async def _safe_send_alert(text: str) -> None:
         await dispatcher.send_alert(text)
     except Exception as e:
         logger.error(f"Exit alert send failed: {e}")
-
-    return {
-        "triggered": True,
-        "current_price": current_price_usd,
-        "entry": entry,
-        "peak": peak,
-        "held_so_far": held_so_far,
-        "last_reason": last_reason,
-    }
 
 
 async def position_monitor(state, db, position_manager: PositionManager,
