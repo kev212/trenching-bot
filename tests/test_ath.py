@@ -43,6 +43,27 @@ def test_ath_filter_fails_deep_dd():
     print(f"✓ deep_dd: passed={result['passed']}, note='{result['note']}'")
 
 
+def test_ath_filter_fails_fetch_failed():
+    """ATH fetch failed (drawdown=-999) → fails conservatively."""
+    token = make_token(ath_price=0.0, drawdown_from_ath_pct=-999.0)
+    result = _filter_ath_drawdown(token, {"enabled": True, "max_drawdown_pct": -50.0})
+    assert result["passed"] is False
+    assert result["drawdown_pct"] == -999.0
+    print(f"✓ fetch_failed: passed={result['passed']}, note='{result['note']}'")
+
+
+def test_count_passed_with_ath_fetch_failed():
+    """count_passed_filters counts ath_drawdown as failure at -999."""
+    token = make_token(ath_price=0.0, drawdown_from_ath_pct=-999.0)
+    fv = run_all_filters(token, {
+        "ath_drawdown": {"enabled": True, "max_drawdown_pct": -50.0}
+    })
+    passed_count, total_count, failures = count_passed_filters(fv)
+    assert "ath_drawdown" in failures, \
+        f"ath_drawdown should be in failures at -999, got failures={failures}"
+    print(f"✓ count_passed_fetch_failed: failures={failures}")
+
+
 def test_ath_filter_disabled():
     """Disabled filter → always passes, marked as disabled."""
     token = make_token(ath_price=0.001, drawdown_from_ath_pct=-90.0)

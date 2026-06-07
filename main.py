@@ -755,13 +755,17 @@ class TrenchingBot:
 
         # Phase B: compute drawdown from ATH (0 if no ATH data — fresh tokens)
         ath_price_val = ath_data.get("ath_price", 0.0) if ath_data else 0.0
+        ath_fetch_failed = isinstance(ath_r, Exception)
         if ath_price_val > 0 and current_price > 0:
             drawdown = (current_price - ath_price_val) / ath_price_val * 100
+        elif ath_fetch_failed:
+            drawdown = -999.0  # ATH fetch gagal — conservatively block
         else:
-            drawdown = 0.0
+            drawdown = 0.0  # Fresh token, no ATH yet
         logger.info(
             f"[ATH] {symbol} ({address[:8]}): drawdown={drawdown:.1f}%, "
-            f"ath=${ath_price_val:.8f}, current=${current_price:.8f}, candles={ath_data.get('candles_checked', 0) if ath_data else 0}"
+            f"ath=${ath_price_val:.8f}, current=${current_price:.8f}, "
+            f"failed={ath_fetch_failed}, candles={ath_data.get('candles_checked', 0) if ath_data else 0}"
         )
 
         # Calculate holder stats from holders list
