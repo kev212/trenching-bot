@@ -162,15 +162,33 @@ class JupiterClient:
         Position monitor calls this 4×/sec — a single 502 should not silently
         skip a price check. Returns last non-zero price seen, or 0 after
         max_attempts.
+
+        Fix #5 (June 2026 audit cycle 3): total wall time is bounded by
+        `RETRY_TOTAL_TIMEOUT_S` — prevents a hung request from holding
+        a worker for 30s+ (worst case before: 3 × 10s + 0.6s sleep).
         """
-        for attempt in range(1, max_attempts + 1):
-            price = await self.get_token_price_in_sol(token_mint)
-            if price > 0:
-                return price
-            if attempt < max_attempts:
-                import asyncio as _aio
-                await _aio.sleep(0.3 * attempt)
-        return 0.0
+        from config import settings as _settings  # avoid circular at import
+        deadline = _settings.jupiter_retry_total_timeout_s if hasattr(
+            _settings, "jupiter_retry_total_timeout_s"
+        ) else 8.0
+
+        async def _runner():
+            for attempt in range(1, max_attempts + 1):
+                price = await self.get_token_price_in_sol(token_mint)
+                if price > 0:
+                    return price
+                if attempt < max_attempts:
+                    import asyncio as _aio
+                    await _aio.sleep(0.3 * attempt)
+            return 0.0
+
+        try:
+            return await asyncio.wait_for(_runner(), timeout=deadline)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[JUP] price retry timed out for {token_mint[:8]} after {deadline}s"
+            )
+            return 0.0
 
     def price_impact_pct(self, quote: dict) -> float:
         """Extract price impact as percentage (0-100)."""

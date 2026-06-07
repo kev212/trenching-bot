@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     confidence_auto_execute: float = 0.60
     enable_trenches_poller: bool = True
 
+    # June 2026 audit cycle 3 — anti-freeze tuning
+    jupiter_retry_total_timeout_s: float = 8.0
+    retry_scheduler_lock_budget: int = 50  # max addresses processed per lock hold
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

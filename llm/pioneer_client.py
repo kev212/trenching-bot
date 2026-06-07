@@ -7,8 +7,17 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-LLM_TIMEOUT = 60
+LLM_TIMEOUT = 30
 BATCH_TIMEOUT = 90
+
+# Anti-freeze tuning (June 2026 audit cycle 3)
+# Worst-case per analyze_token call: (timeout + 2^attempt) × retries + sleep
+# Before: 4 attempts × 60s + 7s = 247s per token — 2 workers could each
+#   be stuck 4 min on a MiMo API outage.
+# After:  2 attempts × 30s + 1s = 61s per token, capped further by the
+#   semaphore wait_for (Fix #2) at +5s.
+DEFAULT_RETRIES = 1
+SEMAPHORE_WAIT_TIMEOUT = 5.0  # give up acquiring the LLM slot after 5s
 
 # Circuit breaker tuning
 CB_THRESHOLD = 5        # failures to open the circuit
@@ -95,7 +104,8 @@ class PioneerLLMClient:
         return self._cb
 
     async def analyze_token(
-        self, system_prompt: str, user_prompt: str, temperature: float = 0.3, retries: int = 3
+        self, system_prompt: str, user_prompt: str, temperature: float = 0.3,
+        retries: int = DEFAULT_RETRIES,
     ) -> dict:
         start = time.time()
         # Circuit breaker check: return None immediately when open.
@@ -105,7 +115,20 @@ class PioneerLLMClient:
 
         for attempt in range(retries + 1):
             try:
-                async with self._semaphore:
+                # Fix #2: cap semaphore wait at 5s. If 4 LLM slots are all
+                # busy with slow requests, don't queue — return None so the
+                # worker can move on to the next token.
+                try:
+                    await asyncio.wait_for(
+                        self._semaphore.acquire(), timeout=SEMAPHORE_WAIT_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"LLM semaphore saturated ({SEMAPHORE_WAIT_TIMEOUT}s timeout), "
+                        f"skipping token to prevent worker stall"
+                    )
+                    return None
+                try:
                     response = await asyncio.wait_for(
                         self.client.chat.completions.create(
                             model=self.model,
@@ -119,6 +142,8 @@ class PioneerLLMClient:
                         ),
                         timeout=LLM_TIMEOUT,
                     )
+                finally:
+                    self._semaphore.release()
 
                 content = response.choices[0].message.content
                 elapsed_ms = int((time.time() - start) * 1000)

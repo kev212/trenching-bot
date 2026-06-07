@@ -220,7 +220,22 @@ async def _process_position(
             sold_tokens=sold_tokens,
             remaining_tokens=position.get("current_amount_token", 0) or 0,
         )
-        await dispatcher.send_alert(exit_msg)
+        # Fix #3: fire-and-forget the alert. Previously `await` here would
+        # block the monitor tick up to 37s if Telegram was slow (3 retries
+        # × 10s timeout + 1+2s backoff), causing SL/TP checks to be missed
+        # during a slow-Telegram episode. The dispatcher already has its
+        # own internal retry/backoff, so we don't need to wrap it.
+        asyncio.create_task(_safe_send_alert(exit_msg))
+    except Exception as e:
+        logger.error(f"Exit alert format/schedule failed: {e}")
+
+
+async def _safe_send_alert(text: str) -> None:
+    """Best-effort send. Logs failures but never raises — keeps the
+    background task slot clean and prevents 'Task exception was never
+    retrieved' warnings."""
+    try:
+        await dispatcher.send_alert(text)
     except Exception as e:
         logger.error(f"Exit alert send failed: {e}")
 

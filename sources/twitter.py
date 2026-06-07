@@ -179,15 +179,23 @@ class TwitterClient:
                 )
                 page = await ctx.new_page()
                 url = f"https://x.com/i/communities/{community_id}"
-                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                await page.wait_for_timeout(5000)
+                # Fix #4: per-step timeouts. Each Playwright op can hang on
+                # X.com's anti-bot challenge; without these, the outer 45s
+                # timeout in _social_analysis could be eaten by a single
+                # stuck step. Total worst case: 5+3+3+3+3 = 17s, leaving
+                # the 45s outer cap as a real safety net.
+                await asyncio.wait_for(
+                    page.goto(url, wait_until="domcontentloaded", timeout=15000),
+                    timeout=18.0,
+                )
+                await asyncio.wait_for(page.wait_for_timeout(3000), timeout=5.0)
 
                 # Click About tab
                 about = page.get_by_text("About", exact=True)
-                await about.click()
-                await page.wait_for_timeout(3000)
+                await asyncio.wait_for(about.click(), timeout=5.0)
+                await asyncio.wait_for(page.wait_for_timeout(2000), timeout=4.0)
 
-                text = await page.inner_text("body")
+                text = await asyncio.wait_for(page.inner_text("body"), timeout=5.0)
 
                 # Extract creator from "Created ... by @handle"
                 match = re.search(r"by\s+@(\w+)", text)

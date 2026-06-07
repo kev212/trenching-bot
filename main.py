@@ -469,11 +469,18 @@ class TrenchingBot:
         Tokens with permanent filter failures (min_total_fee, market_cap bounds,
         min_holders) are dead-lettered immediately — they'll never pass.
         Respects queue backpressure: pauses re-queue when queue is deep.
+
+        Fix #6 (June 2026 audit cycle 3): the inner work is chunked by
+        `lock_budget` addresses per lock-hold so a retry_queue with
+        thousands of entries can't starve all other SharedState consumers
+        (workers calling is_duplicate/mark_processed/claim) for several
+        seconds at a time.
         """
         from storage.cache import get_retry_delay, MAX_RETRIES
         from analysis.filters import is_permanent_failure
         logger.info("Retry scheduler started")
         base_interval = 30
+        lock_budget = settings.retry_scheduler_lock_budget
 
         while True:
             try:
@@ -481,7 +488,6 @@ class TrenchingBot:
                 requeued = 0
                 skipped = 0
                 dead_letter = 0
-                expired = []
 
                 qsize = self.queue.qsize()
                 if qsize >= 300:
@@ -499,56 +505,81 @@ class TrenchingBot:
                 in_flight_snapshot = await self.state.snapshot_in_flight()
                 processed_snapshot = await self.state.snapshot_processed()
 
-                async with self.state._lock:
-                    for addr, info in list(self.state.retry_queue.items()):
-                        if info["retries"] >= MAX_RETRIES:
-                            dead_letter += 1
-                            expired.append(addr)
-                            continue
-                        if is_permanent_failure(info.get("failed_filters", [])):
-                            dead_letter += 1
-                            expired.append(addr)
-                            dsym = info.get("symbol", "?")
-                            logger.info(f"[DEAD-LETTER] {dsym} ({addr[:8]}): permanent filter, skipping retry")
-                            continue
-                        # A2: check duplicate from snapshot (atomic enough — cache is append-mostly)
-                        if addr in processed_snapshot:
-                            expired.append(addr)
-                            continue
-                        delay = get_retry_delay(info["retries"])
-                        if now - info["timestamp"] < delay:
-                            continue
-                        # A1: use snapshot of in_flight (consistent with the lock we hold)
-                        if addr in in_flight_snapshot:
-                            skipped += 1
-                            continue
-                        if qsize >= 200:
-                            skipped += 1
-                            continue
-                        symbol = info.get("symbol", "?")
-                        name = info.get("name", "?")
-                        try:
-                            self.queue.put_nowait({
-                                "address": addr,
-                                "symbol": symbol,
-                                "name": name,
-                                "_retry": True,
-                                "retries": info["retries"],
-                            })
-                            requeued += 1
-                        except asyncio.QueueFull:
-                            skipped += 1
-
-                    for addr in expired:
-                        dead = self.state.retry_queue.pop(addr, None)
-                        if dead and dead.get("retries", 0) >= MAX_RETRIES:
-                            dsym = dead.get("symbol", "?")
-                            logger.info(f"[DEAD-LETTER] {dsym} ({addr[:8]}): exhausted {MAX_RETRIES} retries")
+                # Fix #6: chunked lock-hold. Process up to `lock_budget`
+                # addresses per lock acquisition so other SharedState
+                # consumers (workers) don't starve while we sweep a
+                # large retry_queue.
+                remaining = True
+                while remaining:
+                    async with self.state._lock:
+                        # Take a slice — full snapshot already taken above.
+                        items = list(self.state.retry_queue.items())[:lock_budget]
+                        if not items:
+                            remaining = False
+                            break
+                        local_requeued = 0
+                        local_skipped = 0
+                        local_dead = 0
+                        expired_local = []
+                        for addr, info in items:
+                            if info["retries"] >= MAX_RETRIES:
+                                local_dead += 1
+                                expired_local.append(addr)
+                                continue
+                            if is_permanent_failure(info.get("failed_filters", [])):
+                                local_dead += 1
+                                expired_local.append(addr)
+                                dsym = info.get("symbol", "?")
+                                logger.info(
+                                    f"[DEAD-LETTER] {dsym} ({addr[:8]}): "
+                                    "permanent filter, skipping retry"
+                                )
+                                continue
+                            if addr in processed_snapshot:
+                                expired_local.append(addr)
+                                continue
+                            delay = get_retry_delay(info["retries"])
+                            if now - info["timestamp"] < delay:
+                                continue
+                            if addr in in_flight_snapshot:
+                                local_skipped += 1
+                                continue
+                            if qsize + local_requeued >= 200:
+                                local_skipped += 1
+                                continue
+                            symbol = info.get("symbol", "?")
+                            name = info.get("name", "?")
+                            try:
+                                self.queue.put_nowait({
+                                    "address": addr,
+                                    "symbol": symbol,
+                                    "name": name,
+                                    "_retry": True,
+                                    "retries": info["retries"],
+                                })
+                                local_requeued += 1
+                            except asyncio.QueueFull:
+                                local_skipped += 1
+                        for addr in expired_local:
+                            dead = self.state.retry_queue.pop(addr, None)
+                            if dead and dead.get("retries", 0) >= MAX_RETRIES:
+                                dsym = dead.get("symbol", "?")
+                                logger.info(
+                                    f"[DEAD-LETTER] {dsym} ({addr[:8]}): "
+                                    f"exhausted {MAX_RETRIES} retries"
+                                )
+                        requeued += local_requeued
+                        skipped += local_skipped
+                        dead_letter += local_dead
+                        # If we got less than a full budget, queue is done
+                        # (or nearly so) for this scan.
+                        if len(items) < lock_budget:
+                            remaining = False
 
                 if requeued > 0 or dead_letter > 0 or skipped > 0:
                     logger.info(
-                        f"[RETRY-SCHED] requeued={requeued} skipped={skipped} dead={dead_letter} "
-                        f"queue={qsize}"
+                        f"[RETRY-SCHED] requeued={requeued} skipped={skipped} "
+                        f"dead={dead_letter} queue={qsize}"
                     )
 
                 await self.state.cleanup_retry_queue()
