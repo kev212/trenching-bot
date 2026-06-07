@@ -2,6 +2,28 @@ from datetime import datetime, timezone
 from analysis.models import CallRecord, LLMDecision, TokenData
 
 
+def _escape_markdown(text: str) -> str:
+    """Escape Telegram Markdown v1 reserved characters.
+
+    Telegram Markdown v1 treats these as formatting markers and rejects
+    messages with unmatched markers (HTTP 400 "can't parse entities").
+    User-controlled fields like LLM reasoning may contain `*`, `_`,
+    backticks, or `[`/`]` mid-sentence — escape them so the whole message
+    parses cleanly.
+    """
+    if not text:
+        return ""
+    return (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace("*", "\\*")
+        .replace("_", "\\_")
+        .replace("`", "\\`")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+    )
+
+
 def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict,
                   social_score: float = 0.0) -> str:
     verdict_emoji = {"APE": "🔥", "WATCH": "👀", "SKIP": "⛔"}.get(decision.verdict.value, "❓")
@@ -17,7 +39,7 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict,
     override_note = ""
     if hasattr(decision, "_llm_original_verdict") and decision._llm_original_verdict and \
             decision._llm_original_verdict != decision.verdict.value:
-        override_note = f"  (LLM said: {decision._llm_original_verdict}, overridden by scoring)\n"
+        override_note = f"  (LLM said: {_escape_markdown(decision._llm_original_verdict)}, overridden by scoring)\n"
 
     filters_text = ""
     filter_names = {
@@ -52,16 +74,16 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict,
         social_text = "\n🐦 Social Analysis:\n"
         if token.twitter_username:
             verified = "✓" if token.twitter_verified else ""
-            social_text += f"  • Twitter: @{token.twitter_username} ({token.twitter_followers:,} followers {verified})\n"
+            social_text += f"  • Twitter: @{_escape_markdown(token.twitter_username)} ({token.twitter_followers:,} followers {verified})\n"
         if token.website_url:
-            social_text += f"  • Website: {token.website_url}\n"
+            social_text += f"  • Website: {_escape_markdown(token.website_url)}\n"
         if token.has_community:
             social_text += f"  • Community: Yes\n"
         if token.influencer_mentions:
             for inf in token.influencer_mentions[:3]:
-                social_text += f"  • 🔥 @{inf['handle']} tweeted ({inf['likes']:,} likes)\n"
+                social_text += f"  • 🔥 @{_escape_markdown(inf['handle'])} tweeted ({inf['likes']:,} likes)\n"
         if token.project_type:
-            social_text += f"  • Project: {token.project_type}\n"
+            social_text += f"  • Project: {_escape_markdown(token.project_type)}\n"
 
     data_score = decision.score
     final_score = (social_score * 0.5) + (data_score * 0.5)
@@ -73,7 +95,7 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict,
   Final Score:       {final_score:.1f}/100
   Verdict:           {decision.verdict.value} {verdict_emoji}{override_note}"""
 
-    msg = f"""{verdict_emoji} {decision.verdict.value} ALERT — ${token.symbol or token.name}
+    msg = f"""{verdict_emoji} {decision.verdict.value} ALERT — ${_escape_markdown(token.symbol or token.name)}
 
 {scoring_text}
 🏷️ Contract: {ca_short}
@@ -83,9 +105,9 @@ def format_alert(token: TokenData, decision: LLMDecision, fv_dict: dict,
 👥 Holders: {token.holders_count}
 {social_text}
 🤖 LLM Analysis:
-"{decision.reasoning}"
+"{_escape_markdown(decision.reasoning)}"
 
-🔑 Key Factors: {', '.join(decision.key_factors) if decision.key_factors else 'N/A'}
+🔑 Key Factors: {_escape_markdown(', '.join(decision.key_factors)) if decision.key_factors else 'N/A'}
 
 📋 Filters:
 {filters_text}
@@ -115,12 +137,12 @@ def format_recap(recap: dict) -> str:
         gain_str = f"{call.max_gain:.2f}x"
         gain_pct = f"+{(call.max_gain - 1) * 100:.0f}%" if call.max_gain >= 1.0 else f"{(call.max_gain - 1) * 100:.0f}%"
 
-        lines.append(f"{emoji} {status} — ${call.token_symbol} (Score: {call.llm_score})")
+        lines.append(f"{emoji} {status} — ${_escape_markdown(call.token_symbol)} (Score: {call.llm_score})")
         lines.append(f"  Entry: ${call.entry_price:.6f} | Max: {gain_str} ({gain_pct})")
 
         reason = recap.get("loss_reasons", {}).get(call.token_symbol, "")
         if status == "LOSS" and reason:
-            lines.append(f"  💡 LLM: \"{reason}\"")
+            lines.append(f"  💡 LLM: \"{_escape_markdown(reason)}\"")
 
         lines.append("")
 
@@ -168,7 +190,7 @@ def format_exit_alert(symbol: str, address: str, entry_price: float,
     reason_emoji = reason_emojis.get(reason, "🔔")
 
     lines = [
-        f"{reason_emoji} EXIT: {reason} {symbol}{paper_tag}",
+        f"{reason_emoji} EXIT: {reason} {_escape_markdown(symbol)}{paper_tag}",
         "",
     ]
 
@@ -200,19 +222,19 @@ def format_trade_alert(position, side: str) -> str:
     paper_tag = " [PAPER]" if getattr(position, "paper", True) else " [LIVE]"
 
     lines = [
-        f"{emoji} TRADE: {side} {position.token_symbol}{paper_tag}",
+        f"{emoji} TRADE: {side} {_escape_markdown(position.token_symbol)}{paper_tag}",
         "",
-        f"  Token: {position.token_symbol} ({position.token_address[:8]}...)",
+        f"  Token: {_escape_markdown(position.token_symbol)} ({position.token_address[:8]}...)",
         f"  Size: {position.entry_amount_sol:.4f} SOL",
         f"  Tokens: {position.entry_amount_token:.2f}",
         f"  Entry: ${position.entry_price:.10f} USD",
     ]
 
     if side == "BUY":
-        lines.append(f"  TX: `{position.entry_tx_sig[:16]}...`")
+        lines.append(f"  TX: `{_escape_markdown(position.entry_tx_sig[:16])}...`")
     else:
         exit_reason = getattr(position, "exit_reason", "") or ""
-        lines.append(f"  Exit: ${position.exit_price:.10f} USD ({exit_reason})")
+        lines.append(f"  Exit: ${position.exit_price:.10f} USD ({_escape_markdown(exit_reason)})")
         pnl_emoji = "📈" if pnl_sol >= 0 else "📉"
         lines.append(f"  PnL: {pnl_emoji} {pnl_sol:+.4f} SOL (${pnl_usd:+.2f} USD, {pnl_pct:+.1f}%)")
 

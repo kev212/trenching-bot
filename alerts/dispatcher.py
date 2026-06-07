@@ -8,6 +8,16 @@ logger = logging.getLogger(__name__)
 TELEGRAM_API = "https://api.telegram.org/bot{token}"
 MAX_MESSAGE_LENGTH = 4096
 
+# HTTP 400 with "can't parse entities" -> Markdown parse failure (LLM output
+# contained unmatched *, _, backtick, or [). Retry as plain text.
+_PARSE_ERROR_MARKERS = ("can't parse entities", "can't find end of the entity")
+
+
+def _is_parse_error(status: int, body: str) -> bool:
+    if status != 400:
+        return False
+    return any(marker in body for marker in _PARSE_ERROR_MARKERS)
+
 
 class TelegramDispatcher:
     def __init__(self):
@@ -21,6 +31,20 @@ class TelegramDispatcher:
             self._session = aiohttp.ClientSession()
         return self._session
 
+    async def _post_once(self, text: str, parse_mode: str) -> tuple[bool, int, str]:
+        """Single send attempt. Returns (ok, status, body)."""
+        session = await self._get_session()
+        url = f"{TELEGRAM_API.format(token=self.token)}/sendMessage"
+        payload = {
+            "chat_id": self.chat_id,
+            "text": text[:MAX_MESSAGE_LENGTH],
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            body = await resp.text()
+            return (resp.status == 200, resp.status, body)
+
     async def send_message(self, text: str, parse_mode: str = "Markdown") -> bool:
         # C3 fix: retry transient failures up to 3x with exponential backoff
         # (1s, 2s, 4s). Previously a single network blip silently dropped
@@ -28,32 +52,40 @@ class TelegramDispatcher:
         # C6 fix: default parse_mode = "Markdown" since all formatter output
         # is Markdown-formatted. Telegram falls back to plain text if the
         # message has no Markdown markers, so this is safe.
+        # MD-parse fix: on HTTP 400 "can't parse entities", retry ONCE as
+        # plain text instead of dropping. The formatter already escapes
+        # known user-controlled fields, but a stray entity from upstream
+        # data (e.g. LLM response) can still slip through.
         last_err = None
+        parse_fallback_used = False
         for attempt in range(3):
             async with self._send_lock:
                 try:
-                    session = await self._get_session()
-                    url = f"{TELEGRAM_API.format(token=self.token)}/sendMessage"
+                    ok, status, body = await self._post_once(text, parse_mode)
+                    if ok:
+                        if attempt > 0:
+                            logger.info(f"Telegram message sent on retry {attempt}")
+                        else:
+                            logger.debug("Telegram message sent")
+                        return True
 
-                    payload = {
-                        "chat_id": self.chat_id,
-                        "text": text[:MAX_MESSAGE_LENGTH],
-                    }
-                    if parse_mode:
-                        payload["parse_mode"] = parse_mode
+                    last_err = f"HTTP {status}: {body[:200]}"
+                    logger.warning(
+                        f"Telegram send failed (attempt {attempt+1}/3): {last_err}"
+                    )
 
-                    async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        if resp.status == 200:
-                            if attempt > 0:
-                                logger.info(f"Telegram message sent on retry {attempt}")
-                            else:
-                                logger.debug("Telegram message sent")
-                            return True
-                        body = await resp.text()
-                        last_err = f"HTTP {resp.status}: {body[:200]}"
+                    # One-shot fallback: Markdown parse error -> retry plain text.
+                    if (
+                        not parse_fallback_used
+                        and parse_mode
+                        and _is_parse_error(status, body)
+                    ):
                         logger.warning(
-                            f"Telegram send failed (attempt {attempt+1}/3): {last_err}"
+                            "Telegram Markdown parse error — retrying as plain text"
                         )
+                        parse_mode = ""
+                        parse_fallback_used = True
+                        continue  # don't count this as a backoff retry
                 except Exception as e:
                     last_err = str(e)
                     logger.warning(
