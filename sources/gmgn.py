@@ -15,6 +15,14 @@ BASE_URL = "https://openapi.gmgn.ai"
 GMGN_TIMEOUT = 15
 GMGN_GATHER_TIMEOUT = 45
 
+# Backoff durations (Charon-equivalent)
+GMGN_BACKOFF_429_S = 60
+GMGN_BACKOFF_403_S = 600
+GMGN_BACKOFF_CLOUDFLARE_S = 1800
+
+# Pacing (Charon default: 2500ms between requests)
+GMGN_DEFAULT_REQUEST_DELAY_MS = 2500
+
 
 class GMGNClient:
     def __init__(self, api_key: str, proxy: str = "", rate_limiter=None):
@@ -28,6 +36,13 @@ class GMGNClient:
         # running event loop on Python 3.9/3.10, and tests construct
         # GMGNClient outside the loop. Created on first .start() call.
         self._session_lock: Optional[asyncio.Lock] = None
+        # Backoff state (Item #2)
+        self._backoff_until: float = 0.0
+        self._backoff_reason: str = ""
+        self._last_retry_after: int = 30
+        # Pacing state (Item #4) — serialize requests + 2500ms minimum interval
+        self._pace_lock: Optional[asyncio.Lock] = None
+        self._last_request_time: float = 0.0
         if self.proxy:
             logger.warning(f"GMGN proxy: {self.proxy[:50]}...")
         else:
@@ -37,6 +52,26 @@ class GMGNClient:
         if self._session_lock is None:
             self._session_lock = asyncio.Lock()
         return self._session_lock
+
+    def _ensure_pace_lock(self) -> asyncio.Lock:
+        """Get-or-create the pacing lock (lazy, like _session_lock)."""
+        if self._pace_lock is None:
+            self._pace_lock = asyncio.Lock()
+        return self._pace_lock
+
+    async def _pace_request(self) -> None:
+        """Serialize requests via lock + sleep to enforce 2500ms min interval.
+
+        Charon's `paceGmgnRequest` pattern. Two callers cannot run concurrently
+        (lock) and the second one waits until 2500ms after the first finished.
+        """
+        async with self._ensure_pace_lock():
+            now = time.time()
+            elapsed_ms = (now - self._last_request_time) * 1000.0
+            if elapsed_ms < GMGN_DEFAULT_REQUEST_DELAY_MS:
+                wait_s = (GMGN_DEFAULT_REQUEST_DELAY_MS - elapsed_ms) / 1000.0
+                await asyncio.sleep(wait_s)
+            self._last_request_time = time.time()
 
     async def start(self):
         """Eagerly initialize HTTP session. Call once at bot startup."""
@@ -75,10 +110,57 @@ class GMGNClient:
             return {"https": self.proxy, "http": self.proxy}
         return {}
 
+    def _backoff_active(self) -> bool:
+        return time.time() < self._backoff_until
+
+    def _set_backoff(self, status: int, body: str = "", retry_after: int = None) -> None:
+        """Set GMGN backoff duration based on HTTP status / response.
+
+        Charon-equivalent:
+        - Cloudflare challenge (body contains 'cf_chl' or 'Just a moment'): 30 min
+        - 429: now + retry_after (cap 60s) OR 30s default
+        - 403: now + 10 min
+        """
+        is_cloudflare = (
+            "challenge-platform" in body
+            or "cf_chl" in body
+            or "<title>Just a moment" in body
+        )
+        if is_cloudflare:
+            self._backoff_until = time.time() + GMGN_BACKOFF_CLOUDFLARE_S
+            self._backoff_reason = "cloudflare (30 min)"
+        elif status == 429:
+            delay = min(60, retry_after if retry_after else GMGN_BACKOFF_429_S)
+            self._backoff_until = time.time() + delay
+            self._backoff_reason = f"429 ({delay}s)"
+        elif status == 403:
+            self._backoff_until = time.time() + GMGN_BACKOFF_403_S
+            self._backoff_reason = "403 (10 min)"
+
+        if self._backoff_until > time.time():
+            logger.warning(
+                f"[GMGN] backoff until {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self._backoff_until))} "
+                f"reason={self._backoff_reason}"
+            )
+
+    def _extract_retry_after(self, resp) -> int:
+        """Parse Retry-After header (seconds). Default to 30s on missing/invalid."""
+        try:
+            ra = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
+            if ra:
+                return int(ra)
+        except (ValueError, TypeError, AttributeError):
+            pass
+        return 30
+
     async def _get(self, path: str, params: dict = None) -> dict:
+        if self._backoff_active():
+            logger.debug(f"GMGN GET {path} skipped (backoff: {self._backoff_reason})")
+            return {}
         try:
             if self.rate_limiter:
                 await self.rate_limiter.acquire(1)
+            await self._pace_request()
             query = {**(params or {}), **self._auth_params()}
             session = await self._get_session()
             resp = await asyncio.wait_for(
@@ -92,7 +174,11 @@ class GMGNClient:
                 timeout=GMGN_TIMEOUT + 5,
             )
             if resp.status_code != 200:
-                logger.warning(f"GMGN GET {path}: HTTP {resp.status_code} - {resp.text[:200]}")
+                body = (resp.text or "")[:500]
+                if resp.status_code in (429, 403):
+                    retry_after = self._extract_retry_after(resp)
+                    self._set_backoff(resp.status_code, body, retry_after)
+                logger.warning(f"GMGN GET {path}: HTTP {resp.status_code} - {body[:200]}")
                 return {}
             data = resp.json()
             if data.get("code") != 0:
@@ -110,9 +196,13 @@ class GMGNClient:
             return {}
 
     async def _post(self, path: str, query: dict = None, body: dict = None) -> dict:
+        if self._backoff_active():
+            logger.debug(f"GMGN POST {path} skipped (backoff: {self._backoff_reason})")
+            return {}
         try:
             if self.rate_limiter:
                 await self.rate_limiter.acquire(1)
+            await self._pace_request()
             auth = self._auth_params()
             full_query = {**(query or {}), **auth}
             session = await self._get_session()
@@ -128,7 +218,11 @@ class GMGNClient:
                 timeout=GMGN_TIMEOUT + 5,
             )
             if resp.status_code != 200:
-                logger.warning(f"GMGN POST {path}: HTTP {resp.status_code} - {resp.text[:300]}")
+                body_text = (resp.text or "")[:500]
+                if resp.status_code in (429, 403):
+                    retry_after = self._extract_retry_after(resp)
+                    self._set_backoff(resp.status_code, body_text, retry_after)
+                logger.warning(f"GMGN POST {path}: HTTP {resp.status_code} - {body_text[:300]}")
                 return {}
             data = resp.json()
             if data.get("code") != 0:

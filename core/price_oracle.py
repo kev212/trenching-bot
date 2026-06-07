@@ -23,12 +23,19 @@ import aiohttp
 logger = logging.getLogger("price_oracle")
 
 DEXSCREENER_PRICE = "https://api.dexscreener.com/latest/dex/tokens"
-JUPITER_PRICE = "https://price.jup.ag/v6/price"
+JUPITER_PRICE_V3 = "https://lite-api.jup.ag/price/v3"          # primary (newer, more reliable)
+JUPITER_PRICE = "https://price.jup.ag/v6/price"                  # fallback
 GMGN_PRICE = "https://openapi.gmgn.ai"
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 CACHE_TTL = 3.0
-SOL_PRICE_CACHE_TTL = 30.0
+SOL_PRICE_CACHE_TTL = 10.0     # was 30.0 — faster recovery from Jupiter hiccups
+SOL_PRICE_TIMEOUT_S = 3.0       # per-source timeout for SOL/USD fetch
+
+# Backoff durations (Charon-equivalent)
+JUPITER_BACKOFF_429_S = 30
+JUPITER_BACKOFF_403_S = 600
+JUPITER_BACKOFF_503_S = 1800
 
 
 class PriceOracle:
@@ -46,6 +53,9 @@ class PriceOracle:
         self._session: Optional[aiohttp.ClientSession] = None
         self._cache: dict = {}  # token_address -> {"ts": float, "price": float (USD)}
         self._sol_price_cache: dict = {}
+        # Jupiter backoff (Item #2)
+        self._jupiter_backoff_until: float = 0.0
+        self._jupiter_backoff_reason: str = ""
 
     def _evict_cache(self):
         if len(self._cache) > self.CACHE_MAX:
@@ -59,6 +69,9 @@ class PriceOracle:
         Pre-warming sol_usd eliminates the race where the first BUY call
         happens before SOL/USD is cached, forcing a fallback path that
         previously could return USD-as-SOL silently.
+
+        Retries 3x with exponential backoff (1s, 2s, 4s) on failure to handle
+        cold-start rate limits / network blips.
         """
         if not self._session or self._session.closed:
             kwargs = {"timeout": aiohttp.ClientTimeout(total=self.timeout)}
@@ -67,14 +80,17 @@ class PriceOracle:
             self._session = aiohttp.ClientSession(**kwargs)
             logger.info("PriceOracle: session initialized")
 
-        try:
-            sol_usd = await self.get_sol_price_usd()
-            if sol_usd > 0:
-                logger.info(f"PriceOracle: pre-warmed SOL/USD = ${sol_usd:.2f}")
-            else:
-                logger.warning("PriceOracle: SOL/USD pre-warm failed (will retry on first call)")
-        except Exception as e:
-            logger.warning(f"PriceOracle: pre-warm error: {e}")
+        for attempt in range(3):
+            try:
+                sol_usd = await self.get_sol_price_usd()
+                if sol_usd > 0:
+                    logger.info(f"PriceOracle: pre-warmed SOL/USD = ${sol_usd:.2f} (attempt {attempt + 1})")
+                    return
+            except Exception as e:
+                logger.warning(f"PriceOracle: pre-warm attempt {attempt + 1} error: {e}")
+            await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s
+
+        logger.warning("PriceOracle: SOL/USD pre-warm failed after 3 attempts (will retry per-call)")
 
     async def close(self) -> None:
         if self._session:
@@ -94,16 +110,30 @@ class PriceOracle:
         if cached and (now - cached["ts"]) < CACHE_TTL:
             return cached["price"]
 
+        # If Jupiter is backed off, skip Jupiter + DexScreener, fall through to GMGN only
+        jupiter_blocked = self._jupiter_backoff_active()
+
         try:
-            prices = await asyncio.wait_for(
-                asyncio.gather(
-                    self._from_dexscreener_usd(token_address),
-                    self._from_jupiter_usd(token_address),
-                    self._from_gmgn_usd(token_address),
-                    return_exceptions=True,
-                ),
-                timeout=8,
-            )
+            if jupiter_blocked:
+                # Skip Jupiter sources, only fetch from GMGN (uses different endpoint)
+                prices = await asyncio.wait_for(
+                    asyncio.gather(
+                        self._from_gmgn_usd(token_address),
+                        return_exceptions=True,
+                    ),
+                    timeout=8,
+                )
+                prices = [0.0, 0.0] + list(prices)  # pad for sources list below
+            else:
+                prices = await asyncio.wait_for(
+                    asyncio.gather(
+                        self._from_dexscreener_usd(token_address),
+                        self._from_jupiter_usd(token_address),
+                        self._from_gmgn_usd(token_address),
+                        return_exceptions=True,
+                    ),
+                    timeout=8,
+                )
         except asyncio.TimeoutError:
             logger.debug(f"[ORACLE] timeout for {token_address[:8]}")
             return cached["price"] if cached else 0.0
@@ -130,39 +160,136 @@ class PriceOracle:
         return median
 
     async def get_sol_price_usd(self) -> float:
-        """Get current SOL price in USD. 30s cache."""
+        """Get current SOL price in USD. 10s cache, 2-tier fallback (v3 → v6).
+
+        Returns 0 only on total failure AND no cached value. If backoff is
+        active, returns stale cache (or 0) without making HTTP calls.
+        """
         now = time.time()
         cached = self._sol_price_cache.get("SOL")
         if cached and (now - cached["ts"]) < SOL_PRICE_CACHE_TTL:
             return cached["price"]
 
-        try:
-            if not self._session:
-                return 0.0
-            async with self._session.get(
-                JUPITER_PRICE, params={"ids": SOL_MINT}
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    entry = data.get("data", {}).get(SOL_MINT)
-                    if entry and "price" in entry:
-                        sol_usd = float(entry["price"])
-                        self._sol_price_cache["SOL"] = {"ts": now, "price": sol_usd}
-                        return sol_usd
-        except Exception as e:
-            logger.debug(f"[ORACLE] SOL USD price error: {e}")
+        # If Jupiter is backed off, return stale cache (don't add to rate-limit pressure)
+        if self._jupiter_backoff_active():
+            if cached:
+                return cached["price"]
+            return 0.0
+
+        sources = [
+            ("jupiter_v3", self._fetch_sol_v3),
+            ("jupiter_v6", self._fetch_sol_v6),
+        ]
+
+        for name, fetch_fn in sources:
+            try:
+                sol_usd = await asyncio.wait_for(fetch_fn(), timeout=SOL_PRICE_TIMEOUT_S)
+                if sol_usd and sol_usd > 0:
+                    self._sol_price_cache["SOL"] = {"ts": now, "price": sol_usd}
+                    logger.debug(f"[SOL-USD] {name} returned ${sol_usd:.2f}")
+                    return sol_usd
+            except Exception as e:
+                logger.debug(f"[SOL-USD] {name} failed: {e}")
+                continue
+
+        # All sources failed
         if cached:
+            logger.debug(f"[SOL-USD] all sources failed, returning stale ${cached['price']:.2f}")
             return cached["price"]
         return 0.0
+
+    async def _fetch_sol_v3(self) -> float:
+        """Jupiter Price API v3 (lite-api). Newer endpoint, more reliable."""
+        if not self._session:
+            return 0.0
+        async with self._session.get(
+            JUPITER_PRICE_V3, params={"ids": SOL_MINT}
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                # v3 format: { "So11...": { "usdPrice": 150.0 } }
+                entry = data.get(SOL_MINT) or data.get("data", {}).get(SOL_MINT)
+                if entry:
+                    usd = entry.get("usdPrice") or entry.get("price")
+                    if usd and float(usd) > 0:
+                        return float(usd)
+            elif resp.status in (429, 403, 503):
+                headers = dict(resp.headers) if resp.headers else {}
+                self._set_jupiter_backoff(resp.status, headers)
+        return 0.0
+
+    async def _fetch_sol_v6(self) -> float:
+        """Jupiter Price API v6. Fallback when v3 is unavailable."""
+        if not self._session:
+            return 0.0
+        async with self._session.get(
+            JUPITER_PRICE, params={"ids": SOL_MINT}
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                entry = data.get("data", {}).get(SOL_MINT)
+                if entry and "price" in entry:
+                    sol_usd = float(entry["price"])
+                    if sol_usd > 0:
+                        return sol_usd
+            elif resp.status in (429, 403, 503):
+                headers = dict(resp.headers) if resp.headers else {}
+                self._set_jupiter_backoff(resp.status, headers)
+        return 0.0
+
+    def _jupiter_backoff_active(self) -> bool:
+        return time.time() < self._jupiter_backoff_until
+
+    def _set_jupiter_backoff(self, status: int, headers: dict = None) -> None:
+        """Set Jupiter backoff duration based on HTTP status.
+
+        Charon-equivalent:
+        - 429: until x-ratelimit-reset header (ms/unix-s/delta-s) or now+30s
+        - 403: now + 10 min
+        - 503: now + 30 min (Cloudflare challenge)
+        """
+        headers = headers or {}
+        if status == 429:
+            reset = 0
+            try:
+                reset = int(headers.get("x-ratelimit-reset", 0) or 0)
+            except (ValueError, TypeError):
+                reset = 0
+            now_s = time.time()
+            if reset > 1_000_000_000_000:   # already ms (year 2001+)
+                until_s = reset / 1000
+            elif reset > 1_000_000_000:     # unix seconds (year 2001+)
+                until_s = reset
+            elif reset > 0:                 # delta seconds from now
+                until_s = now_s + reset
+            else:                           # no/invalid header
+                until_s = now_s + JUPITER_BACKOFF_429_S
+            self._jupiter_backoff_until = max(until_s, now_s + JUPITER_BACKOFF_429_S)
+            self._jupiter_backoff_reason = f"429 (until {int(self._jupiter_backoff_until - time.time())}s)"
+        elif status == 403:
+            self._jupiter_backoff_until = time.time() + JUPITER_BACKOFF_403_S
+            self._jupiter_backoff_reason = "403 (10 min)"
+        elif status == 503:
+            self._jupiter_backoff_until = time.time() + JUPITER_BACKOFF_503_S
+            self._jupiter_backoff_reason = "503 (30 min)"
+
+        if self._jupiter_backoff_until > time.time():
+            logger.warning(
+                f"[ORACLE] Jupiter backoff active: {self._jupiter_backoff_reason}"
+            )
 
     async def _from_dexscreener_usd(self, token_address: str) -> float:
         """DexScreener priceUsd (USD per token)."""
         if not self._session:
             return 0.0
+        if self._jupiter_backoff_active():
+            return 0.0  # shared rate-limit pool with Jupiter
         try:
             url = f"{DEXSCREENER_PRICE}/{token_address}"
             async with self._session.get(url) as resp:
                 if resp.status != 200:
+                    if resp.status in (429, 403, 503):
+                        self._set_jupiter_backoff(resp.status, dict(resp.headers) if resp.headers else {})
                     return 0.0
                 data = await resp.json()
                 pairs = data.get("pairs") or []
@@ -183,11 +310,15 @@ class PriceOracle:
         """Jupiter Price API v6 — returns USD directly."""
         if not self._session:
             return 0.0
+        if self._jupiter_backoff_active():
+            return 0.0
         try:
             async with self._session.get(
                 JUPITER_PRICE, params={"ids": token_address}
             ) as resp:
                 if resp.status != 200:
+                    if resp.status in (429, 403, 503):
+                        self._set_jupiter_backoff(resp.status, dict(resp.headers) if resp.headers else {})
                     return 0.0
                 data = await resp.json()
                 entry = (data.get("data") or {}).get(token_address)

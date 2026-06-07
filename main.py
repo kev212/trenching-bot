@@ -26,6 +26,7 @@ from learning.revert_monitor import revert_monitor
 from alerts.formatter import format_alert, format_trade_alert
 from alerts.dispatcher import dispatcher
 from alerts.bot import bot_handler
+from core.monitoring import FailureTracker
 from utils.logger import setup_logger
 from utils.helpers import RateLimiter
 
@@ -132,6 +133,8 @@ class TrenchingBot:
         self.workers = []
         self.seen_trenches = set()
         self.shutdown_event = asyncio.Event()
+        # Failure trackers for long-running tasks (Item #3)
+        self.trackers: dict[str, FailureTracker] = {}
         # C4 fix: store shutdown task reference to prevent GC
         self._shutdown_task = None
         # Watchdog: track last activity timestamp
@@ -172,6 +175,47 @@ class TrenchingBot:
             f"position_size={self.trading_config.get('position_size_sol')} SOL, "
             f"reserve={self.wallet.RESERVE_SOL if hasattr(self.wallet, 'RESERVE_SOL') else 0.1} SOL"
         )
+
+    async def start(self):
+        logger.info("=" * 50)
+        logger.info("TRENCHING BOT v3 - Starting...")
+        logger.info("=" * 50)
+
+        await self.db.init()
+        await self.state.load_filter_params()
+
+        # C5 fix: eagerly initialize all HTTP sessions to prevent lazy-init race
+        # that can leak AsyncSession instances and exhaust file descriptors.
+        await self.jupiter.start()
+        await self.price_oracle.start()
+        await self.gmgn.start()
+        await self.twitter.start()
+        await self.scraper.start()
+        try:
+            from sources.dexscreener import start_shared_session
+            await start_shared_session()
+        except Exception as e:
+            logger.warning(f"DexScreener eager start failed (non-fatal): {e}")
+
+    def _make_tracker(self, name: str) -> FailureTracker:
+        """Lazy-create a FailureTracker for a long-running task.
+
+        Tracker alerts via Telegram via dispatcher.send_alert after 3
+        consecutive failures, with 5-minute cooldown between alerts.
+        """
+        if name not in self.trackers:
+            async def alert_fn(msg: str):
+                try:
+                    await dispatcher.send_alert(msg)
+                except Exception as e:
+                    logger.error(f"[{name}] telegram alert failed: {e}")
+            self.trackers[name] = FailureTracker(
+                name=name,
+                alert_fn=alert_fn,
+                threshold=3,
+                cooldown_seconds=300.0,
+            )
+        return self.trackers[name]
 
     async def start(self):
         logger.info("=" * 50)
@@ -272,6 +316,7 @@ class TrenchingBot:
         poll_count = 0
         ban_count = 0
         base_delay = 60
+        tracker = self._make_tracker("gmgn_poller")
 
         while True:
             self._update_activity()  # watchdog heartbeat
@@ -332,6 +377,8 @@ class TrenchingBot:
                     seen.clear()
 
                 await asyncio.sleep(delay)
+                # Track success in failure tracker
+                await tracker.run(self._ok_async)
 
             except Exception as e:
                 err_str = str(e).upper()
@@ -340,9 +387,20 @@ class TrenchingBot:
                     wait_time = min(60 * (2 ** ban_count), 600)
                     logger.warning(f"[TRENDING] rate limited (ban #{ban_count}), waiting {wait_time}s...")
                     await asyncio.sleep(wait_time)
+                    # Rate-limit hits also count as failures for alerting
+                    await tracker.run(self._fail_with(e))
                 else:
                     logger.error(f"[TRENDING] poller error: {e}")
                     await asyncio.sleep(base_delay)
+                    await tracker.run(self._fail_with(e))
+
+    async def _ok_async(self):
+        """No-op success coroutine for tracker."""
+        return None
+
+    async def _fail_with(self, exc: Exception):
+        """Re-raise a captured exception for tracker to count."""
+        raise exc
 
     async def _trenches_poller(self):
         if not settings.enable_trenches_poller:
@@ -1365,28 +1423,32 @@ class TrenchingBot:
         WATCHDOG_TIMEOUT = 300  # 5 min
         HEARTBEAT_INTERVAL = 60  # check every 60s
         logger.info(f"Watchdog started (timeout={WATCHDOG_TIMEOUT}s, check={HEARTBEAT_INTERVAL}s)")
+        tracker = self._make_tracker("watchdog")
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
             try:
-                idle = time.monotonic() - self._last_activity
-                in_flight = await self.state.in_flight_count()
-                logger.info(
-                    f"[WATCHDOG] idle={idle:.0f}s in_flight={in_flight} "
-                    f"q={self.queue.qsize()} rq={len(self.state.retry_queue)}"
-                )
-                if idle > WATCHDOG_TIMEOUT and in_flight == 0:
-                    logger.critical(
-                        f"[WATCHDOG] No activity for {idle:.0f}s and no tokens in flight. "
-                        f"Forcing restart via os._exit(1)."
+                async def _do_watchdog_tick():
+                    idle = time.monotonic() - self._last_activity
+                    in_flight = await self.state.in_flight_count()
+                    logger.info(
+                        f"[WATCHDOG] idle={idle:.0f}s in_flight={in_flight} "
+                        f"q={self.queue.qsize()} rq={len(self.state.retry_queue)}"
                     )
-                    import sys
-                    sys.stdout.flush()
-                    sys.stderr.flush()
-                    os._exit(1)
+                    if idle > WATCHDOG_TIMEOUT and in_flight == 0:
+                        logger.critical(
+                            f"[WATCHDOG] No activity for {idle:.0f}s and no tokens in flight. "
+                            f"Forcing restart via os._exit(1)."
+                        )
+                        import sys
+                        sys.stdout.flush()
+                        sys.stderr.flush()
+                        os._exit(1)
+                await tracker.run(_do_watchdog_tick)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Watchdog error: {e}")
+                await tracker.run(self._fail_with(e))
 
     async def _db_stats_loop(self):
         """Phase E2-Alert: log row counts for the 3 new tables every 5 min."""
