@@ -334,15 +334,22 @@ def calculate_weighted_score(fv: FeatureVector, filter_params: dict) -> tuple[fl
 
 
 def _filter_kol_presence(token: TokenData, params: dict) -> dict:
-    """Hard gate: at least N KOL/renowned wallets must be holding."""
-    min_renowned = params.get("min_renowned", 1)
-    passed = token.renowned_wallets >= min_renowned
+    """Hard gate: at least N KOL wallets must be actively holding.
+
+    Uses `kol_still_holding` (checked via get_kol_holders API) instead of
+    `renowned_wallets` (which is a GMGN aggregate stat that includes KOLs
+    who may have already dumped). This way, a KOL must still hold a position
+    for the token to pass the hard gate.
+    """
+    min_holding = params.get("min_holding", 1)
+    passed = token.kol_still_holding >= min_holding
     return {
         "renowned_wallets": token.renowned_wallets,
-        "min_renowned": min_renowned,
+        "kol_still_holding": token.kol_still_holding,
+        "min_holding": min_holding,
         "passed": passed,
         "enabled": params.get("enabled", True),
-        "note": f"KOL wallets: {token.renowned_wallets} (min: {min_renowned})",
+        "note": f"KOL holding: {token.kol_still_holding} (min: {min_holding})",
     }
 
 

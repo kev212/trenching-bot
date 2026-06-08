@@ -280,6 +280,11 @@ class TradeExecutor:
         Returns 0.0 on total failure (do NOT fall back to entry_price — that
         would mask SL exits). Caches price per token_address to avoid
         hammering sources at 4×/sec.
+
+        Uses try/finally to ensure cache (including 0.0) is always written,
+        even when asyncio.wait_for cancels this coroutine in position_monitor.
+        Without this fix, every 250ms tick retries the full 5s timeout because
+        the cancelled coroutine never wrote its 0.0 result to cache.
         """
         import time
         token_address = position.get("token_address", "")
@@ -289,42 +294,42 @@ class TradeExecutor:
             return cached["price"]
 
         price = 0.0
+        try:
+            if self.price_oracle:
+                try:
+                    price = await self.price_oracle.get_price_in_usd(token_address)
+                except Exception as e:
+                    logger.debug(f"[EXEC] oracle paper price error: {e}")
 
-        if self.price_oracle:
-            try:
-                price = await self.price_oracle.get_price_in_usd(token_address)
-            except Exception as e:
-                logger.debug(f"[EXEC] oracle paper price error: {e}")
-
-        if price <= 0 and self.gmgn:
-            try:
-                info = await asyncio.wait_for(
-                    self.gmgn.get_token_info(token_address),
-                    timeout=5.0,
-                )
-                price_obj = info.get("price", {}) if isinstance(info.get("price"), dict) else {}
-                price_val = price_obj.get("price")
-                if price_val and float(price_val) > 0:
-                    price = float(price_val)
-            except asyncio.TimeoutError:
-                logger.debug(f"[EXEC] paper price gmgn timeout for {token_address[:8]}")
-            except Exception as e:
-                logger.debug(f"[EXEC] paper price fetch error: {e}")
-
-        if price <= 0:
-            # Final fallback: position's raw_gmgn_json (USD already).
-            try:
-                raw_json = position.get("raw_gmgn_json", "")
-                if raw_json:
-                    raw = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
-                    price_obj = raw.get("price", {}) if isinstance(raw.get("price"), dict) else {}
+            if price <= 0 and self.gmgn:
+                try:
+                    info = await asyncio.wait_for(
+                        self.gmgn.get_token_info(token_address),
+                        timeout=5.0,
+                    )
+                    price_obj = info.get("price", {}) if isinstance(info.get("price"), dict) else {}
                     price_val = price_obj.get("price")
                     if price_val and float(price_val) > 0:
                         price = float(price_val)
-            except Exception as e:
-                logger.debug(f"[EXEC] paper price walk parse error: {e}")
+                except asyncio.TimeoutError:
+                    logger.debug(f"[EXEC] paper price gmgn timeout for {token_address[:8]}")
+                except Exception as e:
+                    logger.debug(f"[EXEC] paper price fetch error: {e}")
 
-        self._paper_price_cache[token_address] = {"ts": now, "price": price}
+            if price <= 0:
+                # Final fallback: position's raw_gmgn_json (USD already).
+                try:
+                    raw_json = position.get("raw_gmgn_json", "")
+                    if raw_json:
+                        raw = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+                        price_obj = raw.get("price", {}) if isinstance(raw.get("price"), dict) else {}
+                        price_val = price_obj.get("price")
+                        if price_val and float(price_val) > 0:
+                            price = float(price_val)
+                except Exception as e:
+                    logger.debug(f"[EXEC] paper price walk parse error: {e}")
+        finally:
+            self._paper_price_cache[token_address] = {"ts": now, "price": price}
 
         return price
 
@@ -361,18 +366,29 @@ class TradeExecutor:
                 current_price_usd = current_price_sol * sol_usd_now if sol_usd_now > 0 else 0.0
 
         if current_price_usd <= 0:
-            logger.warning(
-                f"[EXEC] SELL-SKIPPED {position['token_symbol']} "
-                f"({position['token_address'][:8]}): no USD price, "
-                f"sell_pct={sell_pct:.0f}%, reason={reason}, paper={self.paper}"
-            )
-            if self.positions.db:
-                await self.positions.db.save_risk_event(
-                    "PRICE_MISSING", position["token_address"],
-                    f"symbol={position['token_symbol']}, reason={reason}, "
-                    f"action=SELL_SKIPPED, paper={self.paper}"
+            if reason == "STUCK":
+                # STUCK force-close: use entry_price for 0% PnL.
+                # Without this, stuck positions never close because price
+                # walk keeps timing out and blocking the monitor.
+                current_price_usd = position.get("entry_price", 0) or 0
+                logger.warning(
+                    f"[EXEC] STUCK close for {position['token_symbol']} "
+                    f"({position['token_address'][:8]}): "
+                    f"price=${current_price_usd:.10f} ($0 PnL)"
                 )
-            return None
+            else:
+                logger.warning(
+                    f"[EXEC] SELL-SKIPPED {position['token_symbol']} "
+                    f"({position['token_address'][:8]}): no USD price, "
+                    f"sell_pct={sell_pct:.0f}%, reason={reason}, paper={self.paper}"
+                )
+                if self.positions.db:
+                    await self.positions.db.save_risk_event(
+                        "PRICE_MISSING", position["token_address"],
+                        f"symbol={position['token_symbol']}, reason={reason}, "
+                        f"action=SELL_SKIPPED, paper={self.paper}"
+                    )
+                return None
 
         # Get current SOL/USD for SOL math.
         sol_usd_now = 0.0

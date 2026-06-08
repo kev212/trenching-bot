@@ -251,6 +251,20 @@ class GMGNClient:
     async def get_token_holders(self, address: str) -> dict:
         return await self._get("/v1/market/token_top_holders", {"chain": "sol", "address": address})
 
+    async def get_kol_holders(self, address: str, limit: int = 20) -> list:
+        """Fetch KOL/renowned wallet holders for a token.
+
+        Returns list of holder dicts, each with:
+          - end_holding_at: None if still holding, timestamp if dumped
+          - amount_percentage: % of supply held (decimal, e.g. 0.05 = 5%)
+        """
+        data = await self._get("/v1/market/token_top_holders", {
+            "chain": "sol", "address": address, "tag": "renowned", "limit": limit,
+        })
+        if isinstance(data, dict):
+            return data.get("list", [])
+        return []
+
     async def get_token_ath(self, address: str) -> dict:
         """Fetch 1d candles, return ATH price + timestamp from highest candle."""
         now_ms = int(time.time() * 1000)

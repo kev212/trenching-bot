@@ -52,9 +52,9 @@
     },
     "kol_presence": {
       "enabled": true,
-      "min_renowned": 1,
+      "min_holding": 1,
       "weight": 0,
-      "llm_hint": "At least 1 KOL/renowned wallet must be holding."
+      "llm_hint": "At least 1 KOL wallet must still be holding (not already dumped)."
     }
   }
 }

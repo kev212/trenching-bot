@@ -28,6 +28,7 @@ class TokenData:
     liquidity: float = 0.0
     holders_count: int = 0
     renowned_wallets: int = 0
+    kol_still_holding: int = 0
     top15_hold_pct: float = 0.0
     insider_ratio: float = 0.0
     rug_probability: float = 0.0

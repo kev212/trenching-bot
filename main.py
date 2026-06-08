@@ -707,15 +707,19 @@ class TrenchingBot:
             batch2 = await safe_gather(
                 self.gmgn.get_token_holders(address),
                 self.gmgn.get_token_ath(address),
+                self.gmgn.get_kol_holders(address),
                 timeout=GMGN_GATHER_TIMEOUT,
             )
-            holders_r, ath_r = batch2
+            holders_r, ath_r, kol_holders_r = batch2
             holders = holders_r if not isinstance(holders_r, Exception) else {}
             ath_data = ath_r if not isinstance(ath_r, Exception) else {}
+            kol_holders_list = kol_holders_r if not isinstance(kol_holders_r, Exception) else []
             if isinstance(holders_r, Exception):
                 logger.debug(f"GMGN holders error for {address[:10]}: {holders_r}")
             if isinstance(ath_r, Exception):
                 logger.debug(f"GMGN ath error for {address[:10]}: {ath_r}")
+            if isinstance(kol_holders_r, Exception):
+                logger.debug(f"GMGN kol_holders error for {address[:10]}: {kol_holders_r}")
         except Exception as e:
             logger.warning(f"GMGN gather error for {address[:10]}: {e}")
             info, security, holders, ath_data = {}, {}, {}, {}
@@ -736,6 +740,14 @@ class TrenchingBot:
         holders_list = holders.get("list", []) if isinstance(holders.get("list"), list) else []
         wallet_tags = info.get("wallet_tags_stat", {}) or {}
         renowned_wallets = int(wallet_tags.get("renowned_wallets", 0) or 0)
+        kol_still_holding = (
+            sum(
+                1 for w in (kol_holders_list if isinstance(kol_holders_list, list) else [])
+                if w.get("end_holding_at") is None
+                and float(w.get("amount_percentage", 0) or 0) > 0
+            )
+            if isinstance(kol_holders_list, list) else 0
+        )
 
         # Data quality flag: True when holder data is missing/failed AND the
         # stat fallback (top_10_holder_rate, fresh_wallet_rate) is also
@@ -811,6 +823,7 @@ class TrenchingBot:
             liquidity=float(info.get("liquidity", 0) or 0),
             holders_count=int(info.get("holder_count", 0) or 0),
             renowned_wallets=renowned_wallets,
+            kol_still_holding=kol_still_holding,
             top15_hold_pct=top15_pct,
             insider_ratio=float(stat_obj.get("top_bundler_trader_percentage", 0) or 0),
             rug_probability=_calculate_rug_score(security),
