@@ -64,7 +64,24 @@ class GMGNClient:
 
         Charon's `paceGmgnRequest` pattern. Two callers cannot run concurrently
         (lock) and the second one waits until 2500ms after the first finished.
+
+        Wraps lock acquisition in asyncio.wait_for to prevent indefinite hang
+        when a previous request gets stuck (e.g., curl_cffi proxy connection
+        hangs at C level and can't be cancelled by asyncio.wait_for). The lock
+        itself IS awaitable (cancellable), so this timeout is reliable.
         """
+        try:
+            await asyncio.wait_for(
+                self._pace_request_impl(),
+                timeout=GMGN_TIMEOUT + 10,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"GMGN pace lock timeout ({GMGN_TIMEOUT + 10}s) — "
+                "previous request may be stuck, skipping this one"
+            )
+
+    async def _pace_request_impl(self) -> None:
         async with self._ensure_pace_lock():
             now = time.time()
             elapsed_ms = (now - self._last_request_time) * 1000.0
@@ -77,7 +94,11 @@ class GMGNClient:
         """Eagerly initialize HTTP session. Call once at bot startup."""
         async with self._ensure_lock():
             if self._session is None:
-                self._session = AsyncSession(impersonate="chrome")
+                self._session = AsyncSession(
+                    impersonate="chrome",
+                    timeout=GMGN_TIMEOUT,
+                    connect_timeout=10,
+                )
                 logger.info("GMGN: session initialized")
 
     async def _get_session(self) -> AsyncSession:
@@ -85,7 +106,11 @@ class GMGNClient:
         async with self._ensure_lock():
             if self._session is None:
                 # Fallback only — start() should have been called
-                self._session = AsyncSession(impersonate="chrome")
+                self._session = AsyncSession(
+                    impersonate="chrome",
+                    timeout=GMGN_TIMEOUT,
+                    connect_timeout=10,
+                )
             return self._session
 
     async def close(self):
