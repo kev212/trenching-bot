@@ -324,10 +324,6 @@ class TradeExecutor:
             except Exception as e:
                 logger.debug(f"[EXEC] paper price walk parse error: {e}")
 
-        if price <= 0:
-            # Fix #1: do NOT fall back to entry_price — that would make SL never fire.
-            return 0.0
-
         self._paper_price_cache[token_address] = {"ts": now, "price": price}
 
         return price

@@ -46,10 +46,10 @@ async def _process_position(
 
     if is_paper:
         try:
-            current_price_usd = await asyncio.wait_for(
-                executor._simulate_paper_price_walk(position, "monitor"),
-                timeout=10,
-            )
+                current_price_usd = await asyncio.wait_for(
+                    executor._simulate_paper_price_walk(position, "monitor"),
+                    timeout=5,
+                )
         except asyncio.TimeoutError:
             logger.warning(
                 f"[POS-MON] paper price walk timeout for {token_address[:8]}, "
@@ -282,7 +282,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
     min_hold_seconds = config.get("min_hold_seconds", 30)
     extreme_tp_mult = config.get("extreme_tp_mult", 2.0)
 
-    MAX_CONSECUTIVE_FAILURES = 12  # 12 * 0.25s = 3s of blacked-out price feed
+    MAX_CONSECUTIVE_FAILURES = 3  # 3 ticks without price = force close
     consecutive_failures: dict[str, int] = {}
 
     while True:
@@ -310,7 +310,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
                             tp1_pct, trailing_pct, min_hold_seconds, time_limit,
                             sol_usd_now,
                         ),
-                        timeout=20,
+                        timeout=10,
                     )
                     if result and result.get("triggered"):
                         logger.info(
