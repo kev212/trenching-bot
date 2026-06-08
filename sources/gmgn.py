@@ -97,7 +97,6 @@ class GMGNClient:
                 self._session = AsyncSession(
                     impersonate="chrome",
                     timeout=GMGN_TIMEOUT,
-                    connect_timeout=10,
                 )
                 logger.info("GMGN: session initialized")
 
@@ -109,7 +108,6 @@ class GMGNClient:
                 self._session = AsyncSession(
                     impersonate="chrome",
                     timeout=GMGN_TIMEOUT,
-                    connect_timeout=10,
                 )
             return self._session
 
