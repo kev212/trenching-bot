@@ -290,7 +290,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
     min_hold_seconds = config.get("min_hold_seconds", 30)
     extreme_tp_mult = config.get("extreme_tp_mult", 2.0)
 
-    MAX_CONSECUTIVE_FAILURES = 3  # 3 failures without price = force close
+    MAX_CONSECUTIVE_FAILURES = 5  # 5 failures without price = force close
 
     # Two failure counters:
     #   consecutive_failures — outer timeout or process-level error
@@ -298,7 +298,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
     consecutive_failures: dict[str, int] = {}
     price_failures: dict[str, int] = {}
     price_failure_cooldown: dict[str, float] = {}
-    PRICE_FAILURE_COOLDOWN_S = 3.0  # one counted failure per ~3s min
+    PRICE_FAILURE_COOLDOWN_S = 10.0  # one counted failure per ~10s min
 
     while True:
         await asyncio.sleep(check_interval)
