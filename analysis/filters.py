@@ -54,6 +54,7 @@ def run_all_filters(token: TokenData, filter_params: dict) -> FeatureVector:
     fv.holder_distribution = _filter_holder_distribution(token, filter_params.get("holder_distribution", {}))
     fv.social_narrative = _filter_social_narrative(token, filter_params.get("social_narrative", {}))
     fv.ath_drawdown = _filter_ath_drawdown(token, filter_params.get("ath_drawdown", {}))
+    fv.kol_presence = _filter_kol_presence(token, filter_params.get("kol_presence", {}))
 
     # token_age: computed for LLM #2 context, NOT a hard gate filter
     # (early check handles permanent skip for old tokens)
@@ -268,6 +269,7 @@ def count_passed_filters(fv: FeatureVector) -> tuple[int, int, list[str]]:
         "rug_probability": fv.rug_probability,
         "holder_distribution": fv.holder_distribution,
         "ath_drawdown": fv.ath_drawdown,
+        "kol_presence": fv.kol_presence,
         "social_narrative": fv.social_narrative,
     }
 
@@ -329,6 +331,19 @@ def calculate_weighted_score(fv: FeatureVector, filter_params: dict) -> tuple[fl
 
     score = weighted_sum / total_weight if total_weight > 0 else 0.0
     return score, breakdown
+
+
+def _filter_kol_presence(token: TokenData, params: dict) -> dict:
+    """Hard gate: at least N KOL/renowned wallets must be holding."""
+    min_renowned = params.get("min_renowned", 1)
+    passed = token.renowned_wallets >= min_renowned
+    return {
+        "renowned_wallets": token.renowned_wallets,
+        "min_renowned": min_renowned,
+        "passed": passed,
+        "enabled": params.get("enabled", True),
+        "note": f"KOL wallets: {token.renowned_wallets} (min: {min_renowned})",
+    }
 
 
 def _filter_ath_drawdown(token: TokenData, params: dict) -> dict:

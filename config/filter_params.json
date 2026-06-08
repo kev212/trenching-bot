@@ -1,10 +1,10 @@
 {
-  "version": 8,
-  "updated_at": "2026-06-07T00:00:00Z",
+  "version": 9,
+  "updated_at": "2026-06-08T00:00:00Z",
   "filters": {
     "min_total_fee": {
       "enabled": true,
-      "min_fee_sol": 3.5,
+      "min_fee_sol": 1.5,
       "weight": 0.20,
       "llm_hint": "High fees = real organic trading, not wash/bundle."
     },
@@ -21,7 +21,7 @@
     },
     "min_holders": {
       "enabled": true,
-      "min_holders": 300,
+      "min_holders": 150,
       "weight": 0.20,
       "llm_hint": "More holders = real community, less rug risk."
     },
@@ -46,9 +46,15 @@
     },
     "ath_drawdown": {
       "enabled": true,
-      "max_drawdown_pct": -50.0,
+      "max_drawdown_pct": -40.0,
       "weight": 0.15,
       "llm_hint": "Deeper drawdown = riskier entry timing."
+    },
+    "kol_presence": {
+      "enabled": true,
+      "min_renowned": 1,
+      "weight": 0,
+      "llm_hint": "At least 1 KOL/renowned wallet must be holding."
     }
   }
 }

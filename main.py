@@ -734,6 +734,8 @@ class TrenchingBot:
         stat_obj = info.get("stat", {}) if isinstance(info.get("stat"), dict) else {}
         dev_obj = info.get("dev", {}) if isinstance(info.get("dev"), dict) else {}
         holders_list = holders.get("list", []) if isinstance(holders.get("list"), list) else []
+        wallet_tags = info.get("wallet_tags_stat", {}) or {}
+        renowned_wallets = int(wallet_tags.get("renowned_wallets", 0) or 0)
 
         # Data quality flag: True when holder data is missing/failed AND the
         # stat fallback (top_10_holder_rate, fresh_wallet_rate) is also
@@ -808,6 +810,7 @@ class TrenchingBot:
             volume_1h=float(price_obj.get("volume_1h", 0) or 0),
             liquidity=float(info.get("liquidity", 0) or 0),
             holders_count=int(info.get("holder_count", 0) or 0),
+            renowned_wallets=renowned_wallets,
             top15_hold_pct=top15_pct,
             insider_ratio=float(stat_obj.get("top_bundler_trader_percentage", 0) or 0),
             rug_probability=_calculate_rug_score(security),

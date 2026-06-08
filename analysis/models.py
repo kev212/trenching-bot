@@ -27,6 +27,7 @@ class TokenData:
     volume_1h: float = 0.0
     liquidity: float = 0.0
     holders_count: int = 0
+    renowned_wallets: int = 0
     top15_hold_pct: float = 0.0
     insider_ratio: float = 0.0
     rug_probability: float = 0.0
@@ -97,6 +98,7 @@ class FeatureVector:
     min_total_fee: dict = field(default_factory=dict)
     social_narrative: dict = field(default_factory=dict)
     ath_drawdown: dict = field(default_factory=dict)
+    kol_presence: dict = field(default_factory=dict)
     token_data: Optional[TokenData] = None
 
     def to_dict(self) -> dict:
@@ -111,6 +113,7 @@ class FeatureVector:
             "min_total_fee": self.min_total_fee,
             "social_narrative": self.social_narrative,
             "ath_drawdown": self.ath_drawdown,
+            "kol_presence": self.kol_presence,
         }
 
 

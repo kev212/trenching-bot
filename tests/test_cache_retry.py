@@ -76,6 +76,7 @@ def test_permanent_filters_excludes_others():
     assert "holder_distribution" not in PERMANENT_FILTERS
     assert "rug_probability" not in PERMANENT_FILTERS
     assert "ath_drawdown" not in PERMANENT_FILTERS
+    assert "kol_presence" not in PERMANENT_FILTERS
 
 
 def test_is_permanent_failure_false_for_all():
