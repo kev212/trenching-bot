@@ -50,7 +50,7 @@ class FakeExecutor:
         self.oracle_price_usd = oracle_price_usd
         self.jupiter = FakeJupiter(oracle_price_usd)
 
-    async def execute_sell(self, position, pct, reason):
+    async def execute_sell(self, position, pct, reason, current_price_usd=None):
         self.sells.append((position["token_symbol"], pct, reason))
         position["current_amount_token"] *= (1 - pct / 100)
         position["total_sold_sol"] += position["entry_amount_sol"] * (pct / 100)

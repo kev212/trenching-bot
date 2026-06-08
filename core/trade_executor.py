@@ -333,7 +333,8 @@ class TradeExecutor:
         return price
 
     async def execute_sell(self, position: dict, sell_pct: float,
-                            reason: str) -> Optional[Trade]:
+                            reason: str,
+                            current_price_usd: float = None) -> Optional[Trade]:
         """Sell `sell_pct`% of position. Returns Trade or None.
 
         All price math in USD. Computes:
@@ -342,6 +343,8 @@ class TradeExecutor:
         - pnl_sol = pnl_usd / sol_usd_now
 
         `position` is the dict shape returned by get_open_positions.
+        If `current_price_usd` is provided, skip the internal price walk
+        (avoids redundant slow fetch that can cascade into monitor timeout).
         Paper mode: simulates price walk from entry (no live price needed).
         Live mode: requires Jupiter price.
         """
@@ -350,15 +353,16 @@ class TradeExecutor:
         if sell_pct <= 0 or sell_pct > 100:
             return None
 
-        if self.paper:
-            current_price_usd = await self._simulate_paper_price_walk(position, reason)
-        else:
-            # Live mode: get SOL price from Jupiter, convert to USD.
-            current_price_sol = await self.jupiter.get_token_price_in_sol_with_retry(
-                position["token_address"]
-            )
-            sol_usd_now = await self.price_oracle.get_sol_price_usd() if self.price_oracle else 0.0
-            current_price_usd = current_price_sol * sol_usd_now if sol_usd_now > 0 else 0.0
+        if current_price_usd is None or current_price_usd <= 0:
+            if self.paper:
+                current_price_usd = await self._simulate_paper_price_walk(position, reason)
+            else:
+                # Live mode: get SOL price from Jupiter, convert to USD.
+                current_price_sol = await self.jupiter.get_token_price_in_sol_with_retry(
+                    position["token_address"]
+                )
+                sol_usd_now = await self.price_oracle.get_sol_price_usd() if self.price_oracle else 0.0
+                current_price_usd = current_price_sol * sol_usd_now if sol_usd_now > 0 else 0.0
 
         if current_price_usd <= 0:
             logger.warning(
