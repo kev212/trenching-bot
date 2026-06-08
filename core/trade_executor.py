@@ -353,7 +353,7 @@ class TradeExecutor:
         if sell_pct <= 0 or sell_pct > 100:
             return None
 
-        if current_price_usd is None or current_price_usd <= 0:
+        if current_price_usd is None:
             if self.paper:
                 current_price_usd = await self._simulate_paper_price_walk(position, reason)
             else:
