@@ -1,5 +1,4 @@
 import asyncio
-from asyncio import FIRST_COMPLETED
 import logging
 import time
 from collections import defaultdict
@@ -83,9 +82,7 @@ async def safe_gather(*coros, timeout: float = None):
     gak ngerapihin CancelledError di inner tasks saat timeout, ngehasilin
     ``_GatheringFuture exception was never retrieved`` warning.
 
-    Pakai ``asyncio.wait(FIRST_COMPLETED)`` instead, yang secara natural
-    ngebalikin partial results (coros yang kaburu selesai) + TimeoutError
-    placeholder untuk yang belum selesai.
+    Pakai ``asyncio.wait(ALL_COMPLETED)`` instead.
     """
     if not coros:
         return []
@@ -96,8 +93,7 @@ async def safe_gather(*coros, timeout: float = None):
         return await asyncio.gather(*wrapped)
 
     tasks = [asyncio.ensure_future(w) for w in wrapped]
-    done, pending = await asyncio.wait(tasks, timeout=timeout,
-                                       return_when=FIRST_COMPLETED)
+    done, pending = await asyncio.wait(tasks, timeout=timeout)
     for t in pending:
         t.cancel()
         try:
