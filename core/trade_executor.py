@@ -58,6 +58,12 @@ class TradeExecutor:
         self._paper_price_cache: "OrderedDict[str, dict]" = OrderedDict()
         self._paper_price_cache_ttl = 5.0
         self.MAX_PAPER_CACHE = 500
+        # Per-token in-flight flag: prevents concurrent price walks for the
+        # same token. Without this, each 250ms tick spawns a new GMGN request
+        # while the previous one is still running (cancelled by wait_for but
+        # curl_cffi can't cancel HTTP requests). These abandoned requests
+        # accumulate, hog the pace lock, and freeze all GMGN calls.
+        self._paper_price_in_flight: dict[str, bool] = {}
 
     def _paper_cache_get(self, key: str):
         entry = self._paper_price_cache.get(key)
@@ -281,16 +287,12 @@ class TradeExecutor:
         would mask SL exits). Caches price per token_address to avoid
         hammering sources at 4×/sec.
 
-        IMPORTANT: cache 0.0 IMMEDIATELY before any API call. Without this,
-        each 250ms tick spawns a new GMGN request while the previous one is
-        still in-flight. After 5s of timeouts, 20 concurrent requests hog
-        the pace lock, blocking ALL GMGN calls (freeze). The cache prevents
-        new calls until the entry expires.
-
-        The finally block uses time.time() (not `now` from start) so the
-        cache TTL is measured from when the result was actually cached,
-        not from when the function started. Without this, a 5s timeout
-        would set ts=5s_ago, causing the cache to expire immediately.
+        Two mechanisms prevent request cascade:
+        1. Per-token in-flight flag: if a price walk is already running for
+           this token, return cached 0.0 immediately. Prevents concurrent
+           GMGN calls that would hog the pace lock and freeze the bot.
+        2. Cache 0.0 immediately: even if in-flight flag is stale, the
+           cache prevents re-entry for 5s.
         """
         import time
         token_address = position.get("token_address", "")
@@ -299,9 +301,16 @@ class TradeExecutor:
         if cached and (now - cached["ts"]) < self._paper_price_cache_ttl:
             return cached["price"]
 
-        # Immediately cache 0.0 to prevent concurrent price walks for the
-        # same token. This is overwritten by the finally block with the
-        # actual price (or stays 0.0 on failure/timeout).
+        # If a price walk is already in-flight for this token, return cached
+        # value immediately. Without this, each 250ms tick spawns a new GMGN
+        # request while the previous one is still running (wait_for cancellation
+        # doesn't cancel curl_cffi HTTP requests). These abandoned requests
+        # accumulate, hog the pace lock, and freeze all GMGN calls.
+        if self._paper_price_in_flight.get(token_address):
+            return 0.0
+
+        # Mark as in-flight and cache 0.0 immediately
+        self._paper_price_in_flight[token_address] = True
         self._paper_price_cache[token_address] = {"ts": now, "price": 0.0}
 
         price = 0.0
@@ -340,10 +349,9 @@ class TradeExecutor:
                 except Exception as e:
                     logger.debug(f"[EXEC] paper price walk parse error: {e}")
         finally:
-            # Use time.time() (not `now`) so TTL is measured from when the
-            # result was cached, not from when the function started. Without
-            # this, a 5s timeout sets ts=5s_ago → cache expires immediately
-            # → next tick starts a new GMGN call → request cascade → freeze.
+            # Clear in-flight flag and update cache with actual price.
+            # Use time.time() so TTL is measured from when result was cached.
+            self._paper_price_in_flight[token_address] = False
             self._paper_price_cache[token_address] = {"ts": time.time(), "price": price}
 
         return price
