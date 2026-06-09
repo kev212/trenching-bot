@@ -72,6 +72,25 @@ async def _process_position(
         current_price_usd = current_price_sol * (sol_usd_now or 0.0)
 
     if current_price_usd <= 0:
+        # TIME exit: close at entry_price after time_limit, even without price.
+        if time_limit > 0:
+            held_so_far = (
+                (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
+                if position.get("entry_time") else 0
+            )
+            if held_so_far > time_limit:
+                entry_price = position.get("entry_price", 0) or 0
+                if entry_price > 0:
+                    await executor.execute_sell(position, 100, "TIME", entry_price)
+                    position_manager.cleanup_lock(token_address)
+                    return {
+                        "triggered": True,
+                        "current_price": entry_price,
+                        "entry": entry_price,
+                        "peak": position.get("peak_price", 0) or 0,
+                        "held_so_far": held_so_far,
+                        "last_reason": "TIME",
+                    }
         return {}
 
     entry = position["entry_price"]  # USD
