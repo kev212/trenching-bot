@@ -45,17 +45,31 @@ async def _process_position(
     token_address = position["token_address"]
 
     if is_paper:
-        try:
+        # Check cache FIRST (no timeout needed — cache read is instant).
+        # Only call _simulate_paper_price_walk if cache is expired.
+        cached = executor._paper_price_cache.get(token_address)
+        now_cached = time.time() if 'time' not in dir() else __import__('time').time()
+        if cached:
+            ttl = 30.0 if cached["price"] <= 0 else executor._paper_price_cache_ttl
+            if (now_cached - cached["ts"]) < ttl:
+                current_price_usd = cached["price"]
+            else:
+                current_price_usd = 0.0  # will be fetched below
+        else:
+            current_price_usd = 0.0
+
+        if current_price_usd <= 0:
+            try:
                 current_price_usd = await asyncio.wait_for(
                     executor._simulate_paper_price_walk(position, "monitor"),
                     timeout=5,
                 )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"[POS-MON] paper price walk timeout for {token_address[:8]}, "
-                "returning 0 (will skip SL/TP this tick)"
-            )
-            current_price_usd = 0.0
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[POS-MON] paper price walk timeout for {token_address[:8]}, "
+                    "returning 0 (will skip SL/TP this tick)"
+                )
+                current_price_usd = 0.0
     else:
         # Live mode: SOL from Jupiter × SOL/USD = USD.
         try:
