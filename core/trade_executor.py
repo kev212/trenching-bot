@@ -298,8 +298,13 @@ class TradeExecutor:
         token_address = position.get("token_address", "")
         now = time.time()
         cached = self._paper_price_cache.get(token_address)
-        if cached and (now - cached["ts"]) < self._paper_price_cache_ttl:
-            return cached["price"]
+        if cached:
+            # Use longer TTL for failed prices (0.0) — the API is likely
+            # down/slow for this token, so retrying immediately just wastes
+            # pace lock slots and causes cascade freezes.
+            ttl = 30.0 if cached["price"] <= 0 else self._paper_price_cache_ttl
+            if (now - cached["ts"]) < ttl:
+                return cached["price"]
 
         # If a price walk is already in-flight for this token, return cached
         # value immediately. Without this, each 250ms tick spawns a new GMGN
