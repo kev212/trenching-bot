@@ -281,10 +281,16 @@ class TradeExecutor:
         would mask SL exits). Caches price per token_address to avoid
         hammering sources at 4×/sec.
 
-        Uses try/finally to ensure cache (including 0.0) is always written,
-        even when asyncio.wait_for cancels this coroutine in position_monitor.
-        Without this fix, every 250ms tick retries the full 5s timeout because
-        the cancelled coroutine never wrote its 0.0 result to cache.
+        IMPORTANT: cache 0.0 IMMEDIATELY before any API call. Without this,
+        each 250ms tick spawns a new GMGN request while the previous one is
+        still in-flight. After 5s of timeouts, 20 concurrent requests hog
+        the pace lock, blocking ALL GMGN calls (freeze). The cache prevents
+        new calls until the entry expires.
+
+        The finally block uses time.time() (not `now` from start) so the
+        cache TTL is measured from when the result was actually cached,
+        not from when the function started. Without this, a 5s timeout
+        would set ts=5s_ago, causing the cache to expire immediately.
         """
         import time
         token_address = position.get("token_address", "")
@@ -292,6 +298,11 @@ class TradeExecutor:
         cached = self._paper_price_cache.get(token_address)
         if cached and (now - cached["ts"]) < self._paper_price_cache_ttl:
             return cached["price"]
+
+        # Immediately cache 0.0 to prevent concurrent price walks for the
+        # same token. This is overwritten by the finally block with the
+        # actual price (or stays 0.0 on failure/timeout).
+        self._paper_price_cache[token_address] = {"ts": now, "price": 0.0}
 
         price = 0.0
         try:
@@ -329,7 +340,11 @@ class TradeExecutor:
                 except Exception as e:
                     logger.debug(f"[EXEC] paper price walk parse error: {e}")
         finally:
-            self._paper_price_cache[token_address] = {"ts": now, "price": price}
+            # Use time.time() (not `now`) so TTL is measured from when the
+            # result was cached, not from when the function started. Without
+            # this, a 5s timeout sets ts=5s_ago → cache expires immediately
+            # → next tick starts a new GMGN call → request cascade → freeze.
+            self._paper_price_cache[token_address] = {"ts": time.time(), "price": price}
 
         return price
 
