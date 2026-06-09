@@ -41,6 +41,12 @@ async def _get_shared_session() -> aiohttp.ClientSession:
     global _shared_session
     async with _session_lock:
         if _shared_session is None or _shared_session.closed:
+            # Clean up prematurely-closed session before replacing it
+            if _shared_session is not None and _shared_session.closed:
+                try:
+                    await _shared_session.close()
+                except Exception:
+                    pass
             _shared_session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=10),
             )
@@ -148,7 +154,7 @@ class DexScreenerClient:
 
     async def get_token_price_usd(self, token_address: str) -> float:
         """Get token price in USD. Returns 0 on miss."""
-        if not self._session:
+        if not self._session or self._session.closed:
             return 0.0
         try:
             url = f"{BASE_URL}/tokens/v1/solana/{token_address}"

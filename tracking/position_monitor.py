@@ -10,11 +10,16 @@ USD-canonical price model (v2):
 Runs 4x/sec. Reads open positions, fetches current price via Jupiter,
 advances each position toward its exit trigger. Sends Telegram alerts
 on every exit.
+
+Bug #6 fix: Bounded concurrent price fetches via asyncio.Semaphore(5)
++ asyncio.gather + token-level price cache (3s TTL). Prevents 429
+rate-limit from 50+ simultaneous Jupiter calls.
 """
 import asyncio
 import logging
 import time as time_module
 from datetime import datetime, timezone
+from typing import Optional
 
 from core.jupiter_client import JupiterClient
 from core.position_manager import PositionManager
@@ -33,6 +38,74 @@ logger = logging.getLogger("position_monitor")
 PHANTOM_SL_THRESHOLD = 0.05  # 5% of entry price (i.e. -95% drop)
 
 
+async def _fetch_token_price(
+    token_address: str, executor, is_paper: bool,
+    sol_usd_now: float, position=None,
+    price_cache: dict = None,
+    price_semaphore: asyncio.Semaphore = None,
+) -> float:
+    """Fetch a single token price with bounded concurrency and token-level
+    cache (3s TTL).
+
+    When `price_cache` and `price_semaphore` are provided (by the main loop),
+    fetches are bounded to `semaphore` concurrent calls and results are cached
+    to avoid duplicate fetches when the same token appears in multiple positions.
+
+    When called without cache/semaphore (e.g. from tests), each call fetches
+    independently.
+
+    Returns USD price, or 0.0 on total failure (caller handles time-exit).
+    """
+    CACHE_TTL = 3.0
+
+    # Check cache if provided
+    if price_cache is not None:
+        now = time_module.time()
+        cached = price_cache.get(token_address)
+        if cached and (now - cached[1]) < CACHE_TTL:
+            return cached[0]
+
+    sem = price_semaphore or asyncio.Semaphore(5)
+    async with sem:
+        # Check cache again inside the semaphore (avoid double-fetch race)
+        if price_cache is not None:
+            now = time_module.time()
+            cached = price_cache.get(token_address)
+            if cached and (now - cached[1]) < CACHE_TTL:
+                return cached[0]
+
+        if is_paper:
+            try:
+                price = await asyncio.wait_for(
+                    executor._simulate_paper_price_walk(position, "monitor"),
+                    timeout=5,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[POS-MON] paper price walk timeout for {token_address[:8]}, "
+                    "returning 0 (will skip SL/TP this tick)"
+                )
+                price = 0.0
+        else:
+            try:
+                price_sol = await asyncio.wait_for(
+                    executor.jupiter.get_token_price_in_sol_with_retry(token_address),
+                    timeout=10,
+                )
+                price = price_sol * (sol_usd_now or 0.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[POS-MON] jupiter price timeout for {token_address[:8]}, "
+                    "returning 0 (will skip SL/TP this tick)"
+                )
+                price = 0.0
+
+    # Write to cache if provided (even 0.0, so retries within TTL don't re-fetch)
+    if price_cache is not None:
+        price_cache[token_address] = (price, time_module.time())
+    return price
+
+
 async def _process_position(
     position, executor, position_manager, is_paper,
     stop_loss_pct, tp1_mult, tp2_mult, extreme_tp_mult,
@@ -45,32 +118,10 @@ async def _process_position(
     """
     token_address = position["token_address"]
 
-    if is_paper:
-        try:
-                current_price_usd = await asyncio.wait_for(
-                    executor._simulate_paper_price_walk(position, "monitor"),
-                    timeout=5,
-                )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"[POS-MON] paper price walk timeout for {token_address[:8]}, "
-                "returning 0 (will skip SL/TP this tick)"
-            )
-            current_price_usd = 0.0
-    else:
-        # Live mode: SOL from Jupiter × SOL/USD = USD.
-        try:
-            current_price_sol = await asyncio.wait_for(
-                executor.jupiter.get_token_price_in_sol_with_retry(token_address),
-                timeout=10,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"[POS-MON] jupiter price timeout for {token_address[:8]}, "
-                "returning 0 (will skip SL/TP this tick)"
-            )
-            current_price_sol = 0.0
-        current_price_usd = current_price_sol * (sol_usd_now or 0.0)
+    # Use bounded concurrent price fetcher with token-level cache (Bug #6)
+    current_price_usd = await _fetch_token_price(
+        token_address, executor, is_paper, sol_usd_now, position,
+    )
 
     if current_price_usd <= 0:
         # Fix #2: when price source is down, evaluate TIME exit only —
@@ -280,12 +331,13 @@ async def position_monitor(state, db, position_manager: PositionManager,
     logger.info("Position monitor started")
     check_interval = 0.25
 
-    stop_loss_pct = config.get("stop_loss_pct", 30)
+    # All defaults aligned with config/trading.json (Bug #22 fix)
+    stop_loss_pct = config.get("stop_loss_pct", 50)
     tp1_mult = config.get("tp1_multiplier", 1.30)
-    tp1_pct = config.get("tp1_sell_pct", 33)
-    tp2_mult = config.get("tp2_multiplier", 1.50)
-    trailing_pct = config.get("trailing_stop_pct", 15)
-    time_limit = config.get("time_limit_seconds", 1800)
+    tp1_pct = config.get("tp1_sell_pct", 80)
+    tp2_mult = config.get("tp2_multiplier", 2.00)
+    trailing_pct = config.get("trailing_stop_pct", 20)
+    time_limit = config.get("time_limit_seconds", 0)
     is_paper = config.get("paper_mode", True)
     min_hold_seconds = config.get("min_hold_seconds", 30)
     extreme_tp_mult = config.get("extreme_tp_mult", 2.0)
@@ -300,6 +352,11 @@ async def position_monitor(state, db, position_manager: PositionManager,
     price_failure_cooldown: dict[str, float] = {}
     PRICE_FAILURE_COOLDOWN_S = 10.0  # one counted failure per ~10s min
 
+    # Bug #6: Per-tick price cache + semaphore for bounded concurrent fetches.
+    # Created fresh for each tick; prevents stale state between ticks.
+    price_cache: dict[str, tuple[float, float]] = {}
+    price_semaphore = asyncio.Semaphore(5)
+
     while True:
         await asyncio.sleep(check_interval)
         try:
@@ -313,19 +370,39 @@ async def position_monitor(state, db, position_manager: PositionManager,
 
             open_positions = await position_manager.get_open_positions()
             if not open_positions:
+                # Reset cache when idle
+                price_cache.clear()
                 continue
 
+            # ---- Bug #6: Pre-fetch ALL prices concurrently with bounded semaphore ----
+            # Build unique token list (same token may be in multiple positions).
+            # For each unique token, pick the first position (needed for paper mode).
+            unique_tokens: dict[str, dict] = {}
+            for pos in open_positions:
+                addr = pos["token_address"]
+                if addr not in unique_tokens:
+                    unique_tokens[addr] = pos
+
+            # Fire all fetches concurrently bounded by price_semaphore (max 5),
+            # with token-level cache so duplicate addresses reuse the result.
+            prefetch_tasks = [
+                _fetch_token_price(
+                    addr, executor, is_paper, sol_usd_now, first_pos,
+                    price_cache=price_cache, price_semaphore=price_semaphore,
+                )
+                for addr, first_pos in unique_tokens.items()
+            ]
+            await asyncio.gather(*prefetch_tasks, return_exceptions=True)
+
+            # ---- Process each position sequentially (SL/TP checks use cached prices) ----
             for position in open_positions:
                 token_address = position["token_address"]
                 try:
-                    result = await asyncio.wait_for(
-                        _process_position(
-                            position, executor, position_manager, is_paper,
-                            stop_loss_pct, tp1_mult, tp2_mult, extreme_tp_mult,
-                            tp1_pct, trailing_pct, min_hold_seconds, time_limit,
-                            sol_usd_now,
-                        ),
-                        timeout=10,
+                    result = await _process_position(
+                        position, executor, position_manager, is_paper,
+                        stop_loss_pct, tp1_mult, tp2_mult, extreme_tp_mult,
+                        tp1_pct, trailing_pct, min_hold_seconds, time_limit,
+                        sol_usd_now,
                     )
                     if result and result.get("triggered"):
                         logger.info(

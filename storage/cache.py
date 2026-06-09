@@ -181,16 +181,40 @@ class SharedState:
             self.retry_queue.pop(address, None)
 
     async def cleanup_retry_queue(self):
+        """Clean up stale retry entries. Holds lock briefly — expensive checks run outside lock.
+
+        Bug #14 fix: Previously called is_permanent_failure() while holding
+        self._lock, which could block all workers for seconds if the queue
+        had thousands of entries. Now we snapshot the cheap checks under lock,
+        process expensive is_permanent_failure() outside, then delete under lock.
+        """
         from analysis.filters import is_permanent_failure
+        # Phase 1: snapshot cheap checks under lock (timer-based expiry)
         async with self._lock:
             now = time.time()
             max_stale = get_retry_delay(MAX_RETRIES - 1) * 2
-            expired = [k for k, v in self.retry_queue.items()
-                       if v["retries"] >= MAX_RETRIES
-                       or now - v["timestamp"] > max_stale
-                       or is_permanent_failure(v.get("failed_filters", []))]
-            for k in expired:
-                del self.retry_queue[k]
+            expired_by_age = [
+                k for k, v in self.retry_queue.items()
+                if v["retries"] >= MAX_RETRIES
+                or now - v["timestamp"] > max_stale
+            ]
+            # Snapshot items needing expensive is_permanent_failure check
+            to_check = {
+                k: v.get("failed_filters", [])
+                for k, v in self.retry_queue.items()
+                if k not in expired_by_age
+            }
+        # Phase 2: process expensive check outside lock
+        expired_by_failure = [
+            k for k, failed_filters in to_check.items()
+            if is_permanent_failure(failed_filters)
+        ]
+        # Phase 3: delete under lock
+        async with self._lock:
+            for k in expired_by_age:
+                self.retry_queue.pop(k, None)
+            for k in expired_by_failure:
+                self.retry_queue.pop(k, None)
 
     async def add_active_call(self, address: str, call):
         async with self._lock:

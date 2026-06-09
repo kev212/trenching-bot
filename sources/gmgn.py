@@ -6,7 +6,7 @@ import threading
 import uuid
 from typing import Optional
 
-from curl_cffi.requests import AsyncSession
+import aiohttp
 
 logger = logging.getLogger("main")
 
@@ -16,12 +16,15 @@ GMGN_TIMEOUT = 15
 GMGN_GATHER_TIMEOUT = 45
 
 # Backoff durations (Charon-equivalent)
+# NOTE: This backoff logic (lines 138-179) is duplicated in:
+#   - core/price_oracle.py  (PriceOracle._jupiter_backoff_*)
+#   - core/jupiter_client.py
+# Keep in sync across all three locations. If extracting to a shared
+# helper, put it in utils/helpers.py and import here, price_oracle.py,
+# and jupiter_client.py.
 GMGN_BACKOFF_429_S = 60
 GMGN_BACKOFF_403_S = 600
 GMGN_BACKOFF_CLOUDFLARE_S = 1800
-
-# Pacing (Charon default: 2500ms between requests)
-GMGN_DEFAULT_REQUEST_DELAY_MS = 2500
 
 
 class GMGNClient:
@@ -30,87 +33,53 @@ class GMGNClient:
         self.host = BASE_URL
         self.proxy = proxy or os.environ.get("GMGN_PROXY") or os.environ.get("HTTP_PROXY") or ""
         self.rate_limiter = rate_limiter
-        self._session: Optional[AsyncSession] = None
-        # C1 fix: protect session init against concurrent first-call.
-        # Lazy init pattern (B7-style) — `asyncio.Lock()` requires a
-        # running event loop on Python 3.9/3.10, and tests construct
-        # GMGNClient outside the loop. Created on first .start() call.
-        self._session_lock: Optional[asyncio.Lock] = None
-        # Backoff state (Item #2)
+        self._session: Optional[aiohttp.ClientSession] = None
+        # Locks initialized eagerly — Python 3.11+ supports creating
+        # asyncio.Lock outside a running event loop. The race condition
+        # from lazy _ensure_lock() / _ensure_pace_lock() is eliminated by
+        # creating them once at construction time.
+        self._session_lock = asyncio.Lock()
+        # Backoff state
         self._backoff_until: float = 0.0
         self._backoff_reason: str = ""
         self._last_retry_after: int = 30
-        # Pacing state (Item #4) — serialize requests + 2500ms minimum interval
-        self._pace_lock: Optional[asyncio.Lock] = None
-        self._last_request_time: float = 0.0
+        # Pacing is NOT used here — the rate_limiter handles pacing.
+        # (Removed _pace_lock and associated mechanism per Bug #9 fix.)
+        # Bug #18: Shared TTL cache for get_token_info to eliminate duplicate
+        # GMGN calls from PriceOracle AND TradeExecutor.
+        self._info_cache: dict[str, tuple[float, dict]] = {}  # address -> (timestamp, info_dict)
+        self._INFO_CACHE_TTL = 3.0  # short TTL; prices change every tick
         if self.proxy:
             logger.warning(f"GMGN proxy: {self.proxy[:50]}...")
         else:
             logger.warning("GMGN: NO proxy")
 
-    def _ensure_lock(self) -> asyncio.Lock:
-        if self._session_lock is None:
-            self._session_lock = asyncio.Lock()
-        return self._session_lock
-
-    def _ensure_pace_lock(self) -> asyncio.Lock:
-        """Get-or-create the pacing lock (lazy, like _session_lock)."""
-        if self._pace_lock is None:
-            self._pace_lock = asyncio.Lock()
-        return self._pace_lock
-
-    async def _pace_request(self) -> None:
-        """Serialize requests via lock + sleep to enforce 2500ms min interval.
-
-        Charon's `paceGmgnRequest` pattern. Two callers cannot run concurrently
-        (lock) and the second one waits until 2500ms after the first finished.
-
-        Wraps lock acquisition in asyncio.wait_for to prevent indefinite hang
-        when a previous request gets stuck (e.g., curl_cffi proxy connection
-        hangs at C level and can't be cancelled by asyncio.wait_for). The lock
-        itself IS awaitable (cancellable), so this timeout is reliable.
-        """
-        try:
-            await asyncio.wait_for(
-                self._pace_request_impl(),
-                timeout=GMGN_TIMEOUT + 10,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"GMGN pace lock timeout ({GMGN_TIMEOUT + 10}s) — "
-                "previous request may be stuck, skipping this one"
-            )
-
-    async def _pace_request_impl(self) -> None:
-        async with self._ensure_pace_lock():
-            now = time.time()
-            elapsed_ms = (now - self._last_request_time) * 1000.0
-            if elapsed_ms < GMGN_DEFAULT_REQUEST_DELAY_MS:
-                wait_s = (GMGN_DEFAULT_REQUEST_DELAY_MS - elapsed_ms) / 1000.0
-                await asyncio.sleep(wait_s)
-            self._last_request_time = time.time()
-
     async def start(self):
         """Eagerly initialize HTTP session. Call once at bot startup."""
-        async with self._ensure_lock():
+        async with self._session_lock:
             if self._session is None:
-                self._session = AsyncSession(
-                    impersonate="chrome",
-                    timeout=GMGN_TIMEOUT,
-                    connect_timeout=10,
-                )
+                timeout = aiohttp.ClientTimeout(total=GMGN_TIMEOUT)
+                if self.proxy:
+                    self._session = aiohttp.ClientSession(
+                        timeout=timeout,
+                        proxy=self.proxy,
+                    )
+                else:
+                    self._session = aiohttp.ClientSession(timeout=timeout)
                 logger.info("GMGN: session initialized")
 
-    async def _get_session(self) -> AsyncSession:
-        # C1 fix: lock around the fallback init path.
-        async with self._ensure_lock():
+    async def _get_session(self) -> aiohttp.ClientSession:
+        async with self._session_lock:
             if self._session is None:
                 # Fallback only — start() should have been called
-                self._session = AsyncSession(
-                    impersonate="chrome",
-                    timeout=GMGN_TIMEOUT,
-                    connect_timeout=10,
-                )
+                timeout = aiohttp.ClientTimeout(total=GMGN_TIMEOUT)
+                if self.proxy:
+                    self._session = aiohttp.ClientSession(
+                        timeout=timeout,
+                        proxy=self.proxy,
+                    )
+                else:
+                    self._session = aiohttp.ClientSession(timeout=timeout)
             return self._session
 
     async def close(self):
@@ -130,11 +99,6 @@ class GMGNClient:
             "Content-Type": "application/json",
         }
 
-    def _proxy_dict(self) -> dict:
-        if self.proxy:
-            return {"https": self.proxy, "http": self.proxy}
-        return {}
-
     def _backoff_active(self) -> bool:
         return time.time() < self._backoff_until
 
@@ -145,6 +109,9 @@ class GMGNClient:
         - Cloudflare challenge (body contains 'cf_chl' or 'Just a moment'): 30 min
         - 429: now + retry_after (cap 60s) OR 30s default
         - 403: now + 10 min
+
+        NOTE: This backoff logic is duplicated in core/price_oracle.py and
+        core/jupiter_client.py. Keep in sync across all three locations.
         """
         is_cloudflare = (
             "challenge-platform" in body
@@ -185,27 +152,21 @@ class GMGNClient:
         try:
             if self.rate_limiter:
                 await self.rate_limiter.acquire(1)
-            await self._pace_request()
             query = {**(params or {}), **self._auth_params()}
             session = await self._get_session()
-            resp = await asyncio.wait_for(
-                session.get(
-                    f"{self.host}{path}",
-                    params=query,
-                    headers=self._headers(),
-                    proxies=self._proxy_dict(),
-                    timeout=GMGN_TIMEOUT,
-                ),
-                timeout=GMGN_TIMEOUT + 5,
-            )
-            if resp.status_code != 200:
-                body = (resp.text or "")[:500]
-                if resp.status_code in (429, 403):
-                    retry_after = self._extract_retry_after(resp)
-                    self._set_backoff(resp.status_code, body, retry_after)
-                logger.warning(f"GMGN GET {path}: HTTP {resp.status_code} - {body[:200]}")
-                return {}
-            data = resp.json()
+            async with session.get(
+                f"{self.host}{path}",
+                params=query,
+                headers=self._headers(),
+            ) as resp:
+                if resp.status != 200:
+                    body = (await resp.text() or "")[:500]
+                    if resp.status in (429, 403):
+                        retry_after = self._extract_retry_after(resp)
+                        self._set_backoff(resp.status, body, retry_after)
+                    logger.warning(f"GMGN GET {path}: HTTP {resp.status} - {body[:200]}")
+                    return {}
+                data = await resp.json()
             if data.get("code") != 0:
                 logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
                 return {}
@@ -227,29 +188,23 @@ class GMGNClient:
         try:
             if self.rate_limiter:
                 await self.rate_limiter.acquire(1)
-            await self._pace_request()
             auth = self._auth_params()
             full_query = {**(query or {}), **auth}
             session = await self._get_session()
-            resp = await asyncio.wait_for(
-                session.post(
-                    f"{self.host}{path}",
-                    params=full_query,
-                    json=body or {},
-                    headers=self._headers(),
-                    proxies=self._proxy_dict(),
-                    timeout=GMGN_TIMEOUT,
-                ),
-                timeout=GMGN_TIMEOUT + 5,
-            )
-            if resp.status_code != 200:
-                body_text = (resp.text or "")[:500]
-                if resp.status_code in (429, 403):
-                    retry_after = self._extract_retry_after(resp)
-                    self._set_backoff(resp.status_code, body_text, retry_after)
-                logger.warning(f"GMGN POST {path}: HTTP {resp.status_code} - {body_text[:300]}")
-                return {}
-            data = resp.json()
+            async with session.post(
+                f"{self.host}{path}",
+                params=full_query,
+                json=body or {},
+                headers=self._headers(),
+            ) as resp:
+                if resp.status != 200:
+                    body_text = (await resp.text() or "")[:500]
+                    if resp.status in (429, 403):
+                        retry_after = self._extract_retry_after(resp)
+                        self._set_backoff(resp.status, body_text, retry_after)
+                    logger.warning(f"GMGN POST {path}: HTTP {resp.status} - {body_text[:300]}")
+                    return {}
+                data = await resp.json()
             if data.get("code") != 0:
                 logger.warning(f"GMGN {path}: {data.get('error')} - {data.get('message')}")
                 return {}
@@ -268,7 +223,16 @@ class GMGNClient:
         return data.get("rank", []) if isinstance(data, dict) else []
 
     async def get_token_info(self, address: str) -> dict:
-        return await self._get("/v1/token/info", {"chain": "sol", "address": address})
+        # Bug #18: Cached result avoids duplicate GMGN calls from
+        # PriceOracle._from_gmgn_usd and TradeExecutor._simulate_paper_price_walk.
+        now = time.time()
+        cached = self._info_cache.get(address)
+        if cached and (now - cached[0]) < self._INFO_CACHE_TTL:
+            return cached[1]
+        result = await self._get("/v1/token/info", {"chain": "sol", "address": address})
+        # Cache even empty results (prevent retry-spam within TTL window)
+        self._info_cache[address] = (time.time(), result)
+        return result
 
     async def get_token_security(self, address: str) -> dict:
         return await self._get("/v1/token/security", {"chain": "sol", "address": address})

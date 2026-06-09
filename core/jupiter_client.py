@@ -5,6 +5,12 @@ or transaction submission. All methods are safe to call from paper mode.
 
 Phase 2: add `get_swap_transaction()` for live swap building, plus
 Jito bundle support for MEV protection.
+
+Backoff note: This file has its own exponential retry for Jupiter HTTP
+calls. The authoritative backoff constants (429/403/Cloudflare) live in
+sources/gmgn.py (GMGN_BACKOFF_429_S, GMGN_BACKOFF_403_S,
+GMGN_BACKOFF_CLOUDFLARE_S). Keep both in sync. If extracting to a shared
+helper, put it in utils/helpers.py and import in both places.
 """
 import logging
 from typing import Optional

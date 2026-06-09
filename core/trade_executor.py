@@ -56,8 +56,9 @@ class TradeExecutor:
         self.slippage_bps = config.get("slippage_bps", DEFAULT_SLIPPAGE_BPS)
         from collections import OrderedDict
         self._paper_price_cache: "OrderedDict[str, dict]" = OrderedDict()
-        self._paper_price_cache_ttl = 5.0
+        self._paper_price_cache_ttl = 2.0
         self.MAX_PAPER_CACHE = 500
+        self._paper_price_in_flight: dict[str, float] = {}
 
     def _paper_cache_get(self, key: str):
         entry = self._paper_price_cache.get(key)
@@ -104,7 +105,11 @@ class TradeExecutor:
 
         if self.paper:
             entry_price_usd = 0.0
-            if self.price_oracle:
+            # Check shared paper cache to avoid duplicate GMGN calls via oracle.
+            cached = self._paper_cache_get(token.address)
+            if cached and (time.time() - cached["ts"]) < self._paper_price_cache_ttl:
+                entry_price_usd = cached["price"]
+            if entry_price_usd <= 0 and self.price_oracle:
                 try:
                     entry_price_usd = await self.price_oracle.get_price_in_usd(token.address)
                 except Exception as e:
@@ -274,33 +279,67 @@ class TradeExecutor:
         return 0.0
 
     async def _simulate_paper_price_walk(self, position: dict, reason: str) -> float:
-        """Get current token price in USD for paper mode with 5s cache.
+        """Get current token price in USD for paper mode with 2s cache and in-flight dedup.
 
-        Priority: oracle (3-source median USD) > GMGN info (USD).
-        Returns 0.0 on total failure (do NOT fall back to entry_price — that
-        would mask SL exits). Caches price per token_address to avoid
-        hammering sources at 4×/sec.
+        Priority: paper cache > in-flight wait > oracle (3-source median USD) > GMGN info.
 
-        Uses try/finally to ensure cache (including 0.0) is always written,
-        even when asyncio.wait_for cancels this coroutine in position_monitor.
-        Without this fix, every 250ms tick retries the full 5s timeout because
-        the cancelled coroutine never wrote its 0.0 result to cache.
+        In-flight flag prevents concurrent price walks for the same token. Always
+        cleared in finally (even on CancelledError) to prevent stuck flags.
+        Auto-clears if stale (>30s) as safety net against leaked flags.
         """
-        import time
         token_address = position.get("token_address", "")
         now = time.time()
+
+        # 1. Check cache first (fast path).
         cached = self._paper_price_cache.get(token_address)
         if cached and (now - cached["ts"]) < self._paper_price_cache_ttl:
             return cached["price"]
 
+        # 2. Check in-flight flag: if another fetch is in progress, wait or use stale.
+        in_flight_since = self._paper_price_in_flight.get(token_address, 0.0)
+        if in_flight_since > 0.0:
+            age = now - in_flight_since
+            if age > 30.0:
+                # Stuck flag — override and proceed.
+                logger.warning(
+                    f"[EXEC] paper price in-flight stale for "
+                    f"{token_address[:8]} ({age:.1f}s), overriding"
+                )
+                self._paper_price_in_flight.pop(token_address, None)
+            else:
+                # Wait briefly for the in-flight fetch to complete, then check.
+                await asyncio.sleep(0.05)
+                cached = self._paper_price_cache.get(token_address)
+                if cached and (now - cached["ts"]) < self._paper_price_cache_ttl:
+                    return cached["price"]
+                stale = self._paper_price_cache.get(token_address)
+                if stale:
+                    return stale["price"]
+                return 0.0
+
+        # 3. Set in-flight flag.
+        self._paper_price_in_flight[token_address] = now
+        # Evict any stuck in-flight flags (safety net).
+        self._evict_stale_in_flight()
+
         price = 0.0
         try:
+            # 4a. Try oracle (may have fresh price from its own cache).
             if self.price_oracle:
                 try:
-                    price = await self.price_oracle.get_price_in_usd(token_address)
+                    price = await asyncio.wait_for(
+                        self.price_oracle.get_price_in_usd(token_address),
+                        timeout=4.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug(f"[EXEC] oracle paper price timeout for {token_address[:8]}")
+                except asyncio.CancelledError:
+                    logger.debug(f"[EXEC] oracle paper price cancelled for {token_address[:8]}")
+                    raise
                 except Exception as e:
                     logger.debug(f"[EXEC] oracle paper price error: {e}")
 
+            # 4b. Fallback: direct GMGN call.
             if price <= 0 and self.gmgn:
                 try:
                     info = await asyncio.wait_for(
@@ -313,11 +352,14 @@ class TradeExecutor:
                         price = float(price_val)
                 except asyncio.TimeoutError:
                     logger.debug(f"[EXEC] paper price gmgn timeout for {token_address[:8]}")
+                except asyncio.CancelledError:
+                    logger.debug(f"[EXEC] paper price gmgn cancelled for {token_address[:8]}")
+                    raise
                 except Exception as e:
                     logger.debug(f"[EXEC] paper price fetch error: {e}")
 
+            # 4c. Final fallback: position's raw_gmgn_json (stored at buy time).
             if price <= 0:
-                # Final fallback: position's raw_gmgn_json (USD already).
                 try:
                     raw_json = position.get("raw_gmgn_json", "")
                     if raw_json:
@@ -329,9 +371,19 @@ class TradeExecutor:
                 except Exception as e:
                     logger.debug(f"[EXEC] paper price walk parse error: {e}")
         finally:
-            self._paper_price_cache[token_address] = {"ts": now, "price": price}
+            # Always cache result and clear in-flight, even on CancelledError.
+            self._paper_price_cache[token_address] = {"ts": time.time(), "price": price}
+            self._paper_price_in_flight.pop(token_address, None)
 
         return price
+
+    def _evict_stale_in_flight(self):
+        """Remove in-flight flags older than 30s as a safety net."""
+        now = time.time()
+        stale = [addr for addr, ts in self._paper_price_in_flight.items()
+                 if now - ts > 30.0]
+        for addr in stale:
+            self._paper_price_in_flight.pop(addr, None)
 
     async def execute_sell(self, position: dict, sell_pct: float,
                             reason: str,

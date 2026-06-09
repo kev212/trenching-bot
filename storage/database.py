@@ -261,17 +261,24 @@ class Database:
     def __init__(self, db_path: str = "trenching.db"):
         self.db_path = db_path
         self.db: Optional[aiosqlite.Connection] = None
-        self._lock = asyncio.Lock()
+        # Bug #5 fix: read/write lock separation instead of single global lock.
+        # Read methods acquire _read_lock (allowing concurrent reads).
+        # Write methods acquire _write_lock (serializing writes only).
+        self._read_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
+        # Bug #5 fix: dirty flag avoids unnecessary COMMITs when no writes occurred.
+        self._dirty = False
 
     async def init(self):
         self.db = await aiosqlite.connect(self.db_path)
         self.db.row_factory = aiosqlite.Row
-        async with self._lock:
+        async with self._write_lock:
             await self.db.execute("PRAGMA journal_mode=WAL")
             await self.db.execute("PRAGMA busy_timeout=5000")
             await self.db.executescript(DB_SCHEMA)
             await self._migrate()
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     async def _migrate(self):
         """Lightweight ALTER TABLE migrations for existing DBs.
@@ -298,26 +305,35 @@ class Database:
                 pass
 
     async def close(self):
-        async with self._lock:
+        async with self._write_lock:
             if self.db:
                 await self.db.close()
 
+    async def _commit_impl(self):
+        """Internal commit — does NOT acquire locks (caller must hold appropriate lock)."""
+        if self._dirty and self.db:
+            await self.db.commit()
+            self._dirty = False
+
     async def commit(self):
-        async with self._lock:
-            if self.db:
-                await self.db.commit()
+        """Public commit — acquires write lock, only commits if dirty."""
+        async with self._write_lock:
+            await self._commit_impl()
 
     async def _execute(self, sql: str, params: tuple = ()) -> aiosqlite.Cursor:
-        async with self._lock:
+        """Generic execute — uses write lock since it could be a write operation."""
+        async with self._write_lock:
             return await self.db.execute(sql, params)
 
     async def _fetchone(self, sql: str, params: tuple = ()):
-        async with self._lock:
+        """Read-only fetch — uses read lock for concurrency."""
+        async with self._read_lock:
             cur = await self.db.execute(sql, params)
             return await cur.fetchone()
 
     async def _fetchall(self, sql: str, params: tuple = ()) -> list:
-        async with self._lock:
+        """Read-only fetch — uses read lock for concurrency."""
+        async with self._read_lock:
             cur = await self.db.execute(sql, params)
             return await cur.fetchall()
 
@@ -327,7 +343,7 @@ class Database:
         Used by the DB-STATS logger; kept here so callers don't reach into
         `self.db.db` directly (which would bypass the lock).
         """
-        async with self._lock:
+        async with self._read_lock:
             cur = await self.db.execute(
                 "SELECT (SELECT COUNT(*) FROM filter_outcomes) as fo, "
                 "(SELECT COUNT(*) FROM filter_outcomes WHERE passed = 1) as fo_passed, "
@@ -343,7 +359,7 @@ class Database:
         }
 
     async def save_call(self, call: CallRecord) -> int:
-        async with self._lock:
+        async with self._write_lock:
             cursor = await self.db.execute(
                 """INSERT OR REPLACE INTO calls
                 (token_address, token_name, token_symbol, call_time, entry_price,
@@ -365,11 +381,12 @@ class Database:
                     call.completed_at.isoformat() if call.completed_at else None,
                 ),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
         return cursor.lastrowid
 
     async def get_call_by_address(self, address: str) -> Optional[CallRecord]:
-        async with self._lock:
+        async with self._read_lock:
             cursor = await self.db.execute(
                 "SELECT * FROM calls WHERE token_address = ?", (address,)
             )
@@ -379,7 +396,7 @@ class Database:
         return self._row_to_call(row)
 
     async def get_active_calls(self) -> list[CallRecord]:
-        async with self._lock:
+        async with self._read_lock:
             cursor = await self.db.execute(
                 "SELECT * FROM calls WHERE status = 'PENDING' ORDER BY call_time DESC"
             )
@@ -389,7 +406,7 @@ class Database:
     async def get_calls_in_range(
         self, start: datetime, end: datetime
     ) -> list[CallRecord]:
-        async with self._lock:
+        async with self._read_lock:
             cursor = await self.db.execute(
                 "SELECT * FROM calls WHERE call_time BETWEEN ? AND ? ORDER BY call_time",
                 (start.isoformat(), end.isoformat()),
@@ -400,7 +417,7 @@ class Database:
     async def update_call_status(
         self, call_id: int, status: CallStatus, max_gain: float = 1.0
     ):
-        async with self._lock:
+        async with self._write_lock:
             now = datetime.now(timezone.utc).isoformat()
             await self.db.execute(
                 """UPDATE calls SET status = ?, max_gain = MAX(max_gain, ?),
@@ -409,7 +426,8 @@ class Database:
                  WHERE id = ?""",
                 (status.value, max_gain, status.value, now, max_gain, now, call_id),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     async def update_call_max_gain(self, call_id: int, max_gain: float) -> None:
         """A4: snapshot-only helper. Updates max_gain without changing status.
@@ -417,7 +435,7 @@ class Database:
         price_monitor calls this instead of update_call_status because it
         must NOT resolve calls (that was the dual-exit-system bug).
         """
-        async with self._lock:
+        async with self._write_lock:
             now = datetime.now(timezone.utc).isoformat()
             await self.db.execute(
                 """UPDATE calls SET max_gain = MAX(max_gain, ?),
@@ -425,10 +443,11 @@ class Database:
                  WHERE id = ?""",
                 (max_gain, max_gain, now, call_id),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     async def save_price_snapshot(self, snapshot: PriceSnapshot):
-        async with self._lock:
+        async with self._write_lock:
             await self.db.execute(
                 "INSERT INTO price_snapshots (call_id, snapshot_time, price, gain) VALUES (?, ?, ?, ?)",
                 (
@@ -438,13 +457,14 @@ class Database:
                     snapshot.gain,
                 ),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     async def save_llm_decision(
         self, call_id: int, score: int, verdict: str, reasoning: str,
         confidence: float, key_factors: list, processing_time_ms: int
     ):
-        async with self._lock:
+        async with self._write_lock:
             import json
             await self.db.execute(
                 """INSERT INTO llm_decisions
@@ -452,14 +472,15 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (call_id, score, verdict, reasoning, confidence, json.dumps(key_factors), processing_time_ms),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     async def save_adjustment(
         self, filter_name: str, param_name: str, old_value: float,
         new_value: float, reason: str, confidence: float, win_rate_before: float,
         resulting_version: int = 0,
     ):
-        async with self._lock:
+        async with self._write_lock:
             await self.db.execute(
                 """INSERT INTO filter_adjustments
                 (filter_name, param_name, old_value, new_value, reason, confidence,
@@ -468,10 +489,11 @@ class Database:
                 (filter_name, param_name, old_value, new_value, reason, confidence,
                  datetime.now(timezone.utc).isoformat(), win_rate_before, resulting_version),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     async def get_adjustments_since(self, since: datetime):
-        async with self._lock:
+        async with self._read_lock:
             cursor = await self.db.execute(
                 "SELECT * FROM filter_adjustments WHERE applied_at >= ? AND reverted = FALSE",
                 (since.isoformat(),),
@@ -480,16 +502,17 @@ class Database:
         return [dict(r) for r in rows]
 
     async def revert_adjustment(self, adjustment_id: int, reason: str):
-        async with self._lock:
+        async with self._write_lock:
             await self.db.execute(
                 """UPDATE filter_adjustments SET reverted = TRUE, reverted_at = ?, revert_reason = ?
                  WHERE id = ?""",
                 (datetime.now(timezone.utc).isoformat(), reason, adjustment_id),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     async def get_win_rate_since(self, since: datetime) -> tuple[int, int, float]:
-        async with self._lock:
+        async with self._read_lock:
             cursor = await self.db.execute(
                 """SELECT COUNT(*) as total,
                  SUM(CASE WHEN status = 'WIN' THEN 1 ELSE 0 END) as wins
@@ -510,7 +533,7 @@ class Database:
         against calls made UNDER the new params, not against a global
         snapshot that includes old-param calls.
         """
-        async with self._lock:
+        async with self._read_lock:
             cursor = await self.db.execute(
                 """SELECT COUNT(*) as total,
                  SUM(CASE WHEN status = 'WIN' THEN 1 ELSE 0 END) as wins
@@ -524,7 +547,7 @@ class Database:
         return total, wins, wr
 
     async def save_daily_stats(self, date: str, stats: dict):
-        async with self._lock:
+        async with self._write_lock:
             await self.db.execute(
                 """INSERT OR REPLACE INTO daily_stats
                 (date, total_calls, wins, losses, pending, win_rate, avg_gain, best_token, best_gain)
@@ -535,10 +558,11 @@ class Database:
                     stats.get("best_token"), stats.get("best_gain"),
                 ),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     async def save_recap(self, recap: dict):
-        async with self._lock:
+        async with self._write_lock:
             await self.db.execute(
                 """INSERT INTO recaps
                 (period_start, period_end, total_calls, wins, losses, pending, win_rate, avg_gain, best_token, best_gain, llm_loss_analysis)
@@ -550,7 +574,8 @@ class Database:
                     recap.get("best_gain"), recap.get("llm_loss_analysis"),
                 ),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     # Phase E2-Alert: filter_outcomes (per-token audit trail)
 
@@ -571,7 +596,7 @@ class Database:
     ):
         """Save outcome of hard-gate filter check for every token seen (pass or fail)."""
         import json as _json
-        async with self._lock:
+        async with self._write_lock:
             await self.db.execute(
                 """INSERT INTO filter_outcomes
                 (token_address, token_name, token_symbol, market_cap, holders_count, age_minutes,
@@ -583,7 +608,8 @@ class Database:
                     was_retried, retry_count, filter_params_version,
                 ),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     async def save_skip_decision(
         self,
@@ -602,7 +628,7 @@ class Database:
     ):
         """Save every LLM #2 SKIP verdict for retro-tuning analysis."""
         import json as _json
-        async with self._lock:
+        async with self._write_lock:
             await self.db.execute(
                 """INSERT INTO skip_decisions
                 (token_address, token_name, token_symbol, llm_score, llm_reasoning, llm_key_factors,
@@ -614,7 +640,8 @@ class Database:
                     top15_pct, social_score, _json.dumps(feature_vector),
                 ),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     async def save_loss_analysis(
         self,
@@ -631,7 +658,7 @@ class Database:
         elapsed_seconds: float,
     ):
         """Save LLM #3 root-cause analysis for a LOSS call."""
-        async with self._lock:
+        async with self._write_lock:
             await self.db.execute(
                 """INSERT INTO loss_analyses
                 (call_id, token_address, token_symbol, root_cause, wrong_filter, suggestion,
@@ -642,7 +669,8 @@ class Database:
                     pattern, confidence, llm_raw, max_gain, elapsed_seconds,
                 ),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     async def get_filter_performance_since(self, since: datetime) -> dict:
         """Compute per-filter pass/fail rates from filter_outcomes.
@@ -657,7 +685,7 @@ class Database:
         else:
             since_naive = since
         since_str = since_naive.strftime("%Y-%m-%d %H:%M:%S")
-        async with self._lock:
+        async with self._read_lock:
             cursor = await self.db.execute(
                 """SELECT filter_results, failed_filters FROM filter_outcomes
                 WHERE processed_at >= ?""",
@@ -695,7 +723,7 @@ class Database:
 
     async def save_position(self, position) -> int:
         """Save new position. Returns row id. USD-canonical."""
-        async with self._lock:
+        async with self._write_lock:
             cursor = await self.db.execute(
                 """INSERT INTO positions
                 (token_address, token_symbol, side, entry_tx_sig, entry_price,
@@ -717,7 +745,8 @@ class Database:
                     getattr(position, "sol_usd_at_entry", 0.0) or 0.0,
                 ),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
         return cursor.lastrowid
 
     async def update_position(self, position) -> None:
@@ -726,7 +755,7 @@ class Database:
             if isinstance(position, dict):
                 return position.get(key, default)
             return getattr(position, key, default)
-        async with self._lock:
+        async with self._write_lock:
             exit_time = _g("exit_time")
             await self.db.execute(
                 """UPDATE positions SET
@@ -748,11 +777,12 @@ class Database:
                     _g("id"),
                 ),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
 
     async def get_open_positions(self):
         """Return all OPEN positions as list of dicts (caller maps to dataclass)."""
-        async with self._lock:
+        async with self._read_lock:
             cursor = await self.db.execute(
                 "SELECT * FROM positions WHERE status = 'OPEN' ORDER BY entry_time DESC"
             )
@@ -763,7 +793,7 @@ class Database:
 
     async def get_closed_positions(self, limit: int = 15) -> list:
         """Return last N CLOSED positions for /history. Uses self._lock."""
-        async with self._lock:
+        async with self._read_lock:
             cursor = await self.db.execute(
                 "SELECT * FROM positions WHERE status = 'CLOSED' "
                 "ORDER BY exit_time DESC LIMIT ?",
@@ -774,7 +804,7 @@ class Database:
 
     async def get_pnl_summary(self) -> dict:
         """Return aggregated PnL summary for /pnl. Uses self._lock."""
-        async with self._lock:
+        async with self._read_lock:
             cursor = await self.db.execute(
                 "SELECT COUNT(*) as n, "
                 "COALESCE(SUM(pnl_sol), 0) as realized_sol, "
@@ -808,7 +838,7 @@ class Database:
 
     async def save_trade(self, trade) -> int:
         """Save a Trade (BUY or SELL). Returns row id."""
-        async with self._lock:
+        async with self._write_lock:
             cursor = await self.db.execute(
                 """INSERT INTO trades
                 (position_id, side, tx_signature, amount_in, amount_out, price,
@@ -821,19 +851,21 @@ class Database:
                     trade.jito_tip_sol, trade.slot, trade.status, trade.error,
                 ),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
         return cursor.lastrowid
 
     async def save_risk_event(self, event_type: str, token_address: str = "",
                                 details: str = "", paper: bool = True) -> int:
         """Log a risk event (daily_loss, position_limit, etc)."""
-        async with self._lock:
+        async with self._write_lock:
             cursor = await self.db.execute(
                 """INSERT INTO risk_events
                 (event_type, token_address, details, paper) VALUES (?, ?, ?, ?)""",
                 (event_type, token_address, details, 1 if paper else 0),
             )
-            await self.db.commit()
+            self._dirty = True
+            await self._commit_impl()
         return cursor.lastrowid
 
     def _row_to_position(self, row) -> dict:

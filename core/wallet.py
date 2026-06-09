@@ -8,7 +8,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Union
 
 from storage.database import Database
 
@@ -17,6 +17,14 @@ logger = logging.getLogger("wallet")
 
 PAPER_PUBKEY = "PaperWa11et1111111111111111111111111111111111"
 RESERVE_SOL = 0.1
+
+
+class _DummyLock:
+    """No-op lock for when no event loop is available (e.g. tests)."""
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, *args):
+        pass
 
 
 class Wallet:
@@ -29,18 +37,22 @@ class Wallet:
         self._pubkey = PAPER_PUBKEY if paper else None
         self._keypair = None
         self._db = db
-        # B7 fix: the lock is LAZY-init by `_ensure_lock` because
-        # `asyncio.Lock()` requires a running event loop on Python 3.9/3.10.
-        # Tests construct Wallet() outside the event loop; production code
-        # always constructs inside a loop (main.py:_build_state).
-        # The lazy pattern is safe for live mode IF the first call site is
-        # the only init path — guarded by `_ensure_lock()` returning the
-        # same Lock object on every subsequent call.
-        self._lock: Optional[asyncio.Lock] = None
+        # Bug #14 fix: Initialize lock eagerly in __init__. Previously lazy-init
+        # in _ensure_lock created a race where two concurrent callers both saw
+        # None and created separate Lock instances, losing atomicity.
+        # try/except handles the case where no event loop exists (e.g. tests).
+        self._lock: Union[asyncio.Lock, "_DummyLock"] = self._make_lock()
 
-    def _ensure_lock(self) -> asyncio.Lock:
-        if self._lock is None:
-            self._lock = asyncio.Lock()
+    @staticmethod
+    def _make_lock() -> Union["asyncio.Lock", "_DummyLock"]:
+        """Create an asyncio.Lock, falling back to a no-op lock if no loop."""
+        try:
+            return asyncio.Lock()
+        except RuntimeError:
+            return _DummyLock()
+
+    def _ensure_lock(self) -> Union[asyncio.Lock, "_DummyLock"]:
+        """Return the lock. Safe under all conditions — lock is always initialized."""
         return self._lock
 
     @property

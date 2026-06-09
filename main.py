@@ -28,7 +28,7 @@ from alerts.dispatcher import dispatcher
 from alerts.bot import bot_handler
 from core.monitoring import FailureTracker
 from utils.logger import setup_logger
-from utils.helpers import RateLimiter
+from utils.helpers import RateLimiter, LRUSet, _log_exception
 
 from core.wallet import Wallet
 from core.jupiter_client import JupiterClient
@@ -131,7 +131,7 @@ class TrenchingBot:
         self.llm_rate_limiter = RateLimiter(10, 60)  # LLM: 10 req/min
         self.tasks = {}
         self.workers = []
-        self.seen_trenches = set()
+        self.seen_trenches = LRUSet(max_size=10000, ttl_seconds=3600)
         self.shutdown_event = asyncio.Event()
         # Failure trackers for long-running tasks (Item #3)
         self.trackers: dict[str, FailureTracker] = {}
@@ -139,6 +139,8 @@ class TrenchingBot:
         self._shutdown_task = None
         # Watchdog: track last activity timestamp
         self._last_activity = time.monotonic()
+        # Track background tasks to prevent 'exception was never retrieved' warnings
+        self._background_tasks: set[asyncio.Task] = set()
 
         # Trading components (Phase 1 paper mode)
         self.trading_config = load_trading_config()
@@ -246,22 +248,43 @@ class TrenchingBot:
 
         self._update_activity()  # initial heartbeat
 
-        self.tasks = {
-            "gmgn_poller": asyncio.create_task(self._gmgn_poller()),
-            "trenches_poller": asyncio.create_task(self._trenches_poller()),
-            "retry_scheduler": asyncio.create_task(self._retry_scheduler()),
-            **{f"worker_{i}": asyncio.create_task(self._token_worker(i))
+        # Create all background tasks with tracking to prevent silent exception loss
+        task_defs = {
+            "gmgn_poller": self._gmgn_poller(),
+            "trenches_poller": self._trenches_poller(),
+            "retry_scheduler": self._retry_scheduler(),
+            **{f"worker_{i}": self._token_worker(i)
                for i in range(settings.min_workers)},
-            "price_monitor": asyncio.create_task(self._run_forever("price_monitor", price_monitor)),
-            "hourly_recap": asyncio.create_task(self._run_forever("hourly_recap", hourly_recap)),
-            "daily_optimizer": asyncio.create_task(self._run_forever("daily_optimizer", daily_optimizer)),
-            "revert_monitor": asyncio.create_task(self._run_forever("revert_monitor", revert_monitor)),
-            "bot_handler": asyncio.create_task(self._run_forever("bot_handler", bot_handler)),
-            "metrics": asyncio.create_task(self._metrics_loop()),
-            "db_stats": asyncio.create_task(self._db_stats_loop()),
-            "position_monitor": asyncio.create_task(self._run_forever("position_monitor", position_monitor, self.position_manager, self.risk_manager, self.jupiter, self.executor, self.trading_config)),
-            "watchdog": asyncio.create_task(self._watchdog_loop()),
+            "price_monitor": self._run_forever("price_monitor", price_monitor),
+            "hourly_recap": self._run_forever("hourly_recap", hourly_recap),
+            "daily_optimizer": self._run_forever("daily_optimizer", daily_optimizer),
+            "revert_monitor": self._run_forever("revert_monitor", revert_monitor),
+            "bot_handler": self._run_forever("bot_handler", bot_handler),
+            "metrics": self._metrics_loop(),
+            "db_stats": self._db_stats_loop(),
+            "position_monitor": self._run_forever("position_monitor", position_monitor, self.position_manager, self.risk_manager, self.jupiter, self.executor, self.trading_config),
+            "watchdog": self._watchdog_loop(),
         }
+        self.tasks = {}
+        for name, coro in task_defs.items():
+            task = asyncio.create_task(coro, name=name)
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            task.add_done_callback(_log_exception)
+            self.tasks[name] = task
+
+        # Periodic cleanup for background tasks (runs every 5 min)
+        async def _cleanup_background_tasks():
+            while True:
+                await asyncio.sleep(300)
+                # trim any stray references; the set is self-cleaning via discard callback
+                _ = len(self._background_tasks)
+
+        cleanup = asyncio.create_task(_cleanup_background_tasks(), name="_cleanup_background_tasks")
+        self._background_tasks.add(cleanup)
+        cleanup.add_done_callback(self._background_tasks.discard)
+        cleanup.add_done_callback(_log_exception)
+        self.tasks["_cleanup_background_tasks"] = cleanup
 
         logger.info(f"Launched {len(self.tasks)} tasks")
         logger.info("Bot running! Press Ctrl+C to stop")
@@ -278,7 +301,7 @@ class TrenchingBot:
                 await coro_func(self.state, self.db, *args)
                 retries = 0
             except asyncio.CancelledError:
-                break
+                raise  # Let shutdown proceed
             except Exception as e:
                 retries += 1
                 logger.error(f"{name} error ({retries}): {e}")
@@ -288,10 +311,12 @@ class TrenchingBot:
                     retries = 0
                 else:
                     await asyncio.sleep(min(2 ** retries, 60))
+            except BaseException:
+                raise  # SystemExit/KeyboardInterrupt should propagate
 
     async def _gmgn_poller(self):
         logger.info("[TRENDING] Poller starting...")
-        seen = set()
+        seen = LRUSet(max_size=10000, ttl_seconds=3600)
         poll_count = 0
         ban_count = 0
         base_delay = 60
@@ -351,9 +376,6 @@ class TrenchingBot:
                 poll_count += 1
                 if new_count > 0:
                     logger.info(f"[TRENDING] #{poll_count}: +{new_count} tokens (queue:{self.queue.qsize()})")
-
-                if len(seen) > 10000:
-                    seen.clear()
 
                 await asyncio.sleep(delay)
                 # Track success in failure tracker
@@ -441,9 +463,6 @@ class TrenchingBot:
                 poll_count += 1
                 if new_count > 0:
                     logger.info(f"[TRENCHES] #{poll_count}: +{new_count} tokens (queue:{self.queue.qsize()})")
-
-                if len(self.seen_trenches) > 10000:
-                    self.seen_trenches.clear()
 
                 await asyncio.sleep(delay)
                 # Track success in failure tracker

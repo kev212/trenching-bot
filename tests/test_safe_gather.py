@@ -133,24 +133,27 @@ def test_safe_gather_with_exception_coro():
 
 
 def test_paper_price_walk_has_10s_cap():
-    """Fix #3: position monitor wraps paper price walk in 10s timeout."""
+    """Fix #3 + Bug #6: position monitor wraps paper price walk in 5s timeout
+    (refactored into _fetch_token_price helper)."""
     from tracking import position_monitor as pm
 
     with open(pm.__file__) as f:
         src = f.read()
 
-    # Must have asyncio.wait_for(executor._simulate_paper_price_walk, timeout=10)
+    # Must have asyncio.wait_for(executor._simulate_paper_price_walk, timeout=5)
+    # Now lives inside _fetch_token_price
     assert "asyncio.wait_for(" in src
     assert "_simulate_paper_price_walk(position, \"monitor\")" in src or \
            "_simulate_paper_price_walk(position, 'monitor')" in src
-    assert "timeout=10" in src, \
-        "paper price walk should be capped at 10s"
-    assert "current_price_usd = 0.0" in src, \
-        "on timeout, should return 0 price (skip SL/TP)"
+    assert "timeout=5" in src or "timeout=10" in src, \
+        "paper and live price walks should have timeout caps"
+    assert "price = 0.0" in src, \
+        "on timeout, should set price to 0 (skip SL/TP)"
 
 
 def test_live_price_walk_has_10s_cap():
-    """Fix #3: position monitor wraps live price retry in 10s timeout."""
+    """Fix #3: position monitor wraps live price retry in 10s timeout
+    (refactored into _fetch_token_price helper)."""
     from tracking import position_monitor as pm
 
     with open(pm.__file__) as f:
@@ -158,7 +161,7 @@ def test_live_price_walk_has_10s_cap():
 
     assert "get_token_price_in_sol_with_retry(token_address)" in src or \
            "get_token_price_in_sol_with_retry(token_address)" in src
-    assert "current_price_sol = 0.0" in src, \
+    assert "price = 0.0" in src, \
         "on timeout, should return 0 (skip SL/TP)"
 
 

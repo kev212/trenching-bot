@@ -5,6 +5,7 @@ advance position state (open → TP1 partial → TP2 partial → trailing close)
 """
 import asyncio
 import logging
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -20,13 +21,22 @@ class PositionManager:
         self.db = db
         # Per-address asyncio locks to prevent race conditions on peak_price
         # and other mutable position state.
-        self._position_locks: dict[str, asyncio.Lock] = {}
+        # Uses OrderedDict with LRU eviction at MAX_LOCKS to prevent unbounded growth.
+        self._position_locks: "OrderedDict[str, asyncio.Lock]" = OrderedDict()
         self._locks_guard = asyncio.Lock()
+        self.MAX_LOCKS = 1000
 
     def get_lock(self, address: str) -> asyncio.Lock:
-        """Get or create a lock for the given token address. Idempotent."""
+        """Get or create a lock for the given token address. Idempotent.
+        LRU eviction: oldest entries removed when over MAX_LOCKS.
+        """
         if address not in self._position_locks:
             self._position_locks[address] = asyncio.Lock()
+            # Evict oldest locks if over limit to prevent unbounded growth.
+            while len(self._position_locks) > self.MAX_LOCKS:
+                self._position_locks.popitem(last=False)
+        else:
+            self._position_locks.move_to_end(address)
         return self._position_locks[address]
 
     def cleanup_lock(self, address: str):

@@ -43,6 +43,10 @@ class PriceOracle:
 
     CACHE_MAX = 500
 
+    # Bug #11: Circuit breaker — open after N consecutive ALL-source failures
+    CIRCUIT_BREAKER_THRESHOLD = 5
+    CIRCUIT_BREAKER_COOLDOWN_S = 30.0  # stay open for 30s
+
     def __init__(self, gmgn=None, jupiter=None, dexscreener=None,
                  proxy: str = "", timeout: int = 10):
         self.gmgn = gmgn
@@ -56,12 +60,44 @@ class PriceOracle:
         # Jupiter backoff (Item #2)
         self._jupiter_backoff_until: float = 0.0
         self._jupiter_backoff_reason: str = ""
+        # Bug #11: Circuit breaker state
+        self._consecutive_failures: int = 0
+        self._circuit_open_until: float = 0.0
 
     def _evict_cache(self):
         if len(self._cache) > self.CACHE_MAX:
             oldest_keys = sorted(self._cache, key=lambda k: self._cache[k]["ts"])[:len(self._cache) // 4]
             for k in oldest_keys:
                 del self._cache[k]
+
+    # --- Bug #11: Circuit breaker ---
+    def _circuit_open(self) -> bool:
+        """Check whether the circuit breaker is currently OPEN (all sources
+        have failed >= CIRCUIT_BREAKER_THRESHOLD times consecutively)."""
+        if self._circuit_open_until > 0 and time.time() < self._circuit_open_until:
+            return True
+        # Circuit has cooled down — reset state
+        if self._circuit_open_until > 0:
+            self._circuit_open_until = 0.0
+            self._consecutive_failures = 0
+            logger.info("[ORACLE] Circuit breaker closed (cooldown elapsed)")
+        return False
+
+    def _record_success(self) -> None:
+        """Reset consecutive failure counter on any successful price fetch."""
+        if self._consecutive_failures > 0:
+            self._consecutive_failures = 0
+
+    def _record_failure(self) -> None:
+        """Increment consecutive failure counter. Open circuit if threshold hit."""
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self.CIRCUIT_BREAKER_THRESHOLD:
+            self._circuit_open_until = time.time() + self.CIRCUIT_BREAKER_COOLDOWN_S
+            logger.warning(
+                f"[ORACLE] Circuit breaker OPEN after "
+                f"{self._consecutive_failures} consecutive failures "
+                f"(cooldown {self.CIRCUIT_BREAKER_COOLDOWN_S}s)"
+            )
 
     async def start(self) -> None:
         """Eagerly initialize HTTP session + pre-warm SOL/USD rate.
@@ -102,9 +138,28 @@ class PriceOracle:
 
         Multi-source aggregation: DexScreener priceUsd, Jupiter Price v6,
         GMGN info.price. Returns median of valid sources. Cache 3s per token.
+
+        Bug #11: Checks circuit breaker first — if OPEN returns cached value
+        (or 0) instead of hammering sources. Tracks consecutive failures
+        across all sources.
         """
         if not token_address:
             return 0.0
+
+        # Bug #11: Circuit breaker check — avoid hammering sources when ALL
+        # are failing (e.g. DNS outage, proxy down, extended API outage).
+        if self._circuit_open():
+            cached = self._cache.get(token_address)
+            if cached:
+                logger.debug(
+                    f"[ORACLE] circuit OPEN, returning cached ${cached['price']:.10f} "
+                    f"for {token_address[:8]}"
+                )
+                self._record_success()  # cached value is a "success"
+                return cached["price"]
+            logger.debug(f"[ORACLE] circuit OPEN and no cache for {token_address[:8]} — returning 0")
+            return 0.0
+
         now = time.time()
         cached = self._cache.get(token_address)
         if cached and (now - cached["ts"]) < CACHE_TTL:
@@ -135,7 +190,9 @@ class PriceOracle:
                     f"[ORACLE] all sources failed for {token_address[:8]}, "
                     f"returning cached {cached['price']:.10f}"
                 )
+                self._record_success()  # cached value is a "success"
                 return cached["price"]
+            self._record_failure()
             return 0.0
 
         valid_sorted = sorted(valid)
@@ -148,6 +205,7 @@ class PriceOracle:
         logger.debug(f"[ORACLE] {token_address[:8]}: median=${median:.10f} ({sources})")
         self._cache[token_address] = {"ts": now, "price": median}
         self._evict_cache()
+        self._record_success()  # got at least one valid source
         return median
 
     async def get_sol_price_usd(self) -> float:
@@ -160,7 +218,22 @@ class PriceOracle:
 
         Returns 0 only on total failure AND no cached value. If backoff is
         active on Jupiter, skips Jupiter sources and tries DexScreener.
+
+        Bug #11: Circuit breaker check + failure tracking.
         """
+        # Bug #11: Circuit breaker — if open, return stale cache or 0
+        if self._circuit_open():
+            cached = self._sol_price_cache.get("SOL")
+            if cached:
+                logger.debug(
+                    f"[SOL-USD] circuit OPEN, returning stale "
+                    f"${cached['price']:.2f}"
+                )
+                self._record_success()
+                return cached["price"]
+            logger.debug("[SOL-USD] circuit OPEN and no cache — returning 0")
+            return 0.0
+
         now = time.time()
         cached = self._sol_price_cache.get("SOL")
         if cached and (now - cached["ts"]) < SOL_PRICE_CACHE_TTL:
@@ -182,6 +255,7 @@ class PriceOracle:
                 if sol_usd and sol_usd > 0:
                     self._sol_price_cache["SOL"] = {"ts": now, "price": sol_usd}
                     logger.debug(f"[SOL-USD] {name} returned ${sol_usd:.2f}")
+                    self._record_success()
                     return sol_usd
             except Exception as e:
                 logger.debug(f"[SOL-USD] {name} failed: {e}")
@@ -190,8 +264,10 @@ class PriceOracle:
         # All sources failed
         if cached:
             logger.debug(f"[SOL-USD] all sources failed, returning stale ${cached['price']:.2f}")
+            self._record_success()  # stale cache is a "success"
             return cached["price"]
         logger.warning("[SOL-USD] all sources failed AND no cache — returning 0 (no SOL/USD rate)")
+        self._record_failure()
         return 0.0
 
     async def _fetch_sol_dexscreener(self) -> float:

@@ -165,49 +165,50 @@ class TwitterClient:
             return ""
 
         browser = None
+        p = None
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--disable-blink-features=AutomationControlled"],
-                )
-                ctx = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                               "AppleWebKit/537.36 (KHTML, like Gecko) "
-                               "Chrome/120.0.0.0 Safari/537.36",
-                    viewport={"width": 1280, "height": 720},
-                )
-                page = await ctx.new_page()
-                url = f"https://x.com/i/communities/{community_id}"
-                # Fix #4: per-step timeouts. Each Playwright op can hang on
-                # X.com's anti-bot challenge; without these, the outer 45s
-                # timeout in _social_analysis could be eaten by a single
-                # stuck step. Total worst case: 5+3+3+3+3 = 17s, leaving
-                # the 45s outer cap as a real safety net.
-                await asyncio.wait_for(
-                    page.goto(url, wait_until="domcontentloaded", timeout=15000),
-                    timeout=18.0,
-                )
-                await asyncio.wait_for(page.wait_for_timeout(3000), timeout=5.0)
+            p = await async_playwright().start()
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            ctx = await browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 720},
+            )
+            page = await ctx.new_page()
+            url = f"https://x.com/i/communities/{community_id}"
+            # Fix #4: per-step timeouts. Each Playwright op can hang on
+            # X.com's anti-bot challenge; without these, the outer 45s
+            # timeout in _social_analysis could be eaten by a single
+            # stuck step. Total worst case: 5+3+3+3+3 = 17s, leaving
+            # the 45s outer cap as a real safety net.
+            await asyncio.wait_for(
+                page.goto(url, wait_until="domcontentloaded", timeout=15000),
+                timeout=18.0,
+            )
+            await asyncio.wait_for(page.wait_for_timeout(3000), timeout=5.0)
 
-                # Click About tab
-                about = page.get_by_text("About", exact=True)
-                await asyncio.wait_for(about.click(), timeout=5.0)
-                await asyncio.wait_for(page.wait_for_timeout(2000), timeout=4.0)
+            # Click About tab
+            about = page.get_by_text("About", exact=True)
+            await asyncio.wait_for(about.click(), timeout=5.0)
+            await asyncio.wait_for(page.wait_for_timeout(2000), timeout=4.0)
 
-                text = await asyncio.wait_for(page.inner_text("body"), timeout=5.0)
+            text = await asyncio.wait_for(page.inner_text("body"), timeout=5.0)
 
-                # Extract creator from "Created ... by @handle"
-                match = re.search(r"by\s+@(\w+)", text)
-                if match:
-                    handle = match.group(1)
-                    logger.info(f"[COMMUNITY] {community_id}: creator=@{handle}")
-                    self._community_cache[community_id] = (handle, time.time())
-                    return handle
+            # Extract creator from "Created ... by @handle"
+            match = re.search(r"by\s+@(\w+)", text)
+            if match:
+                handle = match.group(1)
+                logger.info(f"[COMMUNITY] {community_id}: creator=@{handle}")
+                self._community_cache[community_id] = (handle, time.time())
+                return handle
 
-                logger.warning(f"[COMMUNITY] {community_id}: no creator found in About tab")
-                # Don't cache negative results — they may be transient.
-                return ""
+            logger.warning(f"[COMMUNITY] {community_id}: no creator found in About tab")
+            # Don't cache negative results — they may be transient.
+            return ""
 
         except Exception as e:
             logger.error(f"[COMMUNITY] {community_id}: scrape failed: {e}")
@@ -215,6 +216,11 @@ class TwitterClient:
         finally:
             if browser:
                 try:
-                    await browser.close()
+                    await asyncio.wait_for(browser.close(), timeout=5.0)
+                except Exception:
+                    pass
+            if p:
+                try:
+                    await asyncio.wait_for(p.stop(), timeout=5.0)
                 except Exception:
                     pass

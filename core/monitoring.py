@@ -62,21 +62,28 @@ class FailureTracker:
             if self.consecutive_failures >= self.threshold:
                 now = time.time()
                 if now - self.last_alert_at >= self.cooldown_seconds:
-                    try:
-                        msg = (
-                            f"🚨 [{self.name}] failed {self.consecutive_failures}x in a row\n"
-                            f"Last error: {self.last_error}\n"
-                            f"Total failures: {self.total_failures} | "
-                            f"Total successes: {self.total_successes}"
-                        )
-                        await self.alert_fn(msg)
-                        self.last_alert_at = now
-                        logger.info(
-                            f"[{self.name}] Telegram alert sent (cooldown {self.cooldown_seconds}s)"
-                        )
-                    except Exception as alert_err:
-                        logger.error(f"[{self.name}] alert_fn failed: {alert_err}")
+                    msg = (
+                        f"🚨 [{self.name}] failed {self.consecutive_failures}x in a row\n"
+                        f"Last error: {self.last_error}\n"
+                        f"Total failures: {self.total_failures} | "
+                        f"Total successes: {self.total_successes}"
+                    )
+                    # Fire-and-forget: schedule alert without blocking monitor loop.
+                    asyncio.create_task(self._alert_with_timeout(msg))
+                    self.last_alert_at = now
+                    logger.info(
+                        f"[{self.name}] Telegram alert sent (cooldown {self.cooldown_seconds}s)"
+                    )
             return e
+
+    async def _alert_with_timeout(self, msg: str) -> None:
+        """Fire alert_fn with a 10s timeout to avoid blocking the monitor loop."""
+        try:
+            await asyncio.wait_for(self.alert_fn(msg), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"[{self.name}] alert_fn timed out after 10s")
+        except Exception as e:
+            logger.error(f"[{self.name}] alert_fn error: {e}")
 
     def stats(self) -> dict:
         """Return current state for inspection / metrics."""

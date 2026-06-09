@@ -97,3 +97,14 @@ def load_risk_rules() -> dict:
 
 
 settings = Settings()
+
+# Position monitor defaults (can be overridden by trading.json)
+POSITION_MONITOR_DEFAULTS = {
+    'stop_loss_pct': 50,
+    'tp1_sell_pct': 80,
+    'tp2_multiplier': 2.0,
+    'trailing_stop_pct': 20,
+    'time_limit_seconds': 0,
+    'min_hold_seconds': 30,
+    'extreme_tp_mult': 2.0,
+}
