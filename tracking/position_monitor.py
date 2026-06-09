@@ -13,7 +13,6 @@ on every exit.
 """
 import asyncio
 import logging
-import time as time_module
 from datetime import datetime, timezone
 
 from core.jupiter_client import JupiterClient
@@ -73,31 +72,7 @@ async def _process_position(
         current_price_usd = current_price_sol * (sol_usd_now or 0.0)
 
     if current_price_usd <= 0:
-        # Fix #2: when price source is down, evaluate TIME exit only —
-        # never fall back to entry_price (that would silently break SL).
-        held_so_far = (
-            (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
-            if position.get("entry_time") else 0
-        )
-        if time_limit > 0 and held_so_far > time_limit:
-            await executor.execute_sell(position, 100, "TIME", current_price_usd)
-            position_manager.cleanup_lock(token_address)
-            return {
-                "triggered": True,
-                "current_price": 0.0,
-                "entry": position["entry_price"],
-                "peak": position.get("peak_price", 0) or 0,
-                "held_so_far": held_so_far,
-                "last_reason": "TIME",
-            }
-        # Return price-failure signal so outer loop counts consecutive
-        # failures and force-closes after MAX_CONSECUTIVE_FAILURES.
-        # Previously returned {} which silently reset the failure counter.
-        return {
-            "triggered": False,
-            "price_failed": True,
-            "current_price": 0.0,
-        }
+        return {}
 
     entry = position["entry_price"]  # USD
     pos_lock = position_manager.get_lock(token_address)
@@ -290,16 +265,6 @@ async def position_monitor(state, db, position_manager: PositionManager,
     min_hold_seconds = config.get("min_hold_seconds", 30)
     extreme_tp_mult = config.get("extreme_tp_mult", 2.0)
 
-    MAX_CONSECUTIVE_FAILURES = 8  # 8 failures without price = force close (~2min worst case)
-
-    # Two failure counters:
-    #   consecutive_failures — outer timeout or process-level error
-    #   price_failures       — price walk returned 0 (with cooldown)
-    consecutive_failures: dict[str, int] = {}
-    price_failures: dict[str, int] = {}
-    price_failure_cooldown: dict[str, float] = {}
-    PRICE_FAILURE_COOLDOWN_S = 15.0  # one counted failure per ~15s min
-
     while True:
         await asyncio.sleep(check_interval)
         try:
@@ -335,81 +300,12 @@ async def position_monitor(state, db, position_manager: PositionManager,
                             f"peak=${result['peak']:.10f}, "
                             f"paper={is_paper}, hold={result['held_so_far']:.0f}s"
                         )
-                        consecutive_failures.pop(token_address, None)
-                        price_failures.pop(token_address, None)
-                        price_failure_cooldown.pop(token_address, None)
-                    elif result and result.get("price_failed"):
-                        # Price walk returned 0 (inner timeout or cached 0).
-                        # Count with cooldown so we don't fire 3× in 0.75s.
-                        now = time_module.time()
-                        last_ts = price_failure_cooldown.get(token_address, 0)
-                        if now - last_ts >= PRICE_FAILURE_COOLDOWN_S:
-                            price_failure_cooldown[token_address] = now
-                            price_failures[token_address] = price_failures.get(token_address, 0) + 1
-                            logger.warning(
-                                f"Position {position['token_symbol']} ({token_address[:8]}) price failure "
-                                f"[{price_failures[token_address]}/{MAX_CONSECUTIVE_FAILURES}]"
-                            )
-                    else:
-                        # Normal no-trigger (valid price, not at SL/TP yet).
-                        consecutive_failures.pop(token_address, None)
-                        price_failures.pop(token_address, None)
-                        price_failure_cooldown.pop(token_address, None)
                 except asyncio.TimeoutError:
-                    consecutive_failures[token_address] = consecutive_failures.get(token_address, 0) + 1
                     logger.warning(
-                        f"Position {token_address[:8]} monitor timeout "
-                        f"[{consecutive_failures[token_address]}/{MAX_CONSECUTIVE_FAILURES}]"
+                        f"Position {token_address[:8]} monitor timeout — skipping tick"
                     )
                 except Exception as e:
-                    consecutive_failures[token_address] = consecutive_failures.get(token_address, 0) + 1
                     logger.error(f"Position {token_address[:8]} monitor error: {e}")
-
-                # Check BOTH failure counters for force-close.
-                any_failures = max(
-                    consecutive_failures.get(token_address, 0),
-                    price_failures.get(token_address, 0),
-                )
-                if any_failures >= MAX_CONSECUTIVE_FAILURES:
-                    held = (
-                        (datetime.now(timezone.utc) - position["entry_time"]).total_seconds()
-                        if position.get("entry_time") else 0
-                    )
-                    logger.warning(
-                        f"[POS-MON] {position['token_symbol']} ({token_address[:8]}) "
-                        f"force-closing after {any_failures} consecutive failures "
-                        f"(held {held:.0f}s) — price feed blacked out"
-                    )
-                    try:
-                        await executor.execute_sell(position, 100, "STUCK", current_price_usd=0.0)
-                    except Exception as e:
-                        logger.error(f"Force-close failed: {e}")
-                    try:
-                        entry_tokens = position.get("entry_amount_token", 0) or 0
-                        exit_msg = format_exit_alert(
-                            symbol=position["token_symbol"],
-                            address=position["token_address"],
-                            entry_price=position.get("entry_price", 0) or 0,
-                            exit_price=position.get("entry_price", 0) or 0,
-                            pnl_sol=position.get("pnl_sol", 0) or 0,
-                            pnl_usd=position.get("pnl_usd", 0) or 0,
-                            pnl_pct=position.get("pnl_pct", 0) or 0,
-                            reason="STUCK",
-                            hold_seconds=held,
-                            paper=is_paper,
-                            position_size_sol=position.get("entry_amount_sol", 0) or 0,
-                            total_tokens=entry_tokens,
-                            sold_pct=100,
-                            sold_tokens=entry_tokens,
-                            remaining_tokens=0,
-                        )
-                        asyncio.create_task(_safe_send_alert(exit_msg))
-                    except Exception as e:
-                        logger.error(f"STUCK alert failed: {e}")
-                    consecutive_failures.pop(token_address, None)
-                    price_failures.pop(token_address, None)
-                    price_failure_cooldown.pop(token_address, None)
-                    position_manager.cleanup_lock(token_address)
 
         except Exception as e:
             logger.error(f"Position monitor error: {e}")

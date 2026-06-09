@@ -366,29 +366,18 @@ class TradeExecutor:
                 current_price_usd = current_price_sol * sol_usd_now if sol_usd_now > 0 else 0.0
 
         if current_price_usd <= 0:
-            if reason == "STUCK":
-                # STUCK force-close: use entry_price for 0% PnL.
-                # Without this, stuck positions never close because price
-                # walk keeps timing out and blocking the monitor.
-                current_price_usd = position.get("entry_price", 0) or 0
-                logger.warning(
-                    f"[EXEC] STUCK close for {position['token_symbol']} "
-                    f"({position['token_address'][:8]}): "
-                    f"price=${current_price_usd:.10f} ($0 PnL)"
+            logger.warning(
+                f"[EXEC] SELL-SKIPPED {position['token_symbol']} "
+                f"({position['token_address'][:8]}): no USD price, "
+                f"sell_pct={sell_pct:.0f}%, reason={reason}, paper={self.paper}"
+            )
+            if self.positions.db:
+                await self.positions.db.save_risk_event(
+                    "PRICE_MISSING", position["token_address"],
+                    f"symbol={position['token_symbol']}, reason={reason}, "
+                    f"action=SELL_SKIPPED, paper={self.paper}"
                 )
-            else:
-                logger.warning(
-                    f"[EXEC] SELL-SKIPPED {position['token_symbol']} "
-                    f"({position['token_address'][:8]}): no USD price, "
-                    f"sell_pct={sell_pct:.0f}%, reason={reason}, paper={self.paper}"
-                )
-                if self.positions.db:
-                    await self.positions.db.save_risk_event(
-                        "PRICE_MISSING", position["token_address"],
-                        f"symbol={position['token_symbol']}, reason={reason}, "
-                        f"action=SELL_SKIPPED, paper={self.paper}"
-                    )
-                return None
+            return None
 
         # Get current SOL/USD for SOL math.
         sol_usd_now = 0.0
