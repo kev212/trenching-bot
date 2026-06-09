@@ -43,9 +43,7 @@ class GMGNClient:
         # Pacing state (Item #4) — serialize requests + 2500ms minimum interval
         self._pace_lock: Optional[asyncio.Lock] = None
         self._last_request_time: float = 0.0
-        # Pace lock timeout tracker — resets session if too many consecutive
-        self._pace_lock_timeouts: int = 0
-        self._pace_lock_timeout_threshold: int = 5
+
         if self.proxy:
             logger.warning(f"GMGN proxy: {self.proxy[:50]}...")
         else:
@@ -68,34 +66,11 @@ class GMGNClient:
         Charon's `paceGmgnRequest` pattern. Two callers cannot run concurrently
         (lock) and the second one waits until 2500ms after the first finished.
 
-        Wraps lock acquisition in asyncio.wait_for to prevent indefinite hang
-        when a previous request gets stuck (e.g., curl_cffi proxy connection
-        hangs at C level and can't be cancelled by asyncio.wait_for). The lock
-        itself IS awaitable (cancellable), so this timeout is reliable.
+        NOTE: HTTP call is OUTSIDE this lock (in _get/_post). The lock is only
+        held during spacing checks (max 2.5s sleep). If a curl_cffi request
+        hangs, it does NOT hold this lock. async with/__aexit__ guarantees the
+        lock is always released even on CancelledError from safe_gather.
         """
-        try:
-            await asyncio.wait_for(
-                self._pace_request_impl(),
-                timeout=GMGN_DEFAULT_REQUEST_DELAY_MS * 3 / 1000,
-            )
-            self._pace_lock_timeouts = 0
-        except asyncio.TimeoutError:
-            self._pace_lock_timeouts += 1
-            if self._pace_lock_timeouts >= self._pace_lock_timeout_threshold:
-                logger.warning(
-                    f"GMGN {self._pace_lock_timeouts} consecutive pace lock timeouts — "
-                    "resetting session"
-                )
-                await self._reset_session()
-                self._pace_lock_timeouts = 0
-            else:
-                logger.warning(
-                    f"GMGN pace lock timeout "
-                    f"[{self._pace_lock_timeouts}/{self._pace_lock_timeout_threshold}] — "
-                    "previous request may be stuck, skipping this one"
-                )
-
-    async def _pace_request_impl(self) -> None:
         async with self._ensure_pace_lock():
             now = time.time()
             elapsed_ms = (now - self._last_request_time) * 1000.0
