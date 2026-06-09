@@ -43,6 +43,9 @@ class GMGNClient:
         # Pacing state (Item #4) — serialize requests + 2500ms minimum interval
         self._pace_lock: Optional[asyncio.Lock] = None
         self._last_request_time: float = 0.0
+        # Pace lock timeout tracker — resets session if too many consecutive
+        self._pace_lock_timeouts: int = 0
+        self._pace_lock_timeout_threshold: int = 5
         if self.proxy:
             logger.warning(f"GMGN proxy: {self.proxy[:50]}...")
         else:
@@ -73,13 +76,24 @@ class GMGNClient:
         try:
             await asyncio.wait_for(
                 self._pace_request_impl(),
-                timeout=GMGN_TIMEOUT + 10,
+                timeout=GMGN_DEFAULT_REQUEST_DELAY_MS * 3 / 1000,
             )
+            self._pace_lock_timeouts = 0
         except asyncio.TimeoutError:
-            logger.warning(
-                f"GMGN pace lock timeout ({GMGN_TIMEOUT + 10}s) — "
-                "previous request may be stuck, skipping this one"
-            )
+            self._pace_lock_timeouts += 1
+            if self._pace_lock_timeouts >= self._pace_lock_timeout_threshold:
+                logger.warning(
+                    f"GMGN {self._pace_lock_timeouts} consecutive pace lock timeouts — "
+                    "resetting session"
+                )
+                await self._reset_session()
+                self._pace_lock_timeouts = 0
+            else:
+                logger.warning(
+                    f"GMGN pace lock timeout "
+                    f"[{self._pace_lock_timeouts}/{self._pace_lock_timeout_threshold}] — "
+                    "previous request may be stuck, skipping this one"
+                )
 
     async def _pace_request_impl(self) -> None:
         async with self._ensure_pace_lock():
@@ -89,6 +103,26 @@ class GMGNClient:
                 wait_s = (GMGN_DEFAULT_REQUEST_DELAY_MS - elapsed_ms) / 1000.0
                 await asyncio.sleep(wait_s)
             self._last_request_time = time.time()
+
+    async def _reset_session(self):
+        """Close and reopen the HTTP session.
+
+        Called after too many consecutive pace lock timeouts suggest the
+        current session's curl handles are in a bad state (e.g., stuck
+        proxy connections that never complete and never return).
+        """
+        async with self._ensure_lock():
+            if self._session:
+                try:
+                    await self._session.close()
+                except Exception:
+                    pass
+                self._session = None
+            self._session = AsyncSession(
+                impersonate="chrome",
+                timeout=GMGN_TIMEOUT,
+            )
+            logger.info("GMGN: session reset after consecutive pace lock timeouts")
 
     async def start(self):
         """Eagerly initialize HTTP session. Call once at bot startup."""
