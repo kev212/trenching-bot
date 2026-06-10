@@ -440,7 +440,7 @@ async def position_monitor(state, db, position_manager: PositionManager,
                     )
                 except Exception as e:
                     consecutive_failures[token_address] = consecutive_failures.get(token_address, 0) + 1
-                    logger.error(f"Position {token_address[:8]} monitor error: {e}")
+                    logger.error(f"Position {token_address[:8]} monitor error: {e}", exc_info=True)
 
                 # Check BOTH failure counters for force-close.
                 any_failures = max(
