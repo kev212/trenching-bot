@@ -23,7 +23,7 @@ from tracking.price_monitor import price_monitor
 from tracking.hourly_recap import hourly_recap
 from learning.daily_optimizer import daily_optimizer
 from learning.revert_monitor import revert_monitor
-from alerts.formatter import format_alert, format_trade_alert
+from alerts.formatter import format_alert
 from alerts.dispatcher import dispatcher
 from alerts.bot import bot_handler
 from core.monitoring import FailureTracker
@@ -35,7 +35,7 @@ from core.jupiter_client import JupiterClient
 from core.position_manager import PositionManager
 from core.risk_manager import RiskManager
 from core.trade_executor import TradeExecutor
-from tracking.position_monitor import position_monitor
+
 from config import load_trading_config, load_risk_rules
 
 logger = setup_logger("main")
@@ -262,7 +262,6 @@ class TrenchingBot:
             "bot_handler": self._run_forever("bot_handler", bot_handler),
             "metrics": self._metrics_loop(),
             "db_stats": self._db_stats_loop(),
-            "position_monitor": self._run_forever("position_monitor", position_monitor, self.position_manager, self.risk_manager, self.jupiter, self.executor, self.trading_config),
             "watchdog": self._watchdog_loop(),
         }
         self.tasks = {}
@@ -1118,69 +1117,16 @@ class TrenchingBot:
                 decision.key_factors, decision.processing_time_ms,
             )
 
-            # Trading hook (Phase 1 paper mode): auto-buy on confidence threshold
-            # (not verdict — a WATCH with conf>=0.75 is still a strong signal)
-            if decision.confidence >= settings.confidence_auto_execute and self.executor:
-                await self._try_buy(token, decision, filter_params_version=await self.state.get_filter_version())
-            else:
-                # Log why we didn't trade
-                reason = (
-                    "below confidence threshold"
-                    if decision.confidence < settings.confidence_auto_execute
-                    else "executor not initialized"
-                )
-                logger.info(
-                    f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
-                    f"verdict={decision.verdict.value}, conf={decision.confidence:.2f}, "
-                    f"action=NO_TRADE ({reason}, threshold={settings.confidence_auto_execute})"
-                )
+            # Paper trade disabled — alert only mode.
+            logger.info(
+                f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
+                f"verdict={decision.verdict.value}, conf={decision.confidence:.2f}, "
+                f"action=NO_TRADE (alert-only mode)"
+            )
 
     async def get_open_positions_summary(self) -> list[dict]:
         """Public accessor for open positions (used by Telegram /positions command)."""
         return await self.position_manager.get_open_positions_summary()
-
-    async def _try_buy(self, token: TokenData, decision, filter_params_version: int = 0):
-        """Confidence-gated buy attempt. Returns silently if not allowed."""
-        try:
-            can_trade, reason = self.risk_manager.can_trade()
-            if not can_trade:
-                logger.info(f"[BUY-SKIP] {token.symbol}: risk gate closed: {reason}")
-                return
-
-            open_positions = await self.position_manager.get_open_positions()
-            max_open = self.risk_rules.get("max_open_positions", 5)
-            if len(open_positions) >= max_open:
-                logger.info(
-                    f"[BUY-SKIP] {token.symbol}: max_open={max_open} reached"
-                )
-                return
-
-            auto_threshold = settings.confidence_auto_execute
-            if decision.confidence < auto_threshold:
-                logger.info(
-                    f"[BUY-SKIP] {token.symbol}: conf={decision.confidence:.2f} < "
-                    f"auto={auto_threshold}"
-                )
-                return
-
-            balance = await self.wallet.get_sol_balance()
-            size_sol = self.risk_manager.get_position_size(balance)
-            if size_sol <= 0:
-                logger.info(f"[BUY-SKIP] {token.symbol}: size=0 (balance={balance:.4f})")
-                return
-
-            position = await self.executor.execute_buy(
-                token, size_sol, filter_params_version=filter_params_version
-            )
-            if position:
-                trade_alert = format_trade_alert(position, "BUY")
-                await dispatcher.send_alert(trade_alert)
-                logger.info(
-                    f"[BUY] {token.symbol} paper={self.paper_mode} "
-                    f"size={size_sol:.4f} SOL conf={decision.confidence:.2f}"
-                )
-        except Exception as e:
-            logger.error(f"_try_buy error for {token.symbol}: {e}")
 
     async def _social_analysis(self, token: TokenData, info: dict):
         """Analyze social media presence for tokens that pass hard gate."""
