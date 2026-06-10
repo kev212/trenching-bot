@@ -51,10 +51,11 @@ class RateLimiter:
     # Public API
     # ------------------------------------------------------------------
 
-    async def acquire(self, n: int = 1) -> None:
+    async def acquire(self, n: int = 1, timeout: float = None) -> None:
         """Acquire *n* tokens, blocking until they are available.
 
         Raises ``ValueError`` if *n* exceeds the burst size (``self.rate``).
+        Raises ``TimeoutError`` if *timeout* seconds elapse before tokens become available.
         """
         if n < 1:
             return
@@ -63,22 +64,28 @@ class RateLimiter:
                 f"Cannot acquire {n} tokens at once (max burst: {self.rate})"
             )
 
+        deadline = None if timeout is None else time.monotonic() + timeout
         while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise asyncio.TimeoutError(
+                    f"RateLimiter.acquire({n}) timed out after {timeout}s"
+                )
+
             async with self._lock:
                 self._refill()
                 if self._tokens >= n:
                     self._tokens -= n
                     if self._tokens < 1:
-                        # No tokens left — clear the event so future
-                        # callers block instead of spinning.
                         self._event.clear()
                     return
 
-            # Not enough tokens yet — sleep for a short tick.  The event
-            # lets us wake early if a refill happens (triggered by another
-            # caller's _refill inside the lock).
+            # Not enough tokens yet — sleep for a short tick.
+            wait = 0.05
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                wait = min(wait, max(remaining, 0.001))
             try:
-                await asyncio.wait_for(self._event.wait(), timeout=0.05)
+                await asyncio.wait_for(self._event.wait(), timeout=wait)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 continue
 

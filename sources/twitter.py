@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import time
 from typing import Optional
 from curl_cffi.requests import AsyncSession
 
@@ -98,9 +99,9 @@ class TwitterClient:
                 session.get(
                     f"{self.host}{path}",
                     params=params or {},
-                    timeout=10,
+                    timeout=6,
                 ),
-                timeout=15,
+                timeout=8,
             )
             if resp.status_code != 200:
                 logger.warning(f"FxTwitter {path}: HTTP {resp.status_code}")
@@ -111,7 +112,7 @@ class TwitterClient:
                 return {}
             return data
         except asyncio.TimeoutError:
-            logger.error(f"FxTwitter {path} timeout (> 10s)")
+            logger.error(f"FxTwitter {path} timeout (> 8s)")
             return {}
         except Exception as e:
             logger.error(f"FxTwitter {path} error: {e}")
@@ -147,7 +148,6 @@ class TwitterClient:
         Caches result in-memory (TTL 24h) — community creators don't change
         and launching a fresh Chromium per call costs ~2-5s + memory.
         """
-        import time
 
         # Cache hit (and not expired)?
         cached = self._community_cache.get(community_id)

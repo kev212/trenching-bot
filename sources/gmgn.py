@@ -151,7 +151,11 @@ class GMGNClient:
             return {}
         try:
             if self.rate_limiter:
-                await self.rate_limiter.acquire(1)
+                try:
+                    await self.rate_limiter.acquire(1, timeout=15.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"GMGN rate limit timeout for {path}, skipping")
+                    return {}
             query = {**(params or {}), **self._auth_params()}
             session = await self._get_session()
             async with session.get(
@@ -187,7 +191,11 @@ class GMGNClient:
             return {}
         try:
             if self.rate_limiter:
-                await self.rate_limiter.acquire(1)
+                try:
+                    await self.rate_limiter.acquire(1, timeout=15.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"GMGN rate limit timeout for POST {path}, skipping")
+                    return {}
             auth = self._auth_params()
             full_query = {**(query or {}), **auth}
             session = await self._get_session()

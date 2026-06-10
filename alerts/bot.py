@@ -194,21 +194,24 @@ async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         exit_reason = r["exit_reason"] or ""
         age_sec = 0
         if r["entry_time"]:
-            # M5 fix: `Z`-suffixed ISO strings fail on Py3.7-3.10.
-            # Normalize to `+00:00` and log on unparseable instead of
-            # silently showing age=0.
-            entry_str = r["entry_time"]
-            if isinstance(entry_str, str) and entry_str.endswith("Z"):
-                entry_str = entry_str[:-1] + "+00:00"
-            try:
-                entry_dt = datetime.fromisoformat(entry_str)
+            entry_val = r["entry_time"]
+            if isinstance(entry_val, str):
+                if entry_val.endswith("Z"):
+                    entry_val = entry_val[:-1] + "+00:00"
+                try:
+                    entry_dt = datetime.fromisoformat(entry_val)
+                except (ValueError, TypeError) as e:
+                    logger.warning(
+                        f"[BOT] Unparseable entry_time for position {r.get('id')}: "
+                        f"{r['entry_time']!r} — showing age=0 ({e})"
+                    )
+                    entry_dt = None
+            elif isinstance(entry_val, datetime):
+                entry_dt = entry_val
+            else:
+                entry_dt = None
+            if entry_dt:
                 age_sec = (datetime.now(timezone.utc) - entry_dt).total_seconds()
-            except (ValueError, TypeError) as e:
-                logger.warning(
-                    f"[BOT] Unparseable entry_time for position {r.get('id')}: "
-                    f"{r['entry_time']!r} — showing age=0 ({e})"
-                )
-                age_sec = 0
         paper_tag = " [PAPER]" if r["paper"] else " [LIVE]"
         tp_tag = f" | {exit_reason} taken" if exit_reason else ""
         lines.append(
@@ -296,18 +299,24 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         exit_time_short = ""
         if r["exit_time"]:
-            # M5 fix: handle `Z`-suffixed ISO strings (Py3.7-3.10 compat).
-            exit_str = r["exit_time"]
-            if isinstance(exit_str, str) and exit_str.endswith("Z"):
-                exit_str = exit_str[:-1] + "+00:00"
-            try:
-                dt = datetime.fromisoformat(exit_str)
+            exit_val = r["exit_time"]
+            if isinstance(exit_val, str):
+                if exit_val.endswith("Z"):
+                    exit_val = exit_val[:-1] + "+00:00"
+                try:
+                    dt = datetime.fromisoformat(exit_val)
+                except (ValueError, TypeError) as e:
+                    logger.warning(
+                        f"[BOT] Unparseable exit_time for position {r.get('id')}: "
+                        f"{r['exit_time']!r} — skipping ({e})"
+                    )
+                    dt = None
+            elif isinstance(exit_val, datetime):
+                dt = exit_val
+            else:
+                dt = None
+            if dt:
                 exit_time_short = dt.strftime("%m-%d %H:%M")
-            except (ValueError, TypeError) as e:
-                logger.warning(
-                    f"[BOT] Unparseable exit_time for position {r.get('id')}: "
-                    f"{r['exit_time']!r} — skipping ({e})"
-                )
 
         lines.append(
             f"{pnl_emoji} {r['token_symbol']} ({exit_reason}){paper_tag} {exit_time_short}\n"

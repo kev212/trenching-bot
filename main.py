@@ -655,7 +655,13 @@ class TrenchingBot:
                     )
 
                     self._update_activity()  # watchdog heartbeat
-                    await self._process_token(addr, token_info)
+                    try:
+                        await asyncio.wait_for(self._process_token(addr, token_info), timeout=180.0)
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            f"[W{worker_id}] {symbol} ({addr[:8]}): "
+                            f"_process_token timed out after 180s, skipping"
+                        )
                     await asyncio.sleep(0.1)
                 finally:
                     # C3 fix: always release the in-flight claim
@@ -703,35 +709,32 @@ class TrenchingBot:
         # Stagger 0.3s prevents GMGN per-second burst (4 parallel calls).
         await asyncio.sleep(0.3)
 
-        # Phase B: fetch token data in 2 batches of 2 to avoid timeout
-        # (rate limiter 15 req/min serializes calls; 4 parallel → risk > 30s)
+        # Phase B: fetch token data in parallel batches
         try:
             from sources.gmgn import GMGN_GATHER_TIMEOUT
             from utils.helpers import safe_gather
 
-            batch1 = await safe_gather(
+            batch1 = safe_gather(
                 self.gmgn.get_token_info(address),
                 self.gmgn.get_token_security(address),
                 timeout=GMGN_GATHER_TIMEOUT,
             )
-            info_r, security_r = batch1
-            info = info_r if not isinstance(info_r, Exception) else {}
-            security = security_r if not isinstance(security_r, Exception) else {}
-            if isinstance(info_r, Exception):
-                logger.debug(f"GMGN info error for {address[:10]}: {info_r}")
-            if isinstance(security_r, Exception):
-                logger.debug(f"GMGN security error for {address[:10]}: {security_r}")
-
-            batch2 = await safe_gather(
+            batch2 = safe_gather(
                 self.gmgn.get_token_holders(address),
                 self.gmgn.get_token_ath(address),
                 self.gmgn.get_kol_holders(address),
                 timeout=GMGN_GATHER_TIMEOUT,
             )
-            holders_r, ath_r, kol_holders_r = batch2
+            (info_r, security_r), (holders_r, ath_r, kol_holders_r) = await safe_gather(batch1, batch2, timeout=GMGN_GATHER_TIMEOUT)
+            info = info_r if not isinstance(info_r, Exception) else {}
+            security = security_r if not isinstance(security_r, Exception) else {}
             holders = holders_r if not isinstance(holders_r, Exception) else {}
             ath_data = ath_r if not isinstance(ath_r, Exception) else {}
             kol_holders_list = kol_holders_r if not isinstance(kol_holders_r, Exception) else []
+            if isinstance(info_r, Exception):
+                logger.debug(f"GMGN info error for {address[:10]}: {info_r}")
+            if isinstance(security_r, Exception):
+                logger.debug(f"GMGN security error for {address[:10]}: {security_r}")
             if isinstance(holders_r, Exception):
                 logger.debug(f"GMGN holders error for {address[:10]}: {holders_r}")
             if isinstance(ath_r, Exception):
@@ -964,7 +967,7 @@ class TrenchingBot:
                 filter_params_version=await self.state.get_filter_version(),
             )
         except Exception as e:
-            logger.debug(f"filter_outcome save failed for {address[:8]}: {e}")
+            logger.warning(f"filter_outcome save failed for {address[:8]}: {e}")
 
         if all_passed:
             logger.info(f"[PASS] {token.symbol} ({address[:8]}): all filters passed")
@@ -997,7 +1000,11 @@ class TrenchingBot:
         )
 
         # LLM Decision
-        await self.llm_rate_limiter.acquire()
+        try:
+            await self.llm_rate_limiter.acquire(timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"[LLM-RATE] {token.symbol} ({address[:8]}): rate limit timeout (data LLM)")
+            return
         fv_dict = fv.to_dict()
 
         prompt = DECISION_USER.format(
@@ -1295,7 +1302,11 @@ class TrenchingBot:
             influencer_mentions=json.dumps(influencer_mentions, indent=2) if influencer_mentions else "No influencer mentions",
         )
 
-        await self.llm_rate_limiter.acquire()
+        try:
+            await self.llm_rate_limiter.acquire(timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"[LLM-RATE] {token.symbol} ({token.address[:8]}): rate limit timeout (social LLM)")
+            return
         social_result = await self.llm_client.analyze_token(SOCIAL_ANALYSIS_SYSTEM, social_prompt)
         self._update_activity()  # watchdog heartbeat
 
