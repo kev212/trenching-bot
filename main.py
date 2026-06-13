@@ -1148,16 +1148,114 @@ class TrenchingBot:
                 decision.key_factors, decision.processing_time_ms,
             )
 
-            # Paper trade disabled — alert only mode.
-            logger.info(
-                f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
-                f"verdict={decision.verdict.value}, conf={decision.confidence:.2f}, "
-                f"action=NO_TRADE (alert-only mode)"
-            )
+            # Live execution (Step 2): wire executor.execute_buy() for high-conviction
+            # calls. Alert-only is preserved for paper mode and low-confidence calls.
+            await self._maybe_execute_live_buy(token, address, decision)
 
     async def get_open_positions_summary(self) -> list[dict]:
         """Public accessor for open positions (used by Telegram /positions command)."""
         return await self.position_manager.get_open_positions_summary()
+
+    async def _maybe_execute_live_buy(self, token: TokenData, address: str,
+                                       decision) -> None:
+        """Execute live buy for high-conviction APE calls (live mode only).
+
+        Pre-trade guard chain (in order):
+          1. paper_mode must be False
+          2. verdict must be APE (high conviction; WATCH stays alert-only)
+          3. confidence must be >= confidence_auto_execute (default 0.60)
+          4. gmgn_cli must be ready
+          5. balance must cover position_size + reserve
+          6. risk_manager.can_trade() must approve
+        """
+        from analysis.models import Verdict
+
+        if self.paper_mode:
+            logger.info(
+                f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
+                f"verdict={decision.verdict.value}, conf={decision.confidence:.2f}, "
+                f"action=NO_TRADE (paper mode)"
+            )
+            return
+
+        if decision.verdict != Verdict.APE:
+            logger.info(
+                f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
+                f"verdict={decision.verdict.value}, conf={decision.confidence:.2f}, "
+                f"action=NO_TRADE (verdict != APE, alert-only)"
+            )
+            return
+
+        if decision.confidence < settings.confidence_auto_execute:
+            logger.info(
+                f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
+                f"verdict=APE, conf={decision.confidence:.2f}, "
+                f"action=NO_TRADE (conf < {settings.confidence_auto_execute})"
+            )
+            return
+
+        if not self.gmgn_cli or not self.gmgn_cli.is_ready():
+            logger.warning(
+                f"[BUY-SKIP] {token.symbol} ({address[:8]}): "
+                f"action=NO_TRADE (gmgn_cli not ready)"
+            )
+            return
+
+        # Risk check (daily loss limit, loss streak halt)
+        can_trade, reason = self.risk_manager.can_trade()
+        if not can_trade:
+            logger.warning(
+                f"[BUY-SKIP] {token.symbol} ({address[:8]}): "
+                f"action=NO_TRADE (risk: {reason})"
+            )
+            return
+
+        # Get GMGN balance for position sizing
+        try:
+            balance = await self.gmgn_cli.get_sol_balance()
+        except Exception as e:
+            logger.warning(f"[BUY-SKIP] {token.symbol}: balance check failed: {e}")
+            return
+
+        if balance <= 0:
+            logger.warning(
+                f"[BUY-SKIP] {token.symbol}: balance=0, cannot size position"
+            )
+            return
+
+        size_sol = self.risk_manager.get_position_size(balance)
+        min_position = self.trading_config.get("min_position_sol", 0.02)
+        if size_sol < min_position:
+            logger.info(
+                f"[BUY-SKIP] {token.symbol}: size {size_sol:.4f} SOL < min {min_position}"
+            )
+            return
+
+        # Execute
+        logger.info(
+            f"[BUY-EXECUTING] {token.symbol} ({address[:8]}): "
+            f"size={size_sol:.4f} SOL, balance={balance:.4f} SOL"
+        )
+        try:
+            position = await self.executor.execute_buy(
+                token, size_sol,
+                filter_params_version=await self.state.get_filter_version(),
+            )
+            if position:
+                logger.info(
+                    f"[BUY-EXECUTED] {token.symbol} ({address[:8]}): "
+                    f"position_id={position.id}, size={size_sol:.4f} SOL"
+                )
+            else:
+                logger.warning(
+                    f"[BUY-FAILED] {token.symbol} ({address[:8]}): "
+                    f"executor returned None"
+                )
+        except Exception as e:
+            logger.error(
+                f"[BUY-ERROR] {token.symbol} ({address[:8]}): {e}",
+                exc_info=True,
+            )
 
     async def _social_analysis(self, token: TokenData, info: dict):
         """Analyze social media presence for tokens that pass hard gate."""
