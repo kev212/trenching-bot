@@ -11,7 +11,7 @@ logger = logging.getLogger("main")
 
 from config import settings
 from storage.database import Database
-from storage.cache import SharedState
+from storage.cache import SharedState, MAX_RETRIES
 from sources.gmgn import GMGNClient
 from sources.twitter import TwitterClient
 from core.gmgn_cli import GMGNCli
@@ -576,8 +576,17 @@ class TrenchingBot:
                 remaining = True
                 while remaining:
                     async with self.state._lock:
-                        # Take a slice — full snapshot already taken above.
-                        items = list(self.state.retry_queue.items())[:lock_budget]
+                        # FIX #4: sort by timestamp ascending (oldest first) so a
+                        # stuck front-of-queue entry can't starve newer entries at
+                        # the back. dict insertion order is FIFO from add_retry,
+                        # so if the first 50 entries are all in_flight or not-yet-
+                        # expired, the back 50+ wait indefinitely until the front
+                        # clears. Sorting by oldest timestamp ensures fair retry
+                        # distribution across all queued tokens.
+                        items = sorted(
+                            self.state.retry_queue.items(),
+                            key=lambda x: x[1]["timestamp"],
+                        )[:lock_budget]
                         if not items:
                             remaining = False
                             break
@@ -604,6 +613,14 @@ class TrenchingBot:
                                 continue
                             delay = get_retry_delay(info["retries"])
                             if now - info["timestamp"] < delay:
+                                # FIX #5: count delay-not-met as skipped so
+                                # the [RETRY-SCHED] log accurately reflects
+                                # the true number of tokens considered-but-
+                                # not-acted-on this scan. Without this the
+                                # log undercounts whenever the retry_queue
+                                # has a backlog of tokens waiting for their
+                                # backoff to expire.
+                                local_skipped += 1
                                 continue
                             if addr in in_flight_snapshot:
                                 local_skipped += 1
@@ -614,12 +631,16 @@ class TrenchingBot:
                             symbol = info.get("symbol", "?")
                             name = info.get("name", "?")
                             try:
+                                # FIX #7: don't pass `retries` in queue item
+                                # — the worker reads it from state.get_retry_info
+                                # anyway (line 697), so the field was dead data.
+                                # `_retry` is the only flag the worker actually
+                                # checks (line 681: `if is_retry:`).
                                 self.queue.put_nowait({
                                     "address": addr,
                                     "symbol": symbol,
                                     "name": name,
                                     "_retry": True,
-                                    "retries": info["retries"],
                                 })
                                 local_requeued += 1
                             except asyncio.QueueFull:
@@ -691,6 +712,19 @@ class TrenchingBot:
                                     await asyncio.sleep(0.1)
                             else:
                                 logger.warning(f"Worker {worker_id}: queue full on retry-back, dropped {addr[:8]}")
+                                # FIX #6: bump the timestamp so the next scheduler
+                                # scan doesn't immediately try to re-queue the same
+                                # token (and the put_nowait that just failed). This
+                                # spreads out the dropped-token retry attempts and
+                                # prevents a tight loop where the same N tokens are
+                                # repeatedly dropped because the queue stays full.
+                                # Without this, dropped tokens retain their original
+                                # timestamp and the scheduler would try to re-queue
+                                # them every scan (30s) until max_stale=10min kicks
+                                # in via cleanup_retry_queue. Bumping by RETRY_BACKOFF
+                                # [0]=60s effectively pushes the next attempt to
+                                # 60s out, matching normal retry cadence.
+                                await self.state.bump_retry_timestamp(addr, delay=60)
                             continue
 
                     processed += 1
@@ -702,7 +736,7 @@ class TrenchingBot:
 
                     self._update_activity()  # watchdog heartbeat
                     try:
-                        await asyncio.wait_for(self._process_token(addr, token_info), timeout=180.0)
+                        await asyncio.wait_for(self._process_token(addr, token_info, is_retry), timeout=180.0)
                     except asyncio.TimeoutError:
                         logger.warning(
                             f"[W{worker_id}] {symbol} ({addr[:8]}): "
@@ -749,7 +783,7 @@ class TrenchingBot:
             self.state.metrics.record_call("SKIP"); return False
         return True
 
-    async def _process_token(self, address: str, token_info: dict):
+    async def _process_token(self, address: str, token_info: dict, is_retry: bool = False):
         is_retry = bool(token_info.get("_retry"))
         symbol = (token_info.get("symbol") or token_info.get("name", "?")) or "?"
         # Rate limiting is handled internally by GMGNClient._get().
@@ -1030,8 +1064,16 @@ class TrenchingBot:
         else:
             retry_info = await self.state.get_retry_info(address)
             retries = retry_info.get("retries", 0)
+            # Attempt = 1-indexed attempt number. Original fail is 1, first re-queue
+            # is 2, second re-queue is 3, third (last) re-queue is 4. Max attempts =
+            # 1 (original) + MAX_RETRIES (3) = 4. Previously this used `retries+1`
+            # which double-counted: because add_retry's else-branch sets retries=0
+            # for NEW entries, the 2nd attempt also showed `0+1=1` ("RETRY 1/3"),
+            # making "1/3" appear twice for the same token. Now we add +1 more
+            # when is_retry=True to disambiguate original fail from 1st re-queue.
+            attempt = (retries + 1) + (1 if is_retry else 0)
 
-            logger.info(f"[RETRY {retries+1}/3] {token.symbol} ({address[:8]}): failed {len(failures)} filters: {failures}")
+            logger.info(f"[RETRY {attempt}/{MAX_RETRIES + 1}] {token.symbol} ({address[:8]}): failed {len(failures)} filters: {failures}")
             self.state.metrics.record_retry(passed=False)
             await self.state.add_retry(
                 address, symbol=token.symbol, name=token.name,

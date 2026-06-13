@@ -188,6 +188,22 @@ class SharedState:
         async with self._lock:
             self.retry_queue.pop(address, None)
 
+    async def bump_retry_timestamp(self, address: str, delay: int = 60) -> None:
+        """Push back the next-eligible time for a retry entry by `delay` seconds.
+
+        Used when a worker had to drop a re-queued token (e.g. queue stayed full
+        for the put_nowait backoff window). Without bumping, the scheduler would
+        keep trying to re-queue the same token every scan (30s) until the 10-min
+        cleanup_retry_queue max_stale kicks in. With a bump, the token stays in
+        retry_queue but its backoff timer resets so the next attempt happens
+        after `delay` seconds instead of immediately on next scan.
+
+        FIX #6: see main.py worker retry-back path.
+        """
+        async with self._lock:
+            if address in self.retry_queue:
+                self.retry_queue[address]["timestamp"] = time.time() + delay
+
     async def cleanup_retry_queue(self):
         """Clean up stale retry entries. Holds lock briefly — expensive checks run outside lock.
 

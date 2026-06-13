@@ -7,7 +7,15 @@ logger = logging.getLogger(__name__)
 
 # Filters whose value will NOT change in the retry window (60-300s).
 # Tokens that fail these filters should NOT be retried — they'll
-# fail again at the same value, wasting rate-limit budget.
+# NOTE: PERMANENT_FILTERS is intentionally empty. Originally min_total_fee,
+# market_cap bounds, and min_holders were here so tokens with catastrophic
+# failures (e.g. fee=0.001 SOL) would be dead-lettered immediately instead
+# of wasting 3 retries × 60/180/300s = 9 minutes on a token that can never
+# pass. They were removed when the compound rule (is_compound_permanent_failure)
+# took over the "old + low-fee" case, leaving no filter whose failure is
+# truly permanent — min_holders can grow, mc can rise, volume can spike, etc.
+# Dead-lettering now happens only via MAX_RETRIES exhaustion in retry_queue.
+# See FIX #3 in retry audit.
 PERMANENT_FILTERS = frozenset({
 })
 
