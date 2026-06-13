@@ -66,8 +66,8 @@ class GMGNCli:
 
     def _check_cli(self) -> None:
         if not shutil.which(self.cli_path):
-            raise FileNotFoundError(
-                f"gmgn-cli not found at '{self.cli_path}'. "
+            logger.warning(
+                f"[GMGN-CLI] binary not found at '{self.cli_path}'. "
                 f"Install via: sudo npm install -g gmgn-cli"
             )
 
@@ -166,20 +166,31 @@ class GMGNCli:
         ])
 
     async def wait_for_order(self, chain: str, order_id: str,
-                              timeout_s: float = POLL_TIMEOUT_S) -> dict:
+                              timeout_s: float = POLL_TIMEOUT_S,
+                              poll_interval_s: float = POLL_INTERVAL_S) -> dict:
         """Poll order until status is confirmed/failed/expired or timeout."""
-        deadline = asyncio.get_event_loop().time() + timeout_s
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
         status: dict = {}
-        while asyncio.get_event_loop().time() < deadline:
+        while loop.time() < deadline:
             status = await self.get_order(chain, order_id)
-            state = status.get("status", "")
-            if state in ("confirmed", "failed", "expired"):
+            if self._is_terminal(status):
                 return status
-            await asyncio.sleep(POLL_INTERVAL_S)
+            await asyncio.sleep(poll_interval_s)
         logger.warning(
             f"[GMGN-CLI] order {order_id[:16]} did not confirm within {timeout_s}s"
         )
         return status
+
+    @staticmethod
+    def _is_terminal(status: dict) -> bool:
+        conf = status.get("confirmation", {})
+        if isinstance(conf, dict):
+            state = conf.get("state", "")
+            if state in ("confirmed", "failed", "expired"):
+                return True
+        state = status.get("status", "")
+        return state in ("confirmed", "failed", "expired")
 
     async def gas_price(self, chain: str) -> dict:
         """Get recommended gas price tiers (API-key-only, no signed auth)."""

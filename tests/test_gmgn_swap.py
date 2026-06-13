@@ -1,355 +1,309 @@
-"""Tests for GMGNSwapClient — Ed25519 signing and swap API integration."""
+"""Tests for GMGNCli — subprocess wrapper for official gmgn-cli tool."""
 import asyncio
 import json
 import sys
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, "/Users/khezuma/workspace/trenching")
 
-from sources.gmgn_swap import (
-    GMGNSwapClient,
-    SignatureError,
-    SOL_MINT,
-    USDC_MINT,
-    SWAP_BASE_URL,
-)
-
-# A valid Ed25519 PEM for testing (no real key, just for test signing)
-TEST_PEM = """-----BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEIJk7L6R+VSn0sYPq+1v1Gf8G/YMwUed2vTCZqVPoAx/o
------END PRIVATE KEY-----"""
-
-TEST_API_KEY = "test_api_key_123"
-TEST_PUBKEY = "TestPubkey111111111111111111111111111111111111"
-
-
-def make_client(private_key_pem=TEST_PEM):
-    return GMGNSwapClient(
-        api_key=TEST_API_KEY,
-        private_key_pem=private_key_pem,
-        wallet_pubkey=TEST_PUBKEY,
-        proxy="",
-    )
-
-
-class MockResponse:
-    def __init__(self, status=200, json_data=None):
-        self.status = status
-        self._json = json_data or {}
-        self._text = ""
-
-    async def json(self):
-        return self._json
-
-    async def text(self):
-        return self._text
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
-
-
-class MockSession:
-    def __init__(self):
-        self.post_responses = []
-        self.get_responses = []
-        self.post_calls = []
-        self.get_calls = []
-
-    def add_post_response(self, resp: MockResponse):
-        self.post_responses.append(resp)
-
-    def add_get_response(self, resp: MockResponse):
-        self.get_responses.append(resp)
-
-    async def post(self, url, json=None, headers=None):
-        self.post_calls.append({"url": url, "json": json, "headers": headers})
-        if self.post_responses:
-            return self.post_responses.pop(0)
-        return MockResponse(200, {"code": 0, "data": {}})
-
-    async def get(self, url, params=None, headers=None):
-        self.get_calls.append({"url": url, "params": params, "headers": headers})
-        if self.get_responses:
-            return self.get_responses.pop(0)
-        return MockResponse(200, {"code": 0, "data": {}})
-
-    async def close(self):
-        pass
-
-
-class TestGMGNSwapClientInit:
-    def test_load_valid_pem(self):
-        client = make_client()
-        assert client.is_ready(), "Client should be ready with valid PEM"
-
-    def test_empty_pem_not_ready(self):
-        client = make_client(private_key_pem="")
-        assert not client.is_ready(), "Client should not be ready without PEM"
-
-    def test_invalid_pem_raises(self):
-        try:
-            make_client(private_key_pem="not-a-valid-pem")
-            assert False, "Should have raised SignatureError"
-        except SignatureError:
-            pass
-
-    def test_default_values(self):
-        client = make_client()
-        assert client.api_key == TEST_API_KEY
-        assert client.wallet_pubkey == TEST_PUBKEY
-        assert client.proxy == ""
-
-
-class TestGMGNSwapClientSigning:
-    def test_sign_produces_hex(self):
-        client = make_client()
-        sig = client._sign("hello")
-        assert isinstance(sig, str)
-        assert len(sig) == 128  # 64 bytes = 128 hex chars
-        # Same input should produce same signature (deterministic)
-        sig2 = client._sign("hello")
-        assert sig == sig2
-
-    def test_sign_different_inputs(self):
-        client = make_client()
-        sig1 = client._sign("message1")
-        sig2 = client._sign("message2")
-        assert sig1 != sig2
-
-    def test_sign_without_key_raises(self):
-        client = make_client(private_key_pem="")
-        try:
-            client._sign("test")
-            assert False, "Should have raised SignatureError"
-        except SignatureError:
-            pass
-
-    def test_make_signature_payload_sorted(self):
-        client = make_client()
-        payload = client._make_signature_payload({
-            "b": "2",
-            "a": "1",
-            "c": "3",
-        })
-        assert payload == "a=1&b=2&c=3"
-
-    def test_make_signature_payload_empty(self):
-        client = make_client()
-        payload = client._make_signature_payload({})
-        assert payload == ""
-
-    def test_sign_body_includes_timestamp(self):
-        client = make_client()
-        sig, ts = client._sign_body({"chain": "sol", "amount": "100"})
-        assert isinstance(sig, str) and len(sig) == 128
-        assert isinstance(ts, str)
-        # Timestamp should be recent (within 5s)
-        assert abs(int(ts) - int(time.time() * 1000)) < 5000
-
-
-class TestGMGNSwapClientSwap:
-    @patch("sources.gmgn_swap.aiohttp.ClientSession")
-    def test_swap_success(self, mock_session_cls):
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
-
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={
-            "code": 0,
-            "data": {
-                "tx_id": "test_tx_123",
-                "out_amount": 1000000,
-                "fee": 5000,
-            },
-        })
-        mock_resp.text = AsyncMock(return_value="")
-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_resp.__aexit__ = AsyncMock(return_value=None)
-        mock_session.post.return_value = mock_resp
-
-        client = make_client()
-        client._session = mock_session
-
-        async def go():
-            result = await client.swap(
-                token_in=SOL_MINT,
-                token_out=USDC_MINT,
-                amount=1000000,
-                slippage_bps=300,
-            )
-            assert result["tx_id"] == "test_tx_123"
-            assert result["out_amount"] == 1000000
-            assert result["fee"] == 5000
-            assert "raw" in result
-            # Verify headers include auth
-            call_headers = mock_session.post.call_args[1]["headers"]
-            assert call_headers["X-APIKEY"] == TEST_API_KEY
-            assert "X-Signature" in call_headers
-            assert "X-Timestamp" in call_headers
-
-        asyncio.run(go())
-
-    @patch("sources.gmgn_swap.aiohttp.ClientSession")
-    def test_swap_http_error(self, mock_session_cls):
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
-
-        mock_resp = MagicMock()
-        mock_resp.status = 500
-        mock_resp.text = AsyncMock(return_value="Internal Server Error")
-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_resp.__aexit__ = AsyncMock(return_value=None)
-        mock_session.post.return_value = mock_resp
-
-        client = make_client()
-        client._session = mock_session
-
-        async def go():
-            result = await client.swap(
-                token_in=SOL_MINT,
-                token_out=USDC_MINT,
-                amount=1000000,
-            )
-            assert result == {}
-
-        asyncio.run(go())
-
-    @patch("sources.gmgn_swap.aiohttp.ClientSession")
-    def test_swap_api_error(self, mock_session_cls):
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
-
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={
-            "code": 4001,
-            "msg": "Insufficient balance",
-        })
-        mock_resp.text = AsyncMock(return_value="")
-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_resp.__aexit__ = AsyncMock(return_value=None)
-        mock_session.post.return_value = mock_resp
-
-        client = make_client()
-        client._session = mock_session
-
-        async def go():
-            result = await client.swap(
-                token_in=SOL_MINT,
-                token_out=USDC_MINT,
-                amount=1000000,
-            )
-            assert result == {}
-
-        asyncio.run(go())
-
-    @patch("sources.gmgn_swap.aiohttp.ClientSession")
-    def test_swap_not_ready(self, mock_session_cls):
-        client = make_client(private_key_pem="")
-        client._session = MagicMock()
-
-        async def go():
-            result = await client.swap(
-                token_in=SOL_MINT,
-                token_out=USDC_MINT,
-                amount=1000000,
-            )
-            assert result == {}
-            # Session.post should NOT be called
-            client._session.post.assert_not_called()
-
-        asyncio.run(go())
-
-    @patch("sources.gmgn_swap.aiohttp.ClientSession")
-    def test_get_quote(self, mock_session_cls):
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
-
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={
-            "code": 0,
-            "data": {
-                "out_amount": 999000,
-                "price_impact_pct": 0.5,
-            },
-        })
-        mock_resp.text = AsyncMock(return_value="")
-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_resp.__aexit__ = AsyncMock(return_value=None)
-        mock_session.post.return_value = mock_resp
-
-        client = make_client()
-        client._session = mock_session
-
-        async def go():
-            result = await client.get_quote(
-                token_in=SOL_MINT,
-                token_out=USDC_MINT,
-                amount=1000000,
-            )
-            assert result["out_amount"] == 999000
-
-        asyncio.run(go())
-
-    @patch("sources.gmgn_swap.aiohttp.ClientSession")
-    def test_get_swap_status(self, mock_session_cls):
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
-
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={
-            "code": 0,
-            "data": {
-                "status": "confirmed",
-                "tx_id": "test_tx_123",
-            },
-        })
-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_resp.__aexit__ = AsyncMock(return_value=None)
-        mock_session.get.return_value = mock_resp
-
-        client = make_client()
-        client._session = mock_session
-
-        async def go():
-            result = await client.get_swap_status("test_tx_123")
-            assert result["status"] == "confirmed"
-
-        asyncio.run(go())
-
-
-class TestGMGNSwapClientSession:
-    def test_start_and_close(self):
-        client = make_client()
-
-        async def go():
-            await client.start()
-            assert client._session is not None
-            assert not client._session.closed
-            await client.close()
-            # After close, the session lock should still work
-            async with client._session_lock:
-                pass
-
-        asyncio.run(go())
-
-    def test_get_session_lazy_init(self):
-        client = make_client()
-
-        async def go():
-            session = await client._get_session()
-            assert session is not None
-            await client.close()
-
-        asyncio.run(go())
-
-    def test_is_ready(self):
-        assert make_client().is_ready()
-        assert not make_client(private_key_pem="").is_ready()
+import pytest
+
+from core.gmgn_cli import GMGNCli, SOL_MINT, USDC_MINT
+
+
+@pytest.fixture
+def patch_env_file(tmpdir):
+    """Ensure self.env_file.exists() returns True by pointing config_dir to tmpdir."""
+    env = tmpdir.join(".env")
+    env.write("GMGN_API_KEY=test\nGMGN_PRIVATE_KEY=test")
+    return str(tmpdir)
+
+
+class TestGMGNCliInit:
+    def test_default_binary(self):
+        cli = GMGNCli(cli_path="gmgn-cli")
+        assert cli.cli_path == "gmgn-cli"
+
+    def test_custom_binary(self):
+        cli = GMGNCli(cli_path="/usr/local/bin/gmgn-cli")
+        assert cli.cli_path == "/usr/local/bin/gmgn-cli"
+
+    @patch("core.gmgn_cli.shutil.which")
+    def test_init_not_found_warns(self, mock_which):
+        mock_which.return_value = None
+        cli = GMGNCli(cli_path="gmgn-cli")
+        assert not cli.is_ready()
+
+
+class TestGMGNCliReady:
+    @patch("core.gmgn_cli.shutil.which")
+    def test_is_ready_ok(self, mock_which, patch_env_file):
+        mock_which.return_value = "/usr/bin/gmgn-cli"
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        assert cli.is_ready()
+
+    @patch("core.gmgn_cli.shutil.which")
+    def test_is_ready_missing_binary(self, mock_which, patch_env_file):
+        mock_which.return_value = None
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        assert not cli.is_ready()
+
+    @patch("core.gmgn_cli.shutil.which")
+    def test_is_ready_missing_env(self, mock_which, tmpdir):
+        mock_which.return_value = "/usr/bin/gmgn-cli"
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=str(tmpdir))
+        assert not cli.is_ready()
+
+
+class TestGMGNCliQuote:
+    @patch("core.gmgn_cli.GMGNCli._run")
+    async def test_quote_success(self, mock_run, patch_env_file):
+        mock_run.return_value = {
+            "out_amount": 999000,
+            "price_impact_pct": 0.5,
+        }
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli.quote(
+            chain="sol", from_addr="TestPubkey",
+            input_token=SOL_MINT, output_token=USDC_MINT,
+            amount=1_000_000,
+        )
+        assert result["out_amount"] == 999000
+        mock_run.assert_called_once()
+
+    @patch("core.gmgn_cli.GMGNCli._run")
+    async def test_quote_default_slippage(self, mock_run, patch_env_file):
+        mock_run.return_value = {"out_amount": 999000}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        await cli.quote(
+            chain="sol", from_addr="TestPubkey",
+            input_token=SOL_MINT, output_token=USDC_MINT,
+            amount=1_000_000,
+        )
+        args = mock_run.call_args[0][0]
+        assert "--slippage" in args
+        idx = args.index("--slippage")
+        assert args[idx + 1] == "30"
+
+    @patch("core.gmgn_cli.GMGNCli._run")
+    async def test_quote_custom_slippage(self, mock_run, patch_env_file):
+        mock_run.return_value = {"out_amount": 999000}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        await cli.quote(
+            chain="sol", from_addr="TestPubkey",
+            input_token=SOL_MINT, output_token=USDC_MINT,
+            amount=1_000_000, slippage=500,
+        )
+        args = mock_run.call_args[0][0]
+        idx = args.index("--slippage")
+        assert args[idx + 1] == "500"
+
+
+class TestGMGNCliSwap:
+    @patch("core.gmgn_cli.GMGNCli._run")
+    async def test_swap_success(self, mock_run, patch_env_file):
+        mock_run.return_value = {"order_id": "ord_123"}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli.swap(
+            chain="sol", from_addr="TestPubkey",
+            input_token=USDC_MINT, output_token=SOL_MINT,
+            amount=1_000_000,
+        )
+        assert result["order_id"] == "ord_123"
+
+    @patch("core.gmgn_cli.GMGNCli._run")
+    async def test_swap_with_anti_mev(self, mock_run, patch_env_file):
+        mock_run.return_value = {"order_id": "ord_456"}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        await cli.swap(
+            chain="sol", from_addr="TestPubkey",
+            input_token=SOL_MINT, output_token=USDC_MINT,
+            amount=1_000_000, anti_mev=True,
+        )
+        args = mock_run.call_args[0][0]
+        assert "--anti-mev" in args
+
+    @patch("core.gmgn_cli.GMGNCli._run")
+    async def test_swap_without_anti_mev(self, mock_run, patch_env_file):
+        mock_run.return_value = {"order_id": "ord_789"}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        await cli.swap(
+            chain="sol", from_addr="TestPubkey",
+            input_token=SOL_MINT, output_token=USDC_MINT,
+            amount=1_000_000, anti_mev=False,
+        )
+        args = mock_run.call_args[0][0]
+        assert "--anti-mev" not in args
+
+    @patch("core.gmgn_cli.GMGNCli._run")
+    async def test_swap_priority_fee(self, mock_run, patch_env_file):
+        mock_run.return_value = {"order_id": "ord_abc"}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        await cli.swap(
+            chain="sol", from_addr="TestPubkey",
+            input_token=SOL_MINT, output_token=USDC_MINT,
+            amount=1_000_000, priority_fee=0.001,
+        )
+        args = mock_run.call_args[0][0]
+        idx = args.index("--priority-fee")
+        assert args[idx + 1] == "0.001"
+
+
+class TestGMGNCliGetOrder:
+    @patch("core.gmgn_cli.GMGNCli._run")
+    async def test_get_order_status(self, mock_run, patch_env_file):
+        mock_run.return_value = {"status": "Filled", "filled_amount": "1000000"}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli.get_order("sol", "ord_123")
+        assert result["status"] == "Filled"
+
+    @patch("core.gmgn_cli.GMGNCli._run")
+    async def test_get_order_empty(self, mock_run, patch_env_file):
+        mock_run.return_value = {"status": ""}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli.get_order("sol", "ord_999")
+        assert result["status"] == ""
+
+
+class TestGMGNCliWaitForOrder:
+    @patch("core.gmgn_cli.GMGNCli.get_order", new_callable=AsyncMock)
+    async def test_wait_filled(self, mock_get_order, patch_env_file):
+        mock_get_order.return_value = {
+            "order_id": "ord_123",
+            "confirmation": {"state": "confirmed", "detail": "success"},
+        }
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli.wait_for_order("sol", "ord_123")
+        assert result["confirmation"]["state"] == "confirmed"
+        mock_get_order.assert_called_once()
+
+    @patch("core.gmgn_cli.GMGNCli.get_order", new_callable=AsyncMock)
+    async def test_wait_polls_til_filled(self, mock_get_order, patch_env_file):
+        mock_get_order.side_effect = [
+            {"confirmation": {"state": "processed"}},
+            {"confirmation": {"state": "processed"}},
+            {"confirmation": {"state": "confirmed", "detail": "success"}},
+        ]
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli.wait_for_order(
+            "sol", "ord_123", poll_interval_s=0.01,
+        )
+        assert result["confirmation"]["state"] == "confirmed"
+        assert mock_get_order.call_count == 3
+
+    @patch("core.gmgn_cli.GMGNCli.get_order", new_callable=AsyncMock)
+    async def test_wait_timeout(self, mock_get_order, patch_env_file):
+        mock_get_order.return_value = {"confirmation": {"state": "processed"}}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli.wait_for_order(
+            "sol", "ord_123", timeout_s=0.05, poll_interval_s=0.01,
+        )
+        assert result["confirmation"]["state"] == "processed"
+
+    @patch("core.gmgn_cli.GMGNCli.get_order", new_callable=AsyncMock)
+    async def test_wait_failed(self, mock_get_order, patch_env_file):
+        mock_get_order.side_effect = [
+            {"confirmation": {"state": "processed"}},
+            {"confirmation": {"state": "failed"}, "error_code": "SLIPPAGE_EXCEEDED"},
+        ]
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli.wait_for_order(
+            "sol", "ord_123", timeout_s=5, poll_interval_s=0.01,
+        )
+        assert result["confirmation"]["state"] == "failed"
+
+    @patch("core.gmgn_cli.GMGNCli.get_order", new_callable=AsyncMock)
+    async def test_wait_expired(self, mock_get_order, patch_env_file):
+        mock_get_order.return_value = {"confirmation": {"state": "expired"}}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli.wait_for_order("sol", "ord_123", timeout_s=5)
+        assert result["confirmation"]["state"] == "expired"
+
+
+class TestGMGNCliTerminal:
+    def test_confirmation_state_terminal(self):
+        assert GMGNCli._is_terminal({"confirmation": {"state": "confirmed"}})
+        assert GMGNCli._is_terminal({"confirmation": {"state": "failed"}})
+        assert GMGNCli._is_terminal({"confirmation": {"state": "expired"}})
+        assert not GMGNCli._is_terminal({"confirmation": {"state": "processed"}})
+
+    def test_top_level_status_terminal(self):
+        assert GMGNCli._is_terminal({"status": "confirmed"})
+        assert GMGNCli._is_terminal({"status": "failed"})
+        assert GMGNCli._is_terminal({"status": "expired"})
+        assert not GMGNCli._is_terminal({"status": "processed"})
+        assert not GMGNCli._is_terminal({"status": "pending"})
+        assert not GMGNCli._is_terminal({})
+        assert not GMGNCli._is_terminal({"confirmation": {}})
+
+
+class TestGMGNCliGasPrice:
+    @patch("core.gmgn_cli.GMGNCli._run")
+    async def test_gas_price(self, mock_run, patch_env_file):
+        mock_run.return_value = {"gas_price": 1000, "priority_fee": 500}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli.gas_price("sol")
+        assert result["gas_price"] == 1000
+
+
+class TestGMGNCliRun:
+    @patch("core.gmgn_cli.asyncio.create_subprocess_exec")
+    async def test_run_returns_parsed_json(self, mock_exec, patch_env_file):
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate = AsyncMock(
+            return_value=(json.dumps({"key": "value"}).encode(), b"")
+        )
+        mock_exec.return_value = mock_process
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli._run(["quote", "--help"])
+        assert result == {"key": "value"}
+
+    @patch("core.gmgn_cli.asyncio.create_subprocess_exec")
+    async def test_run_nonzero_exit(self, mock_exec, patch_env_file):
+        mock_process = AsyncMock()
+        mock_process.returncode = 1
+        mock_process.communicate = AsyncMock(
+            return_value=(b"{}", b"something went wrong")
+        )
+        mock_exec.return_value = mock_process
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli._run(["quote"])
+        assert result == {}
+
+    @patch("core.gmgn_cli.asyncio.create_subprocess_exec")
+    async def test_run_empty_stdout(self, mock_exec, patch_env_file):
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate = AsyncMock(return_value=(b"", b""))
+        mock_exec.return_value = mock_process
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli._run(["quote"])
+        assert result == {}
+
+    @patch("core.gmgn_cli.asyncio.create_subprocess_exec")
+    async def test_run_file_not_found(self, mock_exec, patch_env_file):
+        mock_exec.side_effect = FileNotFoundError("no binary")
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli._run(["quote"])
+        assert result == {}
+
+    @patch("core.gmgn_cli.asyncio.create_subprocess_exec")
+    async def test_run_non_json_stdout(self, mock_exec, patch_env_file):
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate = AsyncMock(
+            return_value=(b"not json at all", b"")
+        )
+        mock_exec.return_value = mock_process
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        result = await cli._run(["quote"])
+        assert result == {"_raw": "not json at all"}
+
+
+class TestGMGNCliSolMints:
+    def test_sol_mint(self):
+        assert SOL_MINT == "So11111111111111111111111111111111111111112"
+
+    def test_usdc_mint(self):
+        assert USDC_MINT == "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
