@@ -24,23 +24,17 @@ class TestBuildConditionOrders:
     def test_default_config(self):
         config = {
             "tp1_multiplier": 1.30,
-            "tp1_sell_pct": 80,
-            "tp2_multiplier": 2.00,
-            "tp2_sell_pct": 100,
             "stop_loss_pct": 50,
         }
         ex = self._executor(config)
         result = json.loads(ex._build_condition_orders_json())
-        assert len(result) == 3
+        # Only 2 conditions: TP1 + SL (TP2 dropped due to sell_ratio_type bug)
+        assert len(result) == 2
 
-        tp1, tp2, sl = result
+        tp1, sl = result
         assert tp1["order_type"] == "profit_stop"
         assert tp1["price_scale"] == "130"
-        assert tp1["sell_ratio"] == "80"
-        assert tp1["sell_ratio_type"] == "hold_amount"
-
-        assert tp2["price_scale"] == "200"
-        assert tp2["sell_ratio"] == "100"
+        assert tp1["sell_ratio"] == "100"  # 100% exit (no double-sell risk)
 
         assert sl["order_type"] == "loss_stop"
         assert sl["price_scale"] == "50"
@@ -49,26 +43,32 @@ class TestBuildConditionOrders:
     def test_custom_config(self):
         config = {
             "tp1_multiplier": 1.50,
-            "tp1_sell_pct": 50,
-            "tp2_multiplier": 3.00,
-            "tp2_sell_pct": 100,
             "stop_loss_pct": 30,
         }
         ex = self._executor(config)
         result = json.loads(ex._build_condition_orders_json())
-        tp1, tp2, sl = result
+        tp1, sl = result
         assert tp1["price_scale"] == "150"
-        assert tp1["sell_ratio"] == "50"
-        assert tp2["price_scale"] == "300"
+        assert tp1["sell_ratio"] == "100"
         assert sl["price_scale"] == "70"  # 100 - 30
+        assert sl["sell_ratio"] == "100"
 
     def test_missing_config_uses_defaults(self):
         ex = self._executor({})
         result = json.loads(ex._build_condition_orders_json())
-        tp1, tp2, sl = result
+        tp1, sl = result
         assert tp1["price_scale"] == "130"
-        assert tp2["price_scale"] == "200"
+        assert tp1["sell_ratio"] == "100"
         assert sl["price_scale"] == "50"
+        assert sl["sell_ratio"] == "100"
+
+    def test_no_sell_ratio_type_field(self):
+        """Verified 2026-06: GMGN silently ignores sell_ratio_type.
+        We must NOT include it in the JSON to avoid confusion."""
+        ex = self._executor({})
+        result = json.loads(ex._build_condition_orders_json())
+        for order in result:
+            assert "sell_ratio_type" not in order
 
     def test_returns_valid_json(self):
         ex = self._executor({})
@@ -172,10 +172,14 @@ class TestBuyLiveUsesConditionOrders:
         call_kwargs = gmgn_cli.swap.call_args.kwargs
         assert "condition_orders" in call_kwargs
         conditions = json.loads(call_kwargs["condition_orders"])
-        assert len(conditions) == 3
+        # Only 2 conditions: TP1 (1.30x sell 100%) + SL (0.50x sell 100%)
+        assert len(conditions) == 2
         assert conditions[0]["order_type"] == "profit_stop"
         assert conditions[0]["price_scale"] == "130"
-        assert conditions[2]["order_type"] == "loss_stop"
+        assert conditions[0]["sell_ratio"] == "100"
+        assert conditions[1]["order_type"] == "loss_stop"
+        assert conditions[1]["price_scale"] == "50"
+        assert conditions[1]["sell_ratio"] == "100"
 
     async def test_buy_skipped_on_insufficient_balance(self):
         from core.trade_executor import TradeExecutor
@@ -246,9 +250,7 @@ class TestStrategyPoller:
                 "strategy_status": "running",
                 "condition_orders": [
                     {"order_type": "profit_stop", "price_scale": "130",
-                     "sell_ratio": "80", "status": "filled"},
-                    {"order_type": "profit_stop", "price_scale": "200",
-                     "sell_ratio": "100", "status": "check"},
+                     "sell_ratio": "100", "status": "filled"},
                     {"order_type": "loss_stop", "price_scale": "50",
                      "sell_ratio": "100", "status": "check"},
                 ],
@@ -267,44 +269,10 @@ class TestStrategyPoller:
 
         assert pos["tp1_filled"] == 1
         pos_mgr.update_position.assert_called_once()
-        # Not closed yet — TP2 still pending
-        pos_mgr.close_position.assert_not_called()
-
-    async def test_tp1_and_tp2_filled_closes_position(self):
-        from tracking.strategy_poller import _check_one
-
-        gmgn_cli = MagicMock()
-        gmgn_cli.list_strategies = AsyncMock(return_value={
-            "list": [{
-                "base_token": "TokWIF111",
-                "status": "open",
-                "strategy_status": "running",
-                "condition_orders": [
-                    {"order_type": "profit_stop", "price_scale": "130",
-                     "sell_ratio": "80", "status": "filled"},
-                    {"order_type": "profit_stop", "price_scale": "200",
-                     "sell_ratio": "100", "status": "filled"},
-                    {"order_type": "loss_stop", "price_scale": "50",
-                     "sell_ratio": "100", "status": "check"},
-                ],
-            }],
-        })
-
-        pos = {
-            "id": 6, "token_symbol": "WIF", "token_address": "TokWIF111",
-            "paper": 0, "tp1_filled": 1, "tp2_filled": 0, "sl_filled": 0,
-        }
-        pos_mgr = MagicMock()
-        pos_mgr.update_position = AsyncMock()
-        pos_mgr.close_position = AsyncMock()
-
-        await _check_one(pos, pos_mgr, gmgn_cli, "WALLET")
-
-        assert pos["tp2_filled"] == 1
-        pos_mgr.update_position.assert_called_once()
+        # TP1 (100% exit) means position is fully closed
         pos_mgr.close_position.assert_called_once()
         args, kwargs = pos_mgr.close_position.call_args
-        assert "TP1+TP2" in (kwargs.get("exit_reason") or args[1])
+        assert "TP1" in (kwargs.get("exit_reason") or args[1])
 
     async def test_sl_filled_closes_position(self):
         from tracking.strategy_poller import _check_one
@@ -317,8 +285,6 @@ class TestStrategyPoller:
                 "strategy_status": "running",
                 "condition_orders": [
                     {"order_type": "profit_stop", "price_scale": "130",
-                     "sell_ratio": "80", "status": "check"},
-                    {"order_type": "profit_stop", "price_scale": "200",
                      "sell_ratio": "100", "status": "check"},
                     {"order_type": "loss_stop", "price_scale": "50",
                      "sell_ratio": "100", "status": "filled"},

@@ -71,6 +71,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/queue - Queue size\n"
         "/recent - Last 10 calls\n"
         "/best - Best performing tokens\n"
+        "/live_status - Live trading status\n"
+        "/live_pause - Pause live trading\n"
+        "/live_resume - Resume live trading\n"
+        "/close_all - Close all live positions\n"
         "/ping - Check bot alive\n"
         "/help - Show this message"
     )
@@ -446,6 +450,175 @@ async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @_require_auth
+async def cmd_live_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show live trading status: mode, balance, positions, PnL, pause state."""
+    state = ctx.bot_data.get("state")
+    db = ctx.bot_data.get("db")
+    if not state:
+        await update.message.reply_text("Bot not ready yet.")
+        return
+
+    paper_mode = state.paper_mode if hasattr(state, "paper_mode") else True
+    live_paused = getattr(state, "_live_paused", False)
+    mode = "PAPER" if paper_mode else "LIVE"
+    pause_str = " ⏸ PAUSED" if live_paused else ""
+
+    lines = [f"🔴 Live Status: {mode}{pause_str}"]
+
+    # GMGN balance (live mode)
+    if not paper_mode and getattr(state, "gmgn_cli", None):
+        try:
+            bal = await state.gmgn_cli.get_sol_balance()
+            lines.append(f"GMGN balance: {bal:.4f} SOL")
+        except Exception as e:
+            lines.append(f"GMGN balance: error ({e})")
+
+    # Open positions
+    try:
+        positions = await state.position_manager.get_open_positions()
+        live_count = sum(1 for p in positions if not p.get("paper", 1))
+        paper_count = len(positions) - live_count
+        lines.append(
+            f"Open positions: {len(positions)} "
+            f"(live: {live_count}, paper: {paper_count})"
+        )
+    except Exception as e:
+        lines.append(f"Positions: error ({e})")
+
+    # Risk state
+    if hasattr(state, "risk_manager"):
+        rm = state.risk_manager
+        lines.append(
+            f"Daily PnL: {rm.daily_pnl:+.4f} SOL | "
+            f"trades today: {rm.daily_trades} | "
+            f"loss streak: {rm.loss_streak}"
+        )
+
+    await update.message.reply_text("\n".join(lines))
+
+
+@_require_auth
+async def cmd_live_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Pause live trading (no new buys until /live_resume)."""
+    state = ctx.bot_data.get("state")
+    if not state:
+        await update.message.reply_text("Bot not ready yet.")
+        return
+    if state.paper_mode:
+        await update.message.reply_text("Bot is in PAPER mode (no live trades).")
+        return
+    state._live_paused = True
+    logger.warning("[LIVE] Paused via /live_pause")
+    await update.message.reply_text("⏸ Live trading PAUSED. No new buys will execute.\nUse /live_resume to resume.")
+
+
+@_require_auth
+async def cmd_live_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Resume live trading after pause."""
+    state = ctx.bot_data.get("state")
+    if not state:
+        await update.message.reply_text("Bot not ready yet.")
+        return
+    if state.paper_mode:
+        await update.message.reply_text("Bot is in PAPER mode (no live trades).")
+        return
+    state._live_paused = False
+    logger.warning("[LIVE] Resumed via /live_resume")
+    await update.message.reply_text("▶️ Live trading RESUMED. New buys will execute on APE signals.")
+
+
+@_require_auth
+async def cmd_close_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Close all live positions by selling tokens at market."""
+    state = ctx.bot_data.get("state")
+    if not state:
+        await update.message.reply_text("Bot not ready yet.")
+        return
+    if state.paper_mode:
+        await update.message.reply_text("Bot is in PAPER mode (use /positions for view).")
+        return
+    if not getattr(state, "executor", None) or not getattr(state, "gmgn_cli", None):
+        await update.message.reply_text("Live trading not initialized.")
+        return
+
+    await update.message.reply_text("🔄 Closing all live positions...")
+
+    try:
+        positions = await state.position_manager.get_open_positions()
+        live_positions = [p for p in positions if not p.get("paper", 1)]
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to fetch positions: {e}")
+        return
+
+    if not live_positions:
+        await update.message.reply_text("No live positions to close.")
+        return
+
+    # Pause live trading to prevent re-entry during close
+    state._live_paused = True
+
+    closed = 0
+    skipped = 0
+    failed = 0
+    for pos in live_positions:
+        sym = pos.get("token_symbol", "?")
+        addr = pos.get("token_address", "")
+        current_amount = pos.get("current_amount_token", 0) or 0
+        strategy_id = pos.get("strategy_order_id", "")
+
+        # Skip if has active GMGN strategy (let it execute naturally)
+        if strategy_id:
+            skipped += 1
+            logger.info(
+                f"[CLOSE-ALL] Skipped {sym}: has active strategy {strategy_id[:16]}"
+            )
+            continue
+
+        if current_amount <= 0:
+            skipped += 1
+            continue
+
+        try:
+            from core.jupiter_client import SOL_MINT
+            token_decimals = 9  # default; could fetch from token info
+            sell_lamports = int(current_amount * (10 ** token_decimals))
+            result = await state.gmgn_cli.swap(
+                chain="sol",
+                from_addr=state.gmgn_cli.get_wallet_address_sync()
+                if hasattr(state.gmgn_cli, "get_wallet_address_sync")
+                else "unknown",
+                input_token=addr,
+                output_token=SOL_MINT,
+                amount=sell_lamports,
+                slippage=30,
+            )
+            if result and result.get("order_id"):
+                # Wait for confirmation
+                status = await state.gmgn_cli.wait_for_order("sol", result["order_id"])
+                if status.get("status") == "confirmed":
+                    await state.position_manager.close_position(
+                        pos, exit_reason="MANUAL_CLOSE_ALL",
+                        exit_price=0.0, pnl_sol=0.0, pnl_pct=0.0, pnl_usd=0.0,
+                    )
+                    closed += 1
+                else:
+                    failed += 1
+            else:
+                failed += 1
+        except Exception as e:
+            logger.error(f"[CLOSE-ALL] Failed to close {sym}: {e}")
+            failed += 1
+
+    msg = (
+        f"✅ Closed: {closed} | "
+        f"⏭ Skipped (active strategy): {skipped} | "
+        f"❌ Failed: {failed}\n"
+        f"Live trading PAUSED — use /live_resume to continue."
+    )
+    await update.message.reply_text(msg)
+
+
+@_require_auth
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await cmd_start(update, ctx)
 
@@ -485,6 +658,10 @@ async def bot_handler(state, db):
     _bot_app.add_handler(CommandHandler("recent", cmd_recent))
     _bot_app.add_handler(CommandHandler("best", cmd_best))
     _bot_app.add_handler(CommandHandler("ping", cmd_ping))
+    _bot_app.add_handler(CommandHandler("live_status", cmd_live_status))
+    _bot_app.add_handler(CommandHandler("live_pause", cmd_live_pause))
+    _bot_app.add_handler(CommandHandler("live_resume", cmd_live_resume))
+    _bot_app.add_handler(CommandHandler("close_all", cmd_close_all))
 
     await _bot_app.initialize()
 

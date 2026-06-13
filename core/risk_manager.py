@@ -14,23 +14,61 @@ logger = logging.getLogger("risk")
 class RiskManager:
     """In-memory risk state. Single bot = single RiskManager."""
 
-    def __init__(self, config: dict, db=None):
+    def __init__(self, config: dict, db=None, risk_rules: dict = None,
+                 position_manager=None):
         self.config = config
+        self.risk_rules = risk_rules or {}
         self.db = db
+        self.position_manager = position_manager
         self.daily_pnl: float = 0.0
         self.loss_streak: int = 0
+        self.daily_trades: int = 0
         self.halted_until: Optional[datetime] = None
         self.last_reset_date: datetime = datetime.now(timezone.utc).date()
 
-    def can_trade(self) -> Tuple[bool, str]:
-        """Check all risk gates. Returns (allowed, reason)."""
+    def can_trade(self, open_position_count: int = 0) -> Tuple[bool, str]:
+        """Check all risk gates. Returns (allowed, reason).
+
+        Args:
+          open_position_count: caller passes current open position count
+                              (caller has async access to position_manager)
+
+        Gates (in order):
+          1. Loss-streak halt (if set)
+          2. Daily loss limit
+          3. Max concurrent open positions
+          4. Max daily trades
+        """
         self._maybe_reset_daily()
         if self.halted_until and datetime.now(timezone.utc) < self.halted_until:
             remaining = (self.halted_until - datetime.now(timezone.utc)).total_seconds() / 60
             return False, f"Halted for {remaining:.0f}m more (loss streak)"
         if self.daily_pnl <= -self.config.get("daily_loss_limit_sol", 0.5):
             return False, f"Daily loss limit hit: {self.daily_pnl:.3f} SOL"
+
+        # Max concurrent positions
+        max_pos = self.risk_rules.get("max_open_positions", 0)
+        if max_pos > 0 and open_position_count >= max_pos:
+            return False, (
+                f"Max open positions reached: {open_position_count}/{max_pos}"
+            )
+
+        # Max daily trades
+        max_trades = self.risk_rules.get("max_daily_trades", 0)
+        if max_trades > 0 and self.daily_trades >= max_trades:
+            return False, (
+                f"Max daily trades reached: {self.daily_trades}/{max_trades}"
+            )
+
         return True, "OK"
+
+    def record_trade_open(self) -> None:
+        """Increment daily trade counter after a successful buy."""
+        self._maybe_reset_daily()
+        self.daily_trades += 1
+        logger.debug(
+            f"[RISK] Trade opened. daily_trades={self.daily_trades}"
+        )
 
     def get_position_size(self, balance: float) -> float:
         """Return SOL amount for the next trade (capped, floored)."""
@@ -70,8 +108,12 @@ class RiskManager:
     def _maybe_reset_daily(self) -> None:
         today = datetime.now(timezone.utc).date()
         if today != self.last_reset_date:
-            logger.info(f"[RISK] Daily reset, prev PnL={self.daily_pnl:.4f} SOL")
+            logger.info(
+                f"[RISK] Daily reset, prev PnL={self.daily_pnl:.4f} SOL, "
+                f"prev trades={self.daily_trades}"
+            )
             self.daily_pnl = 0.0
+            self.daily_trades = 0
             self.last_reset_date = today
 
 

@@ -243,6 +243,16 @@ class GMGNCli:
             logger.warning(f"[GMGN-CLI] failed to get wallet address for {chain}: {e}")
         return ""
 
+    def get_wallet_address_sync(self, chain: str = "sol") -> str:
+        """Sync version of get_wallet_address. Used in tests + Telegram commands."""
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.get_wallet_address(chain))
+        except RuntimeError:
+            # No event loop, create one
+            return asyncio.run(self.get_wallet_address(chain))
+
     async def gas_price(self, chain: str) -> dict:
         """Get recommended gas price tiers (API-key-only, no signed auth)."""
         return await self._run(["gas-price", "--chain", chain])

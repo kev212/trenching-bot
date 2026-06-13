@@ -41,8 +41,9 @@ class FakeBot:
 
     def __init__(self, paper_mode=False, gmgn_cli=None, balance=0.5,
                  executor=None, risk_manager=None, min_size=0.02, fixed_size=0.05,
-                 confidence_threshold=0.60):
+                 confidence_threshold=0.60, open_positions=None):
         self.paper_mode = paper_mode
+        self._live_paused = False
         self.gmgn_cli = gmgn_cli
         self.executor = executor or MagicMock()
         self.executor.execute_buy = AsyncMock(return_value=MagicMock(id=42))
@@ -53,6 +54,10 @@ class FakeBot:
             risk_manager.can_trade = MagicMock(return_value=(True, "OK"))
             risk_manager.get_position_size = MagicMock(return_value=fixed_size)
         self.risk_manager = risk_manager
+        self.position_manager = MagicMock()
+        self.position_manager.get_open_positions = AsyncMock(
+            return_value=open_positions or []
+        )
         self.trading_config = {
             "min_position_sol": min_size,
             "position_size_sol": fixed_size,
@@ -226,3 +231,31 @@ class TestBuyExecution:
             await bot.run(make_decision())
 
         asyncio.run(go())
+
+
+class TestLivePausedGate:
+    def test_live_paused_blocks_buy(self):
+        gmgn = MagicMock()
+        gmgn.is_ready = MagicMock(return_value=True)
+        gmgn.get_sol_balance = AsyncMock(return_value=0.5)
+        bot = FakeBot(paper_mode=False, gmgn_cli=gmgn)
+        bot._live_paused = True
+
+        async def go():
+            await bot.run(make_decision())
+
+        asyncio.run(go())
+        bot.executor.execute_buy.assert_not_called()
+
+    def test_live_resumed_allows_buy(self):
+        gmgn = MagicMock()
+        gmgn.is_ready = MagicMock(return_value=True)
+        gmgn.get_sol_balance = AsyncMock(return_value=0.5)
+        bot = FakeBot(paper_mode=False, gmgn_cli=gmgn)
+        bot._live_paused = False
+
+        async def go():
+            await bot.run(make_decision())
+
+        asyncio.run(go())
+        bot.executor.execute_buy.assert_called_once()

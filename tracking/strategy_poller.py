@@ -121,21 +121,19 @@ async def _check_one(pos: dict, position_manager: PositionManager, gmgn_cli: GMG
     if not matching:
         return
 
-    # Check each condition order's status
+    # Check each condition order's status.
+    # Note: with the sell_ratio_type fix, we only have 2 conditions:
+    # TP1 (1.30x sell 100%) and SL (0.50x sell 100%). TP2 dropped to
+    # avoid double-sell risk since GMGN always uses buy_amount semantics.
     conditions = matching.get("condition_orders", []) or []
     filled_tp1 = False
-    filled_tp2 = False
     filled_sl = False
     for c in conditions:
         ctype = c.get("order_type", "")
         cstatus = c.get("status", "")
         if cstatus in ("filled", "success", "completed", "triggered"):
             if ctype == "profit_stop":
-                ps = int(c.get("price_scale", "0"))
-                if ps <= 150:
-                    filled_tp1 = True
-                else:
-                    filled_tp2 = True
+                filled_tp1 = True
             elif ctype == "loss_stop":
                 filled_sl = True
 
@@ -148,13 +146,6 @@ async def _check_one(pos: dict, position_manager: PositionManager, gmgn_cli: GMG
         updated = True
         logger.info(
             f"[STRATEGY-POLLER] TP1 filled: {pos.get('token_symbol','?')} "
-            f"({pos.get('token_address','')[:8]})"
-        )
-    if filled_tp2 and not pos.get("tp2_filled", 0):
-        pos["tp2_filled"] = 1
-        updated = True
-        logger.info(
-            f"[STRATEGY-POLLER] TP2 filled: {pos.get('token_symbol','?')} "
             f"({pos.get('token_address','')[:8]})"
         )
     if filled_sl and not pos.get("sl_filled", 0):
@@ -172,11 +163,11 @@ async def _check_one(pos: dict, position_manager: PositionManager, gmgn_cli: GMG
             logger.warning(f"[STRATEGY-POLLER] update_position failed: {e}")
 
     # If strategy is fully exited, close the position
-    fully_exited = (filled_tp1 and filled_tp2) or filled_sl
+    fully_exited = filled_tp1 or filled_sl
     strategy_done = strategy_status in ("closed", "cancelled", "finished", "completed")
     if fully_exited or strategy_done or strategy_state in ("finished", "closed"):
         if fully_exited:
-            exit_reason = "TP1+TP2" if (filled_tp1 and filled_tp2) else "SL"
+            exit_reason = "TP1" if filled_tp1 else "SL"
         else:
             exit_reason = f"GMGN:{strategy_status}"
         try:

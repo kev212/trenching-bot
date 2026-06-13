@@ -122,6 +122,7 @@ class TrenchingBot:
         self.state = SharedState()
         self.queue = asyncio.Queue(maxsize=settings.max_queue_size)
         self.state.queue = self.queue
+        self._live_paused = False  # /live_pause flag for live trading
         self.rate_limiter = RateLimiter(15, 60)  # GMGN: 15 req/min
         self.gmgn = GMGNClient(settings.gmgn_api_key, settings.http_proxy, rate_limiter=self.rate_limiter)
         logger.warning(f"GMGN init: proxy=[{self.gmgn.proxy[:50] if self.gmgn.proxy else 'NONE'}]")
@@ -160,7 +161,12 @@ class TrenchingBot:
             rate_limiter=self.rate_limiter,
         )
         self.position_manager = PositionManager(self.db)
-        self.risk_manager = RiskManager(self.trading_config, db=self.db)
+        self.risk_manager = RiskManager(
+            self.trading_config,
+            db=self.db,
+            risk_rules=self.risk_rules,
+            position_manager=self.position_manager,
+        )
         from core.price_oracle import PriceOracle
         self.price_oracle = PriceOracle(
             gmgn=self.gmgn,
@@ -1166,6 +1172,7 @@ class TrenchingBot:
         """Execute live buy for high-conviction APE calls (live mode only).
 
         Pre-trade guard chain (in order):
+          0. _live_paused must be False (set via /live_pause)
           1. paper_mode must be False
           2. verdict must be APE (high conviction; WATCH stays alert-only)
           3. confidence must be >= confidence_auto_execute (default 0.60)
@@ -1174,6 +1181,14 @@ class TrenchingBot:
           6. risk_manager.can_trade() must approve
         """
         from analysis.models import Verdict
+
+        if self._live_paused:
+            logger.info(
+                f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
+                f"verdict={decision.verdict.value}, conf={decision.confidence:.2f}, "
+                f"action=NO_TRADE (live paused via /live_pause)"
+            )
+            return
 
         if self.paper_mode:
             logger.info(
@@ -1206,8 +1221,14 @@ class TrenchingBot:
             )
             return
 
-        # Risk check (daily loss limit, loss streak halt)
-        can_trade, reason = self.risk_manager.can_trade()
+        # Risk check (daily loss limit, max positions, max trades, loss streak)
+        try:
+            open_positions = await self.position_manager.get_open_positions()
+            open_count = len(open_positions)
+        except Exception as e:
+            logger.warning(f"[BUY-SKIP] {token.symbol}: position count failed: {e}")
+            return
+        can_trade, reason = self.risk_manager.can_trade(open_position_count=open_count)
         if not can_trade:
             logger.warning(
                 f"[BUY-SKIP] {token.symbol} ({address[:8]}): "

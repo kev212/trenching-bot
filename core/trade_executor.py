@@ -90,16 +90,25 @@ class TradeExecutor:
         return await self._execute_buy_paper(token, size_sol, filter_params_version)
 
     def _build_condition_orders_json(self) -> str:
-        """Build TP1/TP2/SL condition orders JSON for GMGN swap.
+        """Build TP1 + SL condition orders JSON for GMGN swap.
 
-        price_scale: 100=entry, 130=1.30x, 200=2.0x, 50=-50% (50% of entry)
-        sell_ratio: % of current hold_amount to sell
-        sell_ratio_type: hold_amount (handles partial sells naturally)
+        IMPORTANT (verified 2026-06 on real GMGN CLI):
+        - `sell_ratio_type` is silently ignored — GMGN always uses
+          `buy_amount` semantics regardless of input.
+        - This means if we sent TP1 sell 80% + TP2 sell 100% with
+          `hold_amount`, GMGN would interpret both as % of ORIGINAL
+          buy amount, causing double-sell attempts (TP1 sells 80%,
+          TP2 tries to sell 100% but only 20% remains — may fail
+          or sell what it can).
+        - To avoid this risk, we use ONLY 2 conditions:
+          * TP1: profit_stop 1.30x sell 100% (full exit at target)
+          * SL:  loss_stop 0.50x  sell 100% (full exit on stop)
+        - For advanced exits (TP2, trailing), use strategy_poller
+          which can call GMGN swap directly with the remaining 20%.
+
+        price_scale: 100=entry, 130=1.30x, 50=50% of entry (-50%)
         """
         tp1_mult = int(self.config.get("tp1_multiplier", 1.3) * 100)
-        tp1_pct = int(self.config.get("tp1_sell_pct", 80))
-        tp2_mult = int(self.config.get("tp2_multiplier", 2.0) * 100)
-        tp2_pct = int(self.config.get("tp2_sell_pct", 100))
         sl_scale = int(100 - self.config.get("stop_loss_pct", 50))
 
         orders = [
@@ -107,22 +116,13 @@ class TradeExecutor:
                 "order_type": "profit_stop",
                 "side": "sell",
                 "price_scale": str(tp1_mult),
-                "sell_ratio": str(tp1_pct),
-                "sell_ratio_type": "hold_amount",
-            },
-            {
-                "order_type": "profit_stop",
-                "side": "sell",
-                "price_scale": str(tp2_mult),
-                "sell_ratio": str(tp2_pct),
-                "sell_ratio_type": "hold_amount",
+                "sell_ratio": "100",
             },
             {
                 "order_type": "loss_stop",
                 "side": "sell",
                 "price_scale": str(sl_scale),
                 "sell_ratio": "100",
-                "sell_ratio_type": "hold_amount",
             },
         ]
         return json.dumps(orders)
@@ -237,6 +237,9 @@ class TradeExecutor:
             status="CONFIRMED",
         )
         await self.positions.record_trade(trade)
+
+        if self.risk and hasattr(self.risk, "record_trade_open"):
+            self.risk.record_trade_open()
 
         logger.info(
             f"[EXEC-LIVE] BUY {token.symbol} @ ${entry_price_usd:.10f} "
@@ -360,6 +363,9 @@ class TradeExecutor:
                 "ts": time.time(),
                 "price": entry_price_usd,
             }
+
+        if self.risk and hasattr(self.risk, "record_trade_open"):
+            self.risk.record_trade_open()
 
         return position
 
