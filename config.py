@@ -38,7 +38,6 @@ class Settings(BaseSettings):
     private_key_encrypted: str = ""
     wallet_private_key: str = ""
     wallet_pubkey: str = ""
-    gmgn_private_key: str = ""
     paper_starting_balance_sol: float = 10.0
     confidence_auto_execute: float = 0.60
     enable_trenches_poller: bool = True

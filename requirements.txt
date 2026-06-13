@@ -10,4 +10,4 @@ structlog>=23.2.0
 curl_cffi>=0.13.0
 playwright>=1.40.0
 solders>=0.21.0
-cryptography>=42.0.0
+# cryptography removed — GMGN swap now uses official gmgn-cli tool (npm)
