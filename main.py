@@ -1072,7 +1072,7 @@ class TrenchingBot:
         final_score = (social_score * 0.5) + (data_score * 0.5)
         final_score = max(0, min(100, final_score))
 
-        if final_score >= 70:
+        if final_score >= 60:   # was 70, lowered 2026-06-14
             final_verdict = Verdict.APE
         elif final_score >= 50:
             final_verdict = Verdict.WATCH
@@ -1221,13 +1221,7 @@ class TrenchingBot:
                 f"verdict={decision.verdict.value}, action=NO_TRADE (not APE)"
             )
             return
-        # Gate 3
-        elif decision.confidence < settings.confidence_auto_execute:
-            block_reason = (
-                f"Confidence {decision.confidence:.2f} < "
-                f"{settings.confidence_auto_execute}"
-            )
-        # Gate 4
+        # Gate 4 (was Gate 3 — conf check removed; APE threshold is the gate)
         elif not self.gmgn_cli or not self.gmgn_cli.is_ready():
             block_reason = "GMGN CLI not ready"
         else:

@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     wallet_private_key: str = ""
     wallet_pubkey: str = ""
     paper_starting_balance_sol: float = 10.0
-    confidence_auto_execute: float = 0.60
+    confidence_auto_execute: float = 0.60  # DEPRECATED 2026-06-14: APE threshold (60) is now the gate; conf_auto_execute unused
     enable_trenches_poller: bool = True
 
     # June 2026 audit cycle 3 — anti-freeze tuning

@@ -1067,18 +1067,19 @@ def test_final_scoring_formula():
 
 
 def test_final_scoring_verdict_thresholds():
-    """Verdict thresholds: ≥70 APE, 50-69 WATCH, <50 SKIP."""
+    """Verdict thresholds (2026-06-14): ≥60 APE, 50-59 WATCH, <50 SKIP."""
     def get_verdict(score):
-        if score >= 70:
+        if score >= 60:
             return "APE"
         elif score >= 50:
             return "WATCH"
         else:
             return "SKIP"
 
+    assert get_verdict(60) == "APE"
     assert get_verdict(70) == "APE"
-    assert get_verdict(69.9) == "WATCH"
+    assert get_verdict(100) == "APE"
+    assert get_verdict(59.9) == "WATCH"
     assert get_verdict(50) == "WATCH"
     assert get_verdict(49.9) == "SKIP"
     assert get_verdict(0) == "SKIP"
-    assert get_verdict(100) == "APE"

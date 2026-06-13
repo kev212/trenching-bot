@@ -115,14 +115,25 @@ class TestVerdictGate:
 
 
 class TestConfidenceGate:
-    def test_low_confidence_skipped(self):
-        bot = FakeBot(paper_mode=False, confidence_threshold=0.60)
+    """Gate 3 (conf_auto_execute check) was removed 2026-06-14.
+
+    APE verdict threshold (60) is the only gate. Low confidence does NOT
+    block APE attempts anymore.
+    """
+
+    def test_low_confidence_proceeds(self):
+        """2026-06-14: conf_auto_execute gate removed. APE proceeds regardless of conf."""
+        gmgn = MagicMock()
+        gmgn.is_ready = MagicMock(return_value=True)
+        gmgn.get_sol_balance = AsyncMock(return_value=0.5)
+        bot = FakeBot(paper_mode=False, gmgn_cli=gmgn)
 
         async def go():
             return await bot.run(make_decision(conf=0.50))
 
         asyncio.run(go())
-        bot.executor.execute_buy.assert_not_called()
+        # Low conf but APE verdict — buy proceeds (no Gate 3)
+        bot.executor.execute_buy.assert_called_once()
 
     def test_high_confidence_proceeds(self):
         gmgn = MagicMock()
@@ -132,6 +143,19 @@ class TestConfidenceGate:
 
         async def go():
             return await bot.run(make_decision(conf=0.80))
+
+        asyncio.run(go())
+        bot.executor.execute_buy.assert_called_once()
+
+    def test_very_low_confidence_still_proceeds(self):
+        """Edge: conf=0.0 still proceeds if APE verdict (gate 3 is gone)."""
+        gmgn = MagicMock()
+        gmgn.is_ready = MagicMock(return_value=True)
+        gmgn.get_sol_balance = AsyncMock(return_value=0.5)
+        bot = FakeBot(paper_mode=False, gmgn_cli=gmgn)
+
+        async def go():
+            return await bot.run(make_decision(conf=0.0))
 
         asyncio.run(go())
         bot.executor.execute_buy.assert_called_once()
