@@ -89,11 +89,67 @@ class TradeExecutor:
 
         return await self._execute_buy_paper(token, size_sol, filter_params_version)
 
+    def _build_condition_orders_json(self) -> str:
+        """Build TP1/TP2/SL condition orders JSON for GMGN swap.
+
+        price_scale: 100=entry, 130=1.30x, 200=2.0x, 50=-50% (50% of entry)
+        sell_ratio: % of current hold_amount to sell
+        sell_ratio_type: hold_amount (handles partial sells naturally)
+        """
+        tp1_mult = int(self.config.get("win_target_multiplier", 1.3) * 100)
+        tp1_pct = int(self.config.get("tp1_sell_pct", 80))
+        tp2_mult = int(self.config.get("tp2_multiplier", 2.0) * 100)
+        tp2_pct = int(self.config.get("tp2_sell_pct", 100))
+        sl_scale = int(100 - self.config.get("stop_loss_pct", 50))
+
+        orders = [
+            {
+                "order_type": "profit_stop",
+                "side": "sell",
+                "price_scale": str(tp1_mult),
+                "sell_ratio": str(tp1_pct),
+                "sell_ratio_type": "hold_amount",
+            },
+            {
+                "order_type": "profit_stop",
+                "side": "sell",
+                "price_scale": str(tp2_mult),
+                "sell_ratio": str(tp2_pct),
+                "sell_ratio_type": "hold_amount",
+            },
+            {
+                "order_type": "loss_stop",
+                "side": "sell",
+                "price_scale": str(sl_scale),
+                "sell_ratio": "100",
+                "sell_ratio_type": "hold_amount",
+            },
+        ]
+        return json.dumps(orders)
+
     async def _execute_buy_live(self, token: TokenData, size_sol: float,
                                  filter_params_version: int = 0) -> Optional[Position]:
-        """Execute a real buy via GMGN CLI swap."""
+        """Execute a real buy via GMGN CLI swap.
+
+        Pre-trade: sync balance from GMGN hosted wallet (Helius can't see it).
+        Attach TP/SL condition orders to the swap (Step 3) — GMGN handles exits
+        on-chain, no Python polling needed.
+        """
         token_decimals = self._infer_decimals(token)
         amount_lamports = int(size_sol * 1e9)
+
+        # Step 1: sync balance from GMGN hosted wallet
+        balance = await self.wallet.sync_from_gmgn(self.gmgn_cli)
+        if balance < size_sol + self.wallet.RESERVE_SOL:
+            logger.warning(
+                f"[EXEC-LIVE] Insufficient GMGN balance for {token.symbol}: "
+                f"have {balance:.4f} SOL, need {size_sol + self.wallet.RESERVE_SOL:.4f}"
+            )
+            return None
+
+        # Step 3: build TP/SL condition orders
+        condition_orders_json = self._build_condition_orders_json()
+        strategy_order_id_hint = ""
 
         result = await self.gmgn_cli.swap(
             chain="sol",
@@ -102,6 +158,7 @@ class TradeExecutor:
             output_token=token.address,
             amount=amount_lamports,
             slippage=max(1, self.slippage_bps // 100),
+            condition_orders=condition_orders_json,
         )
         if not result or not result.get("order_id"):
             logger.warning(
@@ -116,6 +173,7 @@ class TradeExecutor:
             return None
 
         order_id = result["order_id"]
+        strategy_order_id_hint = result.get("strategy_order_id", "") or ""
         status = await self.gmgn_cli.wait_for_order("sol", order_id)
         if status.get("status") != "confirmed":
             logger.warning(
@@ -141,9 +199,9 @@ class TradeExecutor:
             sol_usd_at_entry = await self.price_oracle.get_sol_price_usd()
         entry_price_usd = (size_sol * sol_usd_at_entry) / amount_token if amount_token > 0 else 0.0
 
-        if not await self.wallet.debit(size_sol, f"LIVE_BUY {token.symbol}"):
-            logger.warning(f"[EXEC-LIVE] Insufficient balance for {token.symbol}")
-            return None
+        # Live mode: skip local debit (gmgn-cli manages balance).
+        # Refresh local cache from GMGN so subsequent calls see the new balance.
+        await self.wallet.sync_from_gmgn(self.gmgn_cli)
 
         now = datetime.now(timezone.utc)
         position = Position(
@@ -161,6 +219,7 @@ class TradeExecutor:
             paper=self.paper,
             raw_gmgn_json=json.dumps(getattr(token, "raw_gmgn", {}) or {}, default=str),
             sol_usd_at_entry=sol_usd_at_entry,
+            strategy_order_id=strategy_order_id_hint,
         )
         position_id = await self.positions.open_position(position)
         position.id = position_id

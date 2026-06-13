@@ -210,6 +210,10 @@ CREATE TABLE IF NOT EXISTS positions (
     raw_gmgn_json TEXT DEFAULT '',
     sol_usd_at_entry REAL DEFAULT 0.0,
     sol_usd_at_exit REAL DEFAULT 0.0,
+    strategy_order_id TEXT DEFAULT '',
+    tp1_filled INTEGER DEFAULT 0,
+    tp2_filled INTEGER DEFAULT 0,
+    sl_filled INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -294,6 +298,10 @@ class Database:
             ("positions", "pnl_usd", "REAL DEFAULT 0.0"),
             ("positions", "sol_usd_at_entry", "REAL DEFAULT 0.0"),
             ("positions", "sol_usd_at_exit", "REAL DEFAULT 0.0"),
+            ("positions", "strategy_order_id", "TEXT DEFAULT ''"),
+            ("positions", "tp1_filled", "INTEGER DEFAULT 0"),
+            ("positions", "tp2_filled", "INTEGER DEFAULT 0"),
+            ("positions", "sl_filled", "INTEGER DEFAULT 0"),
         ]
         for table, column, typedef in migrations:
             try:

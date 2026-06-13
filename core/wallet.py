@@ -81,6 +81,34 @@ class Wallet:
             return self._sol_balance
         return await self._fetch_onchain_balance()
 
+    async def sync_from_gmgn(self, gmgn_cli) -> float:
+        """Sync balance from GMGN hosted wallet (live mode only).
+
+        GMGN CLI manages its own hosted wallet; we don't hold the private
+        key, so Helius RPC can't see its balance. This calls
+        `gmgn-cli portfolio info` to read the current SOL balance.
+
+        Returns the new balance (in SOL), or current cached balance on
+        error. Updates self._sol_balance.
+        """
+        if self.paper:
+            return self._sol_balance
+        if gmgn_cli is None:
+            logger.warning("[WALLET] sync_from_gmgn: gmgn_cli is None")
+            return self._sol_balance
+        try:
+            balance = await gmgn_cli.get_sol_balance()
+            if balance > 0:
+                async with self._ensure_lock():
+                    self._sol_balance = balance
+                logger.info(
+                    f"[WALLET] Synced GMGN balance: {balance:.4f} SOL"
+                )
+            return balance
+        except Exception as e:
+            logger.warning(f"[WALLET] sync_from_gmgn failed: {e}")
+            return self._sol_balance
+
     async def debit(self, amount: float, reason: str) -> bool:
         if amount <= 0:
             return False

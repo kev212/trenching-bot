@@ -201,6 +201,10 @@ class Position:
     raw_gmgn_json: str = ""
     sol_usd_at_entry: float = 0.0
     sol_usd_at_exit: float = 0.0
+    strategy_order_id: str = ""
+    tp1_filled: bool = False
+    tp2_filled: bool = False
+    sl_filled: bool = False
     id: int = 0
 
 
