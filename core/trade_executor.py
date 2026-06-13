@@ -40,7 +40,7 @@ class TradeExecutor:
 
     def __init__(self, paper: bool, wallet: Wallet, jupiter: JupiterClient,
                  positions: PositionManager, risk: RiskManager, config: dict,
-                 gmgn=None, price_oracle=None, gmgn_swap=None):
+                 gmgn=None, price_oracle=None, gmgn_cli=None):
         self.paper = paper
         self.wallet = wallet
         self.jupiter = jupiter
@@ -49,7 +49,7 @@ class TradeExecutor:
         self.config = config
         self.gmgn = gmgn
         self.price_oracle = price_oracle
-        self.gmgn_swap = gmgn_swap
+        self.gmgn_cli = gmgn_cli
         self.max_price_impact_pct = config.get("max_price_impact_pct", 5.0)
         self.slippage_bps = config.get("slippage_bps", DEFAULT_SLIPPAGE_BPS)
         from collections import OrderedDict
@@ -84,27 +84,29 @@ class TradeExecutor:
         if size_sol <= 0:
             return None
 
-        if not self.paper and self.gmgn_swap and self.gmgn_swap.is_ready():
+        if not self.paper and self.gmgn_cli and self.gmgn_cli.is_ready():
             return await self._execute_buy_live(token, size_sol, filter_params_version)
 
         return await self._execute_buy_paper(token, size_sol, filter_params_version)
 
     async def _execute_buy_live(self, token: TokenData, size_sol: float,
                                  filter_params_version: int = 0) -> Optional[Position]:
-        """Execute a real buy via GMGN swap."""
+        """Execute a real buy via GMGN CLI swap."""
         token_decimals = self._infer_decimals(token)
         amount_lamports = int(size_sol * 1e9)
 
-        result = await self.gmgn_swap.swap(
-            token_in=SOL_MINT,
-            token_out=token.address,
+        result = await self.gmgn_cli.swap(
+            chain="sol",
+            from_addr=self.wallet.pubkey,
+            input_token=SOL_MINT,
+            output_token=token.address,
             amount=amount_lamports,
-            slippage_bps=self.slippage_bps,
+            slippage=max(1, self.slippage_bps // 100),
         )
-        if not result or not result.get("tx_id"):
+        if not result or not result.get("order_id"):
             logger.warning(
                 f"[EXEC-LIVE] BUY failed for {token.symbol} ({token.address[:8]}): "
-                f"swap returned no tx_id"
+                f"swap returned no order_id"
             )
             if self.positions.db:
                 await self.positions.db.save_risk_event(
@@ -113,13 +115,24 @@ class TradeExecutor:
                 )
             return None
 
-        tx_id = result["tx_id"]
-        out_amount = float(result.get("out_amount", 0))
-        amount_token = out_amount / (10 ** token_decimals) if out_amount > 0 else 0.0
+        order_id = result["order_id"]
+        status = await self.gmgn_cli.wait_for_order("sol", order_id)
+        if status.get("status") != "confirmed":
+            logger.warning(
+                f"[EXEC-LIVE] BUY {token.symbol}: order {order_id} not confirmed: "
+                f"{status.get('status')}"
+            )
+            return None
+
+        tx_id = status.get("hash", order_id)
+        report = status.get("report", {})
+        out_amount_raw = int(report.get("output_amount", 0))
+        out_decimals = int(report.get("output_token_decimals", token_decimals))
+        amount_token = out_amount_raw / (10 ** out_decimals) if out_amount_raw > 0 else 0.0
 
         if amount_token <= 0:
             logger.warning(
-                f"[EXEC-LIVE] BUY {token.symbol}: out_amount=0, tx={tx_id[:16]}"
+                f"[EXEC-LIVE] BUY {token.symbol}: output_amount=0, order={order_id[:16]}"
             )
             return None
 
@@ -395,7 +408,7 @@ class TradeExecutor:
 
         sell_amount_token = position["current_amount_token"] * (sell_pct / 100)
 
-        if not self.paper and self.gmgn_swap and self.gmgn_swap.is_ready():
+        if not self.paper and self.gmgn_cli and self.gmgn_cli.is_ready():
             return await self._execute_sell_live(position, sell_amount_token,
                                                   sell_pct, reason)
 
@@ -405,28 +418,39 @@ class TradeExecutor:
 
     async def _execute_sell_live(self, position: dict, sell_amount_token: float,
                                   sell_pct: float, reason: str) -> Optional[Trade]:
-        """Execute a real sell via GMGN swap."""
+        """Execute a real sell via GMGN CLI swap."""
         token_decimals = self._infer_decimals_from_position(position)
         sell_lamports = int(sell_amount_token * (10 ** token_decimals))
         if sell_lamports <= 0:
             return None
 
-        result = await self.gmgn_swap.swap(
-            token_in=position["token_address"],
-            token_out=SOL_MINT,
+        result = await self.gmgn_cli.swap(
+            chain="sol",
+            from_addr=self.wallet.pubkey,
+            input_token=position["token_address"],
+            output_token=SOL_MINT,
             amount=sell_lamports,
-            slippage_bps=self.slippage_bps,
+            slippage=max(1, self.slippage_bps // 100),
         )
-        if not result or not result.get("tx_id"):
+        if not result or not result.get("order_id"):
             logger.warning(
                 f"[EXEC-LIVE] SELL failed {position['token_symbol']} "
-                f"({position['token_address'][:8]}): swap returned no tx_id"
+                f"({position['token_address'][:8]}): swap returned no order_id"
             )
             return None
 
-        tx_id = result["tx_id"]
-        out_amount = float(result.get("out_amount", 0))
-        sol_received = out_amount / 1e9
+        order_id = result["order_id"]
+        status = await self.gmgn_cli.wait_for_order("sol", order_id)
+        if status.get("status") != "confirmed":
+            logger.warning(
+                f"[EXEC-LIVE] SELL {position['token_symbol']}: order {order_id} not confirmed"
+            )
+            return None
+
+        tx_id = status.get("hash", order_id)
+        report = status.get("report", {})
+        out_amount_raw = int(report.get("output_amount", 0))
+        sol_received = out_amount_raw / 1e9
 
         sol_usd_now = 0.0
         if self.price_oracle:

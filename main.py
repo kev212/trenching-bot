@@ -13,7 +13,7 @@ from storage.database import Database
 from storage.cache import SharedState
 from sources.gmgn import GMGNClient
 from sources.twitter import TwitterClient
-from sources.gmgn_swap import GMGNSwapClient
+from core.gmgn_cli import GMGNCli
 from sources.web_scraper import WebScraper
 from analysis.models import TokenData, CallRecord, CallStatus, Verdict
 from analysis.filters import run_all_filters, check_hard_gate
@@ -166,18 +166,24 @@ class TrenchingBot:
             jupiter=self.jupiter,
             proxy=settings.http_proxy,
         )
-        if not self.paper_mode and settings.gmgn_private_key and settings.wallet_pubkey:
-            self.gmgn_swap = GMGNSwapClient(
-                api_key=settings.gmgn_api_key,
-                private_key_pem=settings.gmgn_private_key,
-                wallet_pubkey=settings.wallet_pubkey,
-                proxy=settings.http_proxy,
-            )
-            logger.warning(
-                f"[GMGN-SWAP] initialized: pubkey={settings.wallet_pubkey[:12]}..."
-            )
+        if not self.paper_mode and settings.wallet_pubkey:
+            try:
+                self.gmgn_cli = GMGNCli()
+                if self.gmgn_cli.is_ready():
+                    logger.warning(
+                        f"[GMGN-CLI] initialized: pubkey={settings.wallet_pubkey[:12]}..."
+                    )
+                else:
+                    logger.warning(
+                        "[GMGN-CLI] installed but credentials missing "
+                        "(~/.config/gmgn/.env); live trades disabled"
+                    )
+                    self.gmgn_cli = None
+            except FileNotFoundError as e:
+                logger.warning(f"[GMGN-CLI] not installed: {e}")
+                self.gmgn_cli = None
         else:
-            self.gmgn_swap = None
+            self.gmgn_cli = None
         self.executor = TradeExecutor(
             paper=self.paper_mode,
             wallet=self.wallet,
@@ -187,7 +193,7 @@ class TrenchingBot:
             config=self.trading_config,
             gmgn=self.gmgn,
             price_oracle=self.price_oracle,
-            gmgn_swap=self.gmgn_swap,
+            gmgn_cli=self.gmgn_cli,
         )
         logger.warning(
             f"Trading: paper_mode={self.paper_mode}, "
@@ -230,8 +236,7 @@ class TrenchingBot:
         await self.gmgn.start()
         await self.twitter.start()
         await self.scraper.start()
-        if self.gmgn_swap:
-            await self.gmgn_swap.start()
+        # GMGNCli is a subprocess wrapper, no start() needed
         try:
             from sources.dexscreener import start_shared_session
             await start_shared_session()
@@ -1497,8 +1502,7 @@ class TrenchingBot:
         await self.scraper.close()
         await self.jupiter.close()
         await self.price_oracle.close()
-        if self.gmgn_swap:
-            await self.gmgn_swap.close()
+        # GMGNCli is a subprocess wrapper, no close() needed
         await self.db.close()
         await dispatcher.close()
         logger.info("Shutdown complete")
