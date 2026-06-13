@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-"""Standalone E2E test: SOL → USDC → SOL round-trip via GMGN swap.
+"""Standalone E2E test: SOL → USDC → SOL round-trip via GMGN CLI.
+
+Requires gmgn-cli (https://github.com/GMGNAI/gmgn-skills):
+  sudo npm install -g gmgn-cli
+
+And credentials in ~/.config/gmgn/.env:
+  GMGN_API_KEY=<key>
+  GMGN_PRIVATE_KEY="<pem content>"
 
 Usage:
-    # Dry-run (validate auth, no actual swap)
-    python scripts/live_test.py --dry-run
-
-    # Live round-trip (requires env vars, wallet with SOL)
-    python scripts/live_test.py
-
-    # Custom amount
-    python scripts/live_test.py --amount 0.005
-
-Requires env vars (in .env or shell):
-    GMGN_API_KEY, GMGN_PRIVATE_KEY, WALLET_PRIVATE_KEY,
-    WALLET_PUBKEY, HELIUS_API_KEY, HTTP_PROXY (optional)
+  python scripts/live_test.py --dry-run
+  python scripts/live_test.py --amount 0.001
 """
 import argparse
 import asyncio
@@ -24,13 +21,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env file from project root
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sources.gmgn_swap import GMGNSwapClient, SOL_MINT, USDC_MINT
+from core.gmgn_cli import GMGNCli, SOL_MINT, USDC_MINT
 from core.wallet import Wallet
 
 logging.basicConfig(
@@ -44,35 +40,33 @@ RESERVE_FLOOR_SOL = 0.01
 
 async def run_test(dry_run: bool = False, amount_sol: float = 0.001):
     api_key = os.environ.get("GMGN_API_KEY", "")
-    gmgn_pem = os.environ.get("GMGN_PRIVATE_KEY", "")
-    wallet_b58 = os.environ.get("WALLET_PRIVATE_KEY", "")
     wallet_pubkey = os.environ.get("WALLET_PUBKEY", "")
     helius_key = os.environ.get("HELIUS_API_KEY", "")
-    proxy = os.environ.get("HTTP_PROXY", "")
 
-    if not all([api_key, gmgn_pem, wallet_b58, wallet_pubkey, helius_key]):
+    if not all([api_key, wallet_pubkey, helius_key]):
         logger.error(
             "Missing env vars. Required: "
-            "GMGN_API_KEY, GMGN_PRIVATE_KEY, WALLET_PRIVATE_KEY, "
-            "WALLET_PUBKEY, HELIUS_API_KEY"
+            "GMGN_API_KEY, WALLET_PUBKEY, HELIUS_API_KEY"
         )
+        return 1
+
+    if not shutil_which("gmgn-cli"):
+        logger.error("gmgn-cli not installed. Run: sudo npm install -g gmgn-cli")
         return 1
 
     wallet = Wallet(
         paper=False,
-        private_key_b58=wallet_b58,
+        private_key_b58=os.environ.get("WALLET_PRIVATE_KEY", ""),
         helius_api_key=helius_key,
     )
+    cli = GMGNCli()
 
-    # Try direct connection first (no proxy) since the proxy gets Cloudflare.
-    # If GMGN blocks the VPS IP, add proxy back.
-    gmgn_swap = GMGNSwapClient(
-        api_key=api_key,
-        private_key_pem=gmgn_pem,
-        wallet_pubkey=wallet_pubkey,
-        proxy="",  # direct connection
-    )
-    await gmgn_swap.start()
+    if not cli.is_ready():
+        logger.error(
+            "gmgn-cli not ready. Check ~/.config/gmgn/.env has "
+            "GMGN_API_KEY and GMGN_PRIVATE_KEY."
+        )
+        return 1
 
     logger.info("=" * 50)
     logger.info("LIVE TEST: SOL → USDC → SOL")
@@ -89,93 +83,100 @@ async def run_test(dry_run: bool = False, amount_sol: float = 0.001):
             f"Insufficient balance: {balance_before:.6f} SOL "
             f"(need {amount_sol + RESERVE_FLOOR_SOL:.6f})"
         )
-        await gmgn_swap.close()
-        return 1
-
-    if not gmgn_swap.is_ready():
-        logger.error("GMGNSwapClient not ready (Ed25519 key not loaded)")
-        await gmgn_swap.close()
         return 1
 
     if dry_run:
         logger.info("[DRY-RUN] Get quote: SOL → USDC...")
-        quote = await gmgn_swap.get_quote(
-            token_in=SOL_MINT,
-            token_out=USDC_MINT,
+        quote = await cli.quote(
+            chain="sol",
+            from_addr=wallet_pubkey,
+            input_token=SOL_MINT,
+            output_token=USDC_MINT,
             amount=int(amount_sol * 1e9),
+            slippage=30,
         )
         if quote:
             logger.info(f"[DRY-RUN] Quote: {quote}")
         else:
-            logger.warning("[DRY-RUN] Quote unavailable (may need auth)")
+            logger.warning("[DRY-RUN] Quote failed (check API key + IP whitelist)")
 
-        logger.info("[DRY-RUN] Skipping actual swap.")
-        await gmgn_swap.close()
         logger.info("[DRY-RUN] All checks passed. Ready for live test.")
         return 0
 
     # Step 1: SOL → USDC
     logger.info(f"\n--- Step 1: SOL → USDC ({amount_sol} SOL) ---")
-    amount_lamports = int(amount_sol * 1e9)
-    result1 = await gmgn_swap.swap(
-        token_in=SOL_MINT,
-        token_out=USDC_MINT,
-        amount=amount_lamports,
-        slippage_bps=300,
+    result1 = await cli.swap(
+        chain="sol",
+        from_addr=wallet_pubkey,
+        input_token=SOL_MINT,
+        output_token=USDC_MINT,
+        amount=int(amount_sol * 1e9),
+        slippage=30,
     )
-    if not result1 or not result1.get("tx_id"):
-        logger.error("Step 1 failed: no tx_id returned")
-        await gmgn_swap.close()
+    if not result1 or not result1.get("order_id"):
+        logger.error(f"Step 1 swap failed: {result1}")
         return 1
 
-    tx1 = result1["tx_id"]
-    out_amount = float(result1.get("out_amount", 0))
-    usdc_received = out_amount / 1e6  # USDC has 6 decimals
-    logger.info(f"SOL → USDC: tx={tx1}")
+    order_id1 = result1["order_id"]
+    tx1 = result1.get("hash", "")
+    logger.info(f"Order 1: {order_id1} (tx: {tx1[:16] if tx1 else '?'})")
+
+    status1 = await cli.wait_for_order("sol", order_id1)
+    if status1.get("status") != "confirmed":
+        logger.error(f"Step 1 not confirmed: {status1}")
+        return 1
+
+    report1 = status1.get("report", {})
+    out_amount_raw = int(report1.get("output_amount", 0))
+    output_decimals = int(report1.get("output_token_decimals", 6))
+    usdc_received = out_amount_raw / (10 ** output_decimals)
     logger.info(f"USDC received: {usdc_received:.6f}")
 
     if usdc_received <= 0:
-        logger.error("Step 1 failed: no USDC received")
-        await gmgn_swap.close()
+        logger.error("Step 1: no USDC received")
         return 1
-
-    # Wait for confirmation to propagate
-    logger.info("Waiting 5s for tx confirmation...")
-    await asyncio.sleep(5)
 
     # Step 2: USDC → SOL
     logger.info(f"\n--- Step 2: USDC → SOL ({usdc_received:.6f} USDC) ---")
-    usdc_lamports = int(usdc_received * 1e6)
-    result2 = await gmgn_swap.swap(
-        token_in=USDC_MINT,
-        token_out=SOL_MINT,
+    usdc_lamports = int(usdc_received * (10 ** output_decimals))
+    result2 = await cli.swap(
+        chain="sol",
+        from_addr=wallet_pubkey,
+        input_token=USDC_MINT,
+        output_token=SOL_MINT,
         amount=usdc_lamports,
-        slippage_bps=300,
+        slippage=30,
     )
-    if not result2 or not result2.get("tx_id"):
-        logger.error("Step 2 failed: no tx_id returned")
-        await gmgn_swap.close()
+    if not result2 or not result2.get("order_id"):
+        logger.error(f"Step 2 swap failed: {result2}")
         return 1
 
-    tx2 = result2["tx_id"]
-    out_amount2 = float(result2.get("out_amount", 0))
-    sol_received = out_amount2 / 1e9
-    logger.info(f"USDC → SOL: tx={tx2}")
-    logger.info(f"SOL received: {sol_received:.6f}")
+    order_id2 = result2["order_id"]
+    tx2 = result2.get("hash", "")
+    logger.info(f"Order 2: {order_id2} (tx: {tx2[:16] if tx2 else '?'})")
+
+    status2 = await cli.wait_for_order("sol", order_id2)
+    if status2.get("status") != "confirmed":
+        logger.error(f"Step 2 not confirmed: {status2}")
+        return 1
+
+    report2 = status2.get("report", {})
+    sol_received_raw = int(report2.get("output_amount", 0))
+    sol_received = sol_received_raw / 1e9
 
     # Summary
     balance_after = await wallet.get_sol_balance()
-    net_change = balance_after - balance_before
     fee_estimate = amount_sol - sol_received
 
     logger.info("=" * 50)
     logger.info("TEST SUMMARY")
     logger.info(f"  Balance before: {balance_before:.6f} SOL")
     logger.info(f"  Balance after:  {balance_after:.6f} SOL")
-    logger.info(f"  Net change:     {net_change:+.6f} SOL")
+    logger.info(f"  USDC received:  {usdc_received:.6f}")
+    logger.info(f"  SOL received:   {sol_received:.6f}")
     logger.info(f"  Round-trip fee: {fee_estimate:.6f} SOL ({fee_estimate/amount_sol*100:.2f}%)")
-    logger.info(f"  Tx 1 (SOL→USDC): {tx1}")
-    logger.info(f"  Tx 2 (USDC→SOL): {tx2}")
+    logger.info(f"  Order 1: {order_id1}")
+    logger.info(f"  Order 2: {order_id2}")
     logger.info("=" * 50)
 
     if sol_received < amount_sol * 0.9:
@@ -183,8 +184,12 @@ async def run_test(dry_run: bool = False, amount_sol: float = 0.001):
     else:
         logger.info("Round-trip successful! Fees within normal range.")
 
-    await gmgn_swap.close()
     return 0
+
+
+def shutil_which(name: str) -> bool:
+    import shutil
+    return shutil.which(name) is not None
 
 
 def main():
