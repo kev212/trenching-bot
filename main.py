@@ -553,6 +553,12 @@ class TrenchingBot:
                 skipped = 0
                 dead_letter = 0
                 processed_dedup = 0  # FIX B3: count silently-removed tokens
+                # FIX NameError: cleanup_removed must be initialized here so
+                # the [RETRY-SCHED] if-condition (line ~673) can reference it
+                # before the assignment at line ~683. The previous placement
+                # caused a NameError on every scan because Python evaluates
+                # the if-condition BEFORE the cleanup_removed = await ... line.
+                cleanup_removed = 0  # FIX B2: count cleanup removals (refilled below)
 
                 qsize = self.queue.qsize()
                 if qsize >= 300:
