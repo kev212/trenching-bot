@@ -9,7 +9,9 @@ SOL mint (wrapped): So11111111111111111111111111111111111111112
 import asyncio
 import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Optional
 
 import aiohttp
@@ -22,6 +24,13 @@ SWAP_TIMEOUT = 30
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 SOL_DECIMALS = 9
+
+
+class _DummyLock:
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, *args):
+        pass
 
 
 class SignatureError(Exception):
@@ -44,18 +53,40 @@ class GMGNSwapClient:
         self.wallet_pubkey = wallet_pubkey
         self.proxy = proxy
         self._session: Optional[aiohttp.ClientSession] = None
-        self._session_lock = asyncio.Lock()
+        self._session_lock = self._make_lock()
         self._private_key = None
         if private_key_pem:
             self._private_key = self._load_ed25519(private_key_pem)
 
     @staticmethod
-    def _load_ed25519(pem: str):
-        """Load Ed25519 private key from PEM string."""
+    def _make_lock():
+        try:
+            return asyncio.Lock()
+        except RuntimeError:
+            return _DummyLock()
+
+    @staticmethod
+    def _load_ed25519(pem_or_path: str):
+        """Load Ed25519 private key from PEM string or file path.
+
+        If the string is an existing file path, reads from file.
+        Otherwise treats as raw PEM content (supports \\n escape sequences).
+        """
         try:
             from cryptography.hazmat.primitives import serialization
             from cryptography.hazmat.primitives.asymmetric import ed25519
-            key_bytes = pem.encode() if isinstance(pem, str) else pem
+
+            # Check if it's a file path
+            if os.path.isfile(pem_or_path):
+                key_bytes = Path(pem_or_path).read_bytes()
+            else:
+                key_bytes = pem_or_path.encode() if isinstance(pem_or_path, str) else pem_or_path
+                # Fix literal \n from .env files (convert "\\n" to actual newlines)
+                if b"\\n" in key_bytes:
+                    key_bytes = key_bytes.replace(b"\\n", b"\n")
+                # Strip surrounding quotes if present
+                key_bytes = key_bytes.strip().strip(b"\"").strip(b"'")
+
             return serialization.load_pem_private_key(key_bytes, password=None)
         except Exception as e:
             raise SignatureError(f"Failed to load Ed25519 key: {e}") from e
