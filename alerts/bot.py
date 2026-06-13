@@ -58,6 +58,8 @@ def _fmt_uptime(seconds: float) -> str:
 
 @_require_auth
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else "?"
+    logger.info(f"[START] chat={update.effective_chat.id if update.effective_chat else '?'} user={user_id}")
     await update.message.reply_text(
         "🔥 Trenching Bot ACTIVE\n\n"
         "Commands:\n"
@@ -446,6 +448,8 @@ async def cmd_best(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = ctx.bot_data.get("state")
     uptime = _fmt_uptime(state.metrics.uptime_seconds) if state else "?"
+    user_id = update.effective_user.id if update.effective_user else "?"
+    logger.info(f"[PING] chat={update.effective_chat.id if update.effective_chat else '?'} user={user_id}")
     await update.message.reply_text(f"🏓 Pong! Uptime: {uptime}")
 
 
@@ -692,11 +696,17 @@ async def bot_handler(state, db):
             f"Telegram servers). No port 8080 needed."
         )
         try:
+            # In python-telegram-bot v20+ you MUST call start() before
+            # start_polling() — otherwise the updater receives updates from
+            # Telegram but the dispatcher is not running, so handlers are
+            # never invoked (silent dead bot). This was the root cause of
+            # "Telegram not responding" on VPS.
+            await _bot_app.start()
             await _bot_app.updater.start_polling(
                 drop_pending_updates=True,
                 allowed_updates=["message"],
             )
-            logger.info("Telegram polling bot ready")
+            logger.info("Telegram polling bot ready (updater + dispatcher running)")
         except Exception as e:
             logger.error(f"Failed to start Telegram polling: {e}")
             raise
