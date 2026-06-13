@@ -288,15 +288,15 @@ class TrenchingBot:
             "retry_scheduler": self._retry_scheduler(),
             **{f"worker_{i}": self._token_worker(i)
                for i in range(settings.min_workers)},
-            "price_monitor": self._run_forever("price_monitor", price_monitor),
+            "price_monitor": self._run_forever("price_monitor", price_monitor, self.state, self.db),
             **({"strategy_poller": self._run_forever(
                 "strategy_poller", strategy_poller,
-                self.db, self.position_manager, self.gmgn_cli,
+                self.state, self.db, self.position_manager, self.gmgn_cli,
             )} if not self.paper_mode and self.gmgn_cli else {}),
-            "hourly_recap": self._run_forever("hourly_recap", hourly_recap),
-            "daily_optimizer": self._run_forever("daily_optimizer", daily_optimizer),
-            "revert_monitor": self._run_forever("revert_monitor", revert_monitor),
-            "bot_handler": self._run_forever("bot_handler", bot_handler),
+            "hourly_recap": self._run_forever("hourly_recap", hourly_recap, self.state, self.db),
+            "daily_optimizer": self._run_forever("daily_optimizer", daily_optimizer, self.state, self.db),
+            "revert_monitor": self._run_forever("revert_monitor", revert_monitor, self.state, self.db),
+            "bot_handler": self._run_forever("bot_handler", bot_handler, self.state, self.db),
             "metrics": self._metrics_loop(),
             "db_stats": self._db_stats_loop(),
             "watchdog": self._watchdog_loop(),
@@ -331,10 +331,14 @@ class TrenchingBot:
             pass
 
     async def _run_forever(self, name, coro_func, *args):
+        """Run coro_func(*args) forever with retry on failure.
+
+        Caller passes exactly the args the coro_func expects — no auto-prepend.
+        """
         retries = 0
         while True:
             try:
-                await coro_func(self.state, self.db, *args)
+                await coro_func(*args)
                 retries = 0
             except asyncio.CancelledError:
                 raise  # Let shutdown proceed
