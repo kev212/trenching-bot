@@ -25,6 +25,7 @@ class TokenData:
     chain: str = "solana"
     market_cap: float = 0.0
     volume_1h: float = 0.0
+    volume_5m: float = 0.0
     liquidity: float = 0.0
     holders_count: int = 0
     renowned_wallets: int = 0

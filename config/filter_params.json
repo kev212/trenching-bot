@@ -1,6 +1,6 @@
 {
-  "version": 9,
-  "updated_at": "2026-06-08T00:00:00Z",
+  "version": 10,
+  "updated_at": "2026-06-14T00:00:00Z",
   "filters": {
     "min_total_fee": {
       "enabled": true,
@@ -55,6 +55,19 @@
       "min_holding": 1,
       "weight": 0,
       "llm_hint": "At least 1 KOL wallet must still be holding (not already dumped)."
+    },
+    "min_volume_5m": {
+      "enabled": true,
+      "min_volume_usd": 100000,
+      "weight": 0.0,
+      "llm_hint": "5min volume < $100K = no recent activity, likely dead/dumped."
+    },
+    "token_age": {
+      "enabled": true,
+      "max_pre_migrate_minutes": 5,
+      "max_post_migrate_minutes": 5,
+      "weight": 0.0,
+      "llm_hint": "Pre/post-migrate max age 5min. Only very fresh tokens. Note: pre-check uses looser 120/45 to allow migration race recovery via retry."
     }
   }
 }

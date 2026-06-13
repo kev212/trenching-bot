@@ -55,41 +55,74 @@ def run_all_filters(token: TokenData, filter_params: dict) -> FeatureVector:
     fv.social_narrative = _filter_social_narrative(token, filter_params.get("social_narrative", {}))
     fv.ath_drawdown = _filter_ath_drawdown(token, filter_params.get("ath_drawdown", {}))
     fv.kol_presence = _filter_kol_presence(token, filter_params.get("kol_presence", {}))
-
-    # token_age: computed for LLM #2 context, NOT a hard gate filter
-    # (early check handles permanent skip for old tokens)
-    fv.token_age = _compute_token_age(token)
+    fv.min_volume_5m = _filter_min_volume_5m(token, filter_params.get("min_volume_5m", {}))
+    fv.token_age = _filter_token_age(token, filter_params.get("token_age", {}))
 
     return fv
 
 
-def _compute_token_age(token: TokenData) -> dict:
-    """Compute token age for LLM #2 context. Not used in hard gate."""
-    now = datetime.now(timezone.utc).timestamp()
+def _filter_token_age(token: TokenData, params: dict) -> dict:
+    """Hard gate: token age limits for pre/post-migrate phases.
+
+    Pre-migrate:  now - creation_timestamp, max 5min (strict)
+    Post-migrate: now - open_timestamp,    max 5min (strict)
+
+    NOTE: The pre-check in main.py uses LOOSER hardcoded values (120/45)
+    to allow migration race recovery via retry. This filter is the strict
+    5/5 check that fires on retry when token is still in pre-migrate state.
+    If token migrates during retry delay, retry sees post-migrate + young
+    age → passes.
+    """
+    now = time.time()
+    max_pre = params.get("max_pre_migrate_minutes", 5)
+    max_post = params.get("max_post_migrate_minutes", 5)
+
     if token.migrated_timestamp > 0:
         if token.open_timestamp > 0:
             age_min = (now - token.open_timestamp) / 60
-            status = "post-migrate"
         else:
-            return {"age_minutes": None, "status": "unknown", "passed": True, "enabled": False,
-                    "note": "Post-migrate but no open_timestamp"}
+            age_min = 999.0
+        max_min = max_post
+        status = "post-migrate"
     else:
         if token.creation_timestamp > 0:
             age_min = (now - token.creation_timestamp) / 60
-            status = "pre-migrate"
-        elif token.created_at:
-            age_min = (now - token.created_at.timestamp()) / 60
-            status = "pre-migrate"
         else:
-            return {"age_minutes": None, "status": "unknown", "passed": True, "enabled": False,
-                    "note": "No creation timestamp"}
+            age_min = 999.0
+        max_min = max_pre
+        status = "pre-migrate"
+
+    passed = age_min <= max_min
     return {
         "age_minutes": age_min,
         "status": status,
-        "passed": True,
-        "enabled": False,
-        "note": f"Age: {age_min:.0f}min [{status}]",
+        "max_minutes": max_min,
+        "passed": passed,
+        "enabled": params.get("enabled", True),
+        "note": f"Age: {age_min:.1f}min [{status}] (max: {max_min}min)",
     }
+
+
+def _filter_min_volume_5m(token: TokenData, params: dict) -> dict:
+    """Hard gate: minimum 5min volume (USD) for active trading.
+
+    Catches dead/dumped tokens. volume_5m = 0 (GMGN missing) → fail safe.
+    """
+    min_vol = params.get("min_volume_usd", 100000)
+    vol = token.volume_5m
+    passed = vol >= min_vol
+    return {
+        "volume_5m_usd": vol,
+        "threshold": min_vol,
+        "passed": passed,
+        "enabled": params.get("enabled", True),
+        "note": f"Vol 5m: ${vol:,.0f} (min: ${min_vol:,.0f})",
+    }
+
+
+def _filter_min_total_fee(token: TokenData, params: dict) -> dict:
+    min_fee = params.get("min_fee_sol", 0.5)
+    fee = token.fee_collected  # dalam SOL
 
 
 def _filter_min_total_fee(token: TokenData, params: dict) -> dict:
@@ -270,6 +303,8 @@ def count_passed_filters(fv: FeatureVector) -> tuple[int, int, list[str]]:
         "holder_distribution": fv.holder_distribution,
         "ath_drawdown": fv.ath_drawdown,
         "kol_presence": fv.kol_presence,
+        "min_volume_5m": fv.min_volume_5m,
+        "token_age": fv.token_age,
         "social_narrative": fv.social_narrative,
     }
 

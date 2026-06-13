@@ -876,6 +876,7 @@ class TrenchingBot:
             symbol=info.get("symbol", "") or token_info.get("symbol", ""),
             market_cap=market_cap,
             volume_1h=float(price_obj.get("volume_1h", 0) or 0),
+            volume_5m=float(price_obj.get("volume_5m", 0) or 0),
             liquidity=float(info.get("liquidity", 0) or 0),
             holders_count=int(info.get("holder_count", 0) or 0),
             renowned_wallets=renowned_wallets,
@@ -924,10 +925,14 @@ class TrenchingBot:
             await self.state.remove_retry(address)
             return
 
-        # token_age — gak bisa jadi lebih muda, retry percuma
-        age_params = filters_cfg.get("token_age", {})
-        max_pre = age_params.get("max_pre_migrate_minutes", 120)
-        max_post = age_params.get("max_post_migrate_minutes", 45)
+        # token_age pre-check — hardcoded loose values, NOT from filter config
+        # Decoupled from filters.token_age (which has strict 5/5 for hard gate).
+        # Pre-check is fast permanent skip for truly ancient tokens. Hard gate +
+        # retry handles migration race: token 10min pre-migrate → passes pre-check,
+        # fails hard gate, retries; if token migrates during retry delay, next
+        # attempt sees post-migrate young age → passes.
+        max_pre = 120
+        max_post = 45
         now = time.time()
         if token.migrated_timestamp > 0:
             age_min = (now - token.open_timestamp) / 60 if token.open_timestamp > 0 else 999
@@ -979,6 +984,7 @@ class TrenchingBot:
                     "funded_wallet_age",
                     "insider_concentration", "fee_tier", "rug_probability",
                     "holder_distribution", "min_holders", "min_total_fee",
+                    "min_volume_5m", "token_age",
                 ]
             }
             # If we forced a fail due to missing holder data, record it
