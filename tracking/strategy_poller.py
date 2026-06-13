@@ -28,11 +28,14 @@ logger = logging.getLogger("strategy_poller")
 POLL_INTERVAL_S = 15.0
 
 
-async def strategy_poller(db, position_manager: PositionManager, gmgn_cli: GMGNCli):
+async def strategy_poller(state, db, position_manager: PositionManager, gmgn_cli: GMGNCli):
     """Poll GMGN for live strategy (condition order) status.
 
     Updates position.tp1_filled/tp2_filled/sl_filled flags and closes
     the position when fully exited.
+
+    Note: `state` is required by TrenchingBot._run_forever (which prepends
+    (self.state, self.db) to all task coros) but is unused here.
     """
     if not gmgn_cli or not gmgn_cli.is_ready():
         logger.warning("[STRATEGY-POLLER] gmgn_cli not ready, poller exiting")
