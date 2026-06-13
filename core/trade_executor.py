@@ -90,33 +90,52 @@ class TradeExecutor:
         return await self._execute_buy_paper(token, size_sol, filter_params_version)
 
     def _build_condition_orders_json(self) -> str:
-        """Build TP1 + SL condition orders JSON for GMGN swap.
+        """Build TP1 + TP2 + Trailing + SL condition orders JSON for GMGN swap.
 
-        IMPORTANT (verified 2026-06 on real GMGN CLI):
-        - `sell_ratio_type` is silently ignored — GMGN always uses
-          `buy_amount` semantics regardless of input.
-        - This means if we sent TP1 sell 80% + TP2 sell 100% with
-          `hold_amount`, GMGN would interpret both as % of ORIGINAL
-          buy amount, causing double-sell attempts (TP1 sells 80%,
-          TP2 tries to sell 100% but only 20% remains — may fail
-          or sell what it can).
-        - To avoid this risk, we use ONLY 2 conditions:
-          * TP1: profit_stop 1.30x sell 100% (full exit at target)
-          * SL:  loss_stop 0.50x  sell 100% (full exit on stop)
-        - For advanced exits (TP2, trailing), use strategy_poller
-          which can call GMGN swap directly with the remaining 20%.
+        Strategy (verified 2026-06 on real GMGN CLI):
+        - `--sell-ratio-type hold_amount` (swap-level flag) → each condition sells
+          % of CURRENT position, not original buy.
+        - TP1: profit_stop 1.50x sell 75% of position
+        - TP2: profit_stop 2.00x sell 100% of REMAINING (= 25% of original)
+        - Trailing: profit_stop_trace 1.50x activation, drawdown 30%, sell 100%
+                    of remaining (tracks after TP1 if no TP2)
+        - SL: loss_stop 0.50x (-50%) sell 100% of position
 
-        price_scale: 100=entry, 130=1.30x, 50=50% of entry (-50%)
+        price_scale (verified 2026-06-14, real GMGN CLI):
+          - profit_stop: GAIN % from entry. e.g. "50" = +50% / 1.5x, "100" = +100% / 2.0x
+          - loss_stop: DROP % from entry. e.g. "50" = drops 50% / triggers at 0.5x
+          - profit_stop_trace: activation gain %, same as profit_stop
+          - Formula: gain_pct = (multiplier - 1) × 100
         """
-        tp1_mult = int(self.config.get("tp1_multiplier", 1.3) * 100)
-        sl_scale = int(100 - self.config.get("stop_loss_pct", 50))
+        # profit_stop: gain % = (multiplier - 1) × 100
+        # loss_stop: drop % = stop_loss_pct
+        tp1_mult = int((self.config.get("tp1_multiplier", 1.5) - 1) * 100)  # 50 for 1.5x
+        tp1_pct = int(self.config.get("tp1_sell_pct", 75))
+        tp2_mult = int((self.config.get("tp2_multiplier", 2.0) - 1) * 100)  # 100 for 2.0x
+        tp2_pct = int(self.config.get("tp2_sell_pct", 100))
+        trail_mult = int((self.config.get("trailing_activation_mult", 1.5) - 1) * 100)  # 50
+        trail_dd = int(self.config.get("trailing_drawdown_pct", 30))
+        sl_scale = int(self.config.get("stop_loss_pct", 50))  # 50 for -50%
 
         orders = [
             {
                 "order_type": "profit_stop",
                 "side": "sell",
                 "price_scale": str(tp1_mult),
+                "sell_ratio": str(tp1_pct),
+            },
+            {
+                "order_type": "profit_stop",
+                "side": "sell",
+                "price_scale": str(tp2_mult),
+                "sell_ratio": str(tp2_pct),
+            },
+            {
+                "order_type": "profit_stop_trace",
+                "side": "sell",
+                "price_scale": str(trail_mult),
                 "sell_ratio": "100",
+                "drawdown_rate": str(trail_dd),
             },
             {
                 "order_type": "loss_stop",
@@ -149,6 +168,7 @@ class TradeExecutor:
 
         # Step 3: build TP/SL condition orders
         condition_orders_json = self._build_condition_orders_json()
+        sell_ratio_type = self.config.get("sell_ratio_type", "hold_amount")
         strategy_order_id_hint = ""
 
         result = await self.gmgn_cli.swap(
@@ -161,6 +181,7 @@ class TradeExecutor:
             condition_orders=condition_orders_json,
             priority_fee=0.0001,
             tip_fee=0.00001,
+            sell_ratio_type=sell_ratio_type,
         )
         if not result or not result.get("order_id"):
             logger.warning(

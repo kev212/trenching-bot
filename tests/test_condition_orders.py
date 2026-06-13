@@ -1,4 +1,4 @@
-"""Tests for GMGN condition orders (TP1/TP2/SL) + strategy_poller."""
+"""Tests for GMGN condition orders (TP1/TP2/Trailing/SL) + strategy_poller."""
 import asyncio
 import json
 import sys
@@ -22,49 +22,85 @@ class TestBuildConditionOrders:
         return ex
 
     def test_default_config(self):
+        """Default config: 4 conditions (TP1 75%, TP2 100%, Trailing, SL 100%).
+
+        price_scale = gain % from entry (NOT multiplier × 100):
+          - TP1 1.50x → +50% gain → "50"
+          - TP2 2.00x → +100% gain → "100"
+          - Trailing activation 1.50x → "50"
+          - SL -50% drop → "50"
+        """
         config = {
-            "tp1_multiplier": 1.30,
+            "tp1_multiplier": 1.50,
+            "tp1_sell_pct": 75,
+            "tp2_multiplier": 2.00,
+            "tp2_sell_pct": 100,
+            "trailing_activation_mult": 1.50,
+            "trailing_drawdown_pct": 30,
             "stop_loss_pct": 50,
         }
         ex = self._executor(config)
         result = json.loads(ex._build_condition_orders_json())
-        # Only 2 conditions: TP1 + SL (TP2 dropped due to sell_ratio_type bug)
-        assert len(result) == 2
+        assert len(result) == 4
 
-        tp1, sl = result
+        tp1, tp2, trail, sl = result
+        # TP1: 1.50x → +50% gain → price_scale "50"
         assert tp1["order_type"] == "profit_stop"
-        assert tp1["price_scale"] == "130"
-        assert tp1["sell_ratio"] == "100"  # 100% exit (no double-sell risk)
-
+        assert tp1["price_scale"] == "50"
+        assert tp1["sell_ratio"] == "75"
+        # TP2: 2.00x → +100% gain → price_scale "100"
+        assert tp2["order_type"] == "profit_stop"
+        assert tp2["price_scale"] == "100"
+        assert tp2["sell_ratio"] == "100"
+        # Trailing: activation 1.50x → price_scale "50"
+        assert trail["order_type"] == "profit_stop_trace"
+        assert trail["price_scale"] == "50"
+        assert trail["sell_ratio"] == "100"
+        assert trail["drawdown_rate"] == "30"
+        # SL: -50% drop → price_scale "50"
         assert sl["order_type"] == "loss_stop"
         assert sl["price_scale"] == "50"
         assert sl["sell_ratio"] == "100"
 
     def test_custom_config(self):
         config = {
-            "tp1_multiplier": 1.50,
-            "stop_loss_pct": 30,
+            "tp1_multiplier": 1.30,        # +30% gain → "30"
+            "tp1_sell_pct": 50,
+            "tp2_multiplier": 3.00,        # +200% gain → "200"
+            "tp2_sell_pct": 100,
+            "trailing_activation_mult": 2.00,  # +100% gain → "100"
+            "trailing_drawdown_pct": 25,
+            "stop_loss_pct": 30,           # -30% drop → "30"
         }
         ex = self._executor(config)
         result = json.loads(ex._build_condition_orders_json())
-        tp1, sl = result
-        assert tp1["price_scale"] == "150"
-        assert tp1["sell_ratio"] == "100"
-        assert sl["price_scale"] == "70"  # 100 - 30
-        assert sl["sell_ratio"] == "100"
+        tp1, tp2, trail, sl = result
+        assert tp1["price_scale"] == "30"
+        assert tp1["sell_ratio"] == "50"
+        assert tp2["price_scale"] == "200"
+        assert trail["price_scale"] == "100"
+        assert trail["drawdown_rate"] == "25"
+        assert sl["price_scale"] == "30"
 
     def test_missing_config_uses_defaults(self):
+        """Defaults: tp1=1.5, tp2=2.0, trail=1.5, sl=50 → 50, 100, 50, 50."""
         ex = self._executor({})
         result = json.loads(ex._build_condition_orders_json())
-        tp1, sl = result
-        assert tp1["price_scale"] == "130"
-        assert tp1["sell_ratio"] == "100"
-        assert sl["price_scale"] == "50"
-        assert sl["sell_ratio"] == "100"
+        assert len(result) == 4
+        tp1, tp2, trail, sl = result
+        assert tp1["price_scale"] == "50"   # 1.5x → +50% gain
+        assert tp1["sell_ratio"] == "75"
+        assert tp2["price_scale"] == "100"  # 2.0x → +100% gain
+        assert trail["price_scale"] == "50"
+        assert trail["drawdown_rate"] == "30"
+        assert sl["price_scale"] == "50"   # -50% drop
 
     def test_no_sell_ratio_type_field(self):
-        """Verified 2026-06: GMGN silently ignores sell_ratio_type.
-        We must NOT include it in the JSON to avoid confusion."""
+        """sell_ratio_type is a SWAP-LEVEL flag, not per-condition.
+
+        GMGN docs: 'extra fields cause 400 error'. We must NOT include
+        sell_ratio_type per-condition.
+        """
         ex = self._executor({})
         result = json.loads(ex._build_condition_orders_json())
         for order in result:
@@ -78,16 +114,16 @@ class TestBuildConditionOrders:
         assert all(isinstance(o, dict) for o in parsed)
 
 
-# ============ _execute_buy_live passes condition_orders to swap ============
+# ============ _execute_buy_live passes condition_orders + sell_ratio_type ============
 
 class TestBuyLiveUsesConditionOrders:
     @patch("core.gmgn_cli.asyncio.create_subprocess_exec")
-    async def test_buy_passes_condition_orders(self, mock_exec):
+    async def test_buy_passes_4_conditions_with_hold_amount(self, mock_exec):
+        """Verify _execute_buy_live sends 4 conditions + sell_ratio_type=hold_amount."""
         from core.trade_executor import TradeExecutor, SOL_MINT
-        from core.wallet import Wallet, PAPER_PUBKEY
+        from core.wallet import Wallet
         from core.position_manager import PositionManager
 
-        # Mock process
         mock_process = AsyncMock()
         mock_process.returncode = 0
         mock_process.communicate = AsyncMock(
@@ -99,20 +135,9 @@ class TestBuyLiveUsesConditionOrders:
         )
         mock_exec.return_value = mock_process
 
-        # Mock the wait_for_order response
-        wait_response = json.dumps({
-            "status": "confirmed",
-            "hash": "tx_test",
-            "report": {
-                "output_amount": "1000000",
-                "output_token_decimals": 6,
-            }
-        }).encode()
-
         wallet = Wallet(paper=True, starting_balance_sol=10.0)
         wallet.RESERVE_SOL = 0.1
 
-        # Mock gmgn_cli
         gmgn_cli = MagicMock()
         gmgn_cli.get_sol_balance = AsyncMock(return_value=10.0)
         gmgn_cli.swap = AsyncMock(return_value={
@@ -128,17 +153,14 @@ class TestBuyLiveUsesConditionOrders:
             }
         })
 
-        # Mock position manager
         pos_mgr = MagicMock()
         pos_mgr.open_position = AsyncMock(return_value=42)
         pos_mgr.record_trade = AsyncMock(return_value=1)
         pos_mgr.db = MagicMock()
         pos_mgr.db.save_risk_event = AsyncMock()
 
-        # Mock risk manager
         risk = MagicMock()
 
-        # Build executor
         ex = TradeExecutor(
             paper=False,
             wallet=wallet,
@@ -146,19 +168,21 @@ class TestBuyLiveUsesConditionOrders:
             positions=pos_mgr,
             risk=risk,
             config={
-                "tp1_multiplier": 1.30,
-                "tp1_sell_pct": 80,
+                "tp1_multiplier": 1.50,
+                "tp1_sell_pct": 75,
                 "tp2_multiplier": 2.00,
                 "tp2_sell_pct": 100,
+                "trailing_activation_mult": 1.50,
+                "trailing_drawdown_pct": 30,
                 "stop_loss_pct": 50,
                 "slippage_bps": 300,
+                "sell_ratio_type": "hold_amount",
             },
             gmgn=None,
             price_oracle=None,
             gmgn_cli=gmgn_cli,
         )
 
-        # Build a fake token
         token = TokenData(
             address="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
             symbol="USDC",
@@ -167,24 +191,37 @@ class TestBuyLiveUsesConditionOrders:
 
         result = await ex._execute_buy_live(token, size_sol=0.05, filter_params_version=1)
 
-        # Verify gmgn_cli.swap was called with condition_orders
+        # Verify gmgn_cli.swap was called with condition_orders + sell_ratio_type
         assert gmgn_cli.swap.called
         call_kwargs = gmgn_cli.swap.call_args.kwargs
         assert "condition_orders" in call_kwargs
+        assert "sell_ratio_type" in call_kwargs
+        assert call_kwargs["sell_ratio_type"] == "hold_amount"
+
         conditions = json.loads(call_kwargs["condition_orders"])
-        # Only 2 conditions: TP1 (1.30x sell 100%) + SL (0.50x sell 100%)
-        assert len(conditions) == 2
-        assert conditions[0]["order_type"] == "profit_stop"
-        assert conditions[0]["price_scale"] == "130"
-        assert conditions[0]["sell_ratio"] == "100"
-        assert conditions[1]["order_type"] == "loss_stop"
-        assert conditions[1]["price_scale"] == "50"
-        assert conditions[1]["sell_ratio"] == "100"
+        assert len(conditions) == 4
+
+        tp1, tp2, trail, sl = conditions
+        assert tp1["order_type"] == "profit_stop"
+        assert tp1["price_scale"] == "50"   # 1.5x → +50% gain
+        assert tp1["sell_ratio"] == "75"
+
+        assert tp2["order_type"] == "profit_stop"
+        assert tp2["price_scale"] == "100"  # 2.0x → +100% gain
+        assert tp2["sell_ratio"] == "100"
+
+        assert trail["order_type"] == "profit_stop_trace"
+        assert trail["price_scale"] == "50"  # activation 1.5x
+        assert trail["sell_ratio"] == "100"
+        assert trail["drawdown_rate"] == "30"
+
+        assert sl["order_type"] == "loss_stop"
+        assert sl["price_scale"] == "50"   # -50% drop
+        assert sl["sell_ratio"] == "100"
 
     async def test_buy_skipped_on_insufficient_balance(self):
         from core.trade_executor import TradeExecutor
         from core.wallet import Wallet
-        from core.position_manager import PositionManager
 
         wallet = Wallet(paper=True, starting_balance_sol=0.0)
         wallet.RESERVE_SOL = 0.1
@@ -223,17 +260,15 @@ class TestStrategyPoller:
         gmgn_cli.list_strategies = AsyncMock(return_value={"list": []})
 
         pos_mgr = MagicMock()
-        # Mix of paper and live; only live should be checked
         pos_mgr.get_open_positions = AsyncMock(return_value=[
             {"id": 1, "paper": 1, "token_address": "TokP1", "token_symbol": "P1",
-             "tp1_filled": 0, "tp2_filled": 0, "sl_filled": 0},
+             "tp1_filled": 0, "tp2_filled": 0, "trailing_filled": 0, "sl_filled": 0},
             {"id": 2, "paper": 0, "token_address": "TokL1", "token_symbol": "L1",
-             "tp1_filled": 0, "tp2_filled": 0, "sl_filled": 0},
+             "tp1_filled": 0, "tp2_filled": 0, "trailing_filled": 0, "sl_filled": 0},
         ])
         pos_mgr.update_position = AsyncMock()
 
         await _tick(MagicMock(), pos_mgr, gmgn_cli)
-        # Only id=2 (live) should be queried
         assert gmgn_cli.list_strategies.call_count == 1
         gmgn_cli.list_strategies.assert_called_with(
             chain="sol", from_addr="WALLET", base_token="TokL1",
@@ -249,8 +284,12 @@ class TestStrategyPoller:
                 "status": "open",
                 "strategy_status": "running",
                 "condition_orders": [
-                    {"order_type": "profit_stop", "price_scale": "130",
-                     "sell_ratio": "100", "status": "filled"},
+                    {"order_type": "profit_stop", "price_scale": "150",
+                     "sell_ratio": "75", "status": "filled"},
+                    {"order_type": "profit_stop", "price_scale": "200",
+                     "sell_ratio": "100", "status": "check"},
+                    {"order_type": "profit_stop_trace", "price_scale": "150",
+                     "sell_ratio": "100", "drawdown_rate": "30", "status": "check"},
                     {"order_type": "loss_stop", "price_scale": "50",
                      "sell_ratio": "100", "status": "check"},
                 ],
@@ -259,7 +298,8 @@ class TestStrategyPoller:
 
         pos = {
             "id": 5, "token_symbol": "PEPE", "token_address": "TokPEPE111",
-            "paper": 0, "tp1_filled": 0, "tp2_filled": 0, "sl_filled": 0,
+            "paper": 0, "tp1_filled": 0, "tp2_filled": 0,
+            "trailing_filled": 0, "sl_filled": 0,
         }
         pos_mgr = MagicMock()
         pos_mgr.update_position = AsyncMock()
@@ -269,10 +309,85 @@ class TestStrategyPoller:
 
         assert pos["tp1_filled"] == 1
         pos_mgr.update_position.assert_called_once()
-        # TP1 (100% exit) means position is fully closed
+        # Not closed yet — TP2 / trailing / SL still pending
+        pos_mgr.close_position.assert_not_called()
+
+    async def test_tp1_and_tp2_filled_closes_position(self):
+        from tracking.strategy_poller import _check_one
+
+        gmgn_cli = MagicMock()
+        gmgn_cli.list_strategies = AsyncMock(return_value={
+            "list": [{
+                "base_token": "TokWIF111",
+                "status": "open",
+                "strategy_status": "running",
+                "condition_orders": [
+                    {"order_type": "profit_stop", "price_scale": "150",
+                     "sell_ratio": "75", "status": "filled"},
+                    {"order_type": "profit_stop", "price_scale": "200",
+                     "sell_ratio": "100", "status": "filled"},
+                    {"order_type": "profit_stop_trace", "price_scale": "150",
+                     "sell_ratio": "100", "drawdown_rate": "30", "status": "check"},
+                    {"order_type": "loss_stop", "price_scale": "50",
+                     "sell_ratio": "100", "status": "check"},
+                ],
+            }],
+        })
+
+        pos = {
+            "id": 6, "token_symbol": "WIF", "token_address": "TokWIF111",
+            "paper": 0, "tp1_filled": 1, "tp2_filled": 0,
+            "trailing_filled": 0, "sl_filled": 0,
+        }
+        pos_mgr = MagicMock()
+        pos_mgr.update_position = AsyncMock()
+        pos_mgr.close_position = AsyncMock()
+
+        await _check_one(pos, pos_mgr, gmgn_cli, "WALLET")
+
+        assert pos["tp2_filled"] == 1
+        pos_mgr.update_position.assert_called_once()
         pos_mgr.close_position.assert_called_once()
         args, kwargs = pos_mgr.close_position.call_args
-        assert "TP1" in (kwargs.get("exit_reason") or args[1])
+        assert "TP1+TP2" in (kwargs.get("exit_reason") or args[1])
+
+    async def test_trailing_filled_closes_position(self):
+        from tracking.strategy_poller import _check_one
+
+        gmgn_cli = MagicMock()
+        gmgn_cli.list_strategies = AsyncMock(return_value={
+            "list": [{
+                "base_token": "TokTRAIL111",
+                "status": "open",
+                "strategy_status": "running",
+                "condition_orders": [
+                    {"order_type": "profit_stop", "price_scale": "150",
+                     "sell_ratio": "75", "status": "check"},
+                    {"order_type": "profit_stop", "price_scale": "200",
+                     "sell_ratio": "100", "status": "check"},
+                    {"order_type": "profit_stop_trace", "price_scale": "150",
+                     "sell_ratio": "100", "drawdown_rate": "30", "status": "filled"},
+                    {"order_type": "loss_stop", "price_scale": "50",
+                     "sell_ratio": "100", "status": "check"},
+                ],
+            }],
+        })
+
+        pos = {
+            "id": 8, "token_symbol": "TRAIL", "token_address": "TokTRAIL111",
+            "paper": 0, "tp1_filled": 0, "tp2_filled": 0,
+            "trailing_filled": 0, "sl_filled": 0,
+        }
+        pos_mgr = MagicMock()
+        pos_mgr.update_position = AsyncMock()
+        pos_mgr.close_position = AsyncMock()
+
+        await _check_one(pos, pos_mgr, gmgn_cli, "WALLET")
+
+        assert pos["trailing_filled"] == 1
+        pos_mgr.close_position.assert_called_once()
+        args, kwargs = pos_mgr.close_position.call_args
+        assert "TRAIL" in (kwargs.get("exit_reason") or args[1])
 
     async def test_sl_filled_closes_position(self):
         from tracking.strategy_poller import _check_one
@@ -284,8 +399,12 @@ class TestStrategyPoller:
                 "status": "open",
                 "strategy_status": "running",
                 "condition_orders": [
-                    {"order_type": "profit_stop", "price_scale": "130",
+                    {"order_type": "profit_stop", "price_scale": "150",
+                     "sell_ratio": "75", "status": "check"},
+                    {"order_type": "profit_stop", "price_scale": "200",
                      "sell_ratio": "100", "status": "check"},
+                    {"order_type": "profit_stop_trace", "price_scale": "150",
+                     "sell_ratio": "100", "drawdown_rate": "30", "status": "check"},
                     {"order_type": "loss_stop", "price_scale": "50",
                      "sell_ratio": "100", "status": "filled"},
                 ],
@@ -294,7 +413,8 @@ class TestStrategyPoller:
 
         pos = {
             "id": 7, "token_symbol": "DOGE", "token_address": "TokDOGE111",
-            "paper": 0, "tp1_filled": 0, "tp2_filled": 0, "sl_filled": 0,
+            "paper": 0, "tp1_filled": 0, "tp2_filled": 0,
+            "trailing_filled": 0, "sl_filled": 0,
         }
         pos_mgr = MagicMock()
         pos_mgr.update_position = AsyncMock()
@@ -305,7 +425,7 @@ class TestStrategyPoller:
         assert pos["sl_filled"] == 1
         pos_mgr.close_position.assert_called_once()
         args, kwargs = pos_mgr.close_position.call_args
-        assert kwargs.get("exit_reason") == "SL"
+        assert "SL" in (kwargs.get("exit_reason") or args[1])
 
     async def test_no_matching_strategy_skips(self):
         from tracking.strategy_poller import _check_one
@@ -314,8 +434,9 @@ class TestStrategyPoller:
         gmgn_cli.list_strategies = AsyncMock(return_value={"list": []})
 
         pos = {
-            "id": 8, "token_symbol": "X", "token_address": "TokX",
-            "paper": 0, "tp1_filled": 0, "tp2_filled": 0, "sl_filled": 0,
+            "id": 9, "token_symbol": "X", "token_address": "TokX",
+            "paper": 0, "tp1_filled": 0, "tp2_filled": 0,
+            "trailing_filled": 0, "sl_filled": 0,
         }
         pos_mgr = MagicMock()
         pos_mgr.update_position = AsyncMock()

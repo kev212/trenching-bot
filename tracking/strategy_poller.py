@@ -1,14 +1,15 @@
 """GMGN strategy (condition order) poller for live positions.
 
-When a buy is submitted via `gmgn-cli swap --condition-orders ...`, GMGN
-attaches TP1/TP2/SL orders on-chain. We don't need a 4x/sec price monitor;
-we just poll GMGN for the strategy status and update position state.
+When a buy is submitted via `gmgn-cli swap --condition-orders ... --sell-ratio-type hold_amount`,
+GMGN attaches 4 on-chain orders: TP1 (75%), TP2 (100% remaining), Trailing (30% drawdown), SL (100%).
+We don't need a 4x/sec price monitor; we just poll GMGN for the strategy
+status and update position state.
 
 Flow:
-  1. Find all OPEN live positions with `strategy_order_id` set
-  2. For each, call `gmgn-cli order get --order-id <strategy_id>`
-  3. If TP1/TP2/SL filled: update position flag, sync amount, log exit
-  4. When fully exited (TP1+TP2 or SL), close position
+  1. Find all OPEN live positions
+  2. For each, call `gmgn-cli order strategy list --group-tag STMix`
+  3. If any condition filled: update position flag, log exit
+  4. When fully exited (TP1+TP2 cascade, trailing, or SL), close position
 
 The poller runs every `POLL_INTERVAL_S` seconds (default 15s) — much
 slower than position_monitor's 0.25s because GMGN handles the timing.
@@ -122,20 +123,41 @@ async def _check_one(pos: dict, position_manager: PositionManager, gmgn_cli: GMG
         return
 
     # Check each condition order's status.
-    # Note: with the sell_ratio_type fix, we only have 2 conditions:
-    # TP1 (1.30x sell 100%) and SL (0.50x sell 100%). TP2 dropped to
-    # avoid double-sell risk since GMGN always uses buy_amount semantics.
+    # Strategy: TP1 (1.5x sell 75%) + TP2 (2.0x sell 100% remaining) +
+    # Trailing (1.5x activation, 30% drawdown) + SL (0.5x sell 100%).
+    # With --sell-ratio-type hold_amount, TP2 sells remaining 25% after TP1.
+    # Detection: smallest-scale profit_stop = TP1, largest = TP2.
+    # This is config-agnostic — works regardless of TP1/TP2 values.
     conditions = matching.get("condition_orders", []) or []
-    filled_tp1 = False
+    profit_stops: list[tuple[int, dict]] = []
+    filled_trailing = False
     filled_sl = False
     for c in conditions:
         ctype = c.get("order_type", "")
         cstatus = c.get("status", "")
-        if cstatus in ("filled", "success", "completed", "triggered"):
-            if ctype == "profit_stop":
-                filled_tp1 = True
-            elif ctype == "loss_stop":
+        if ctype == "profit_stop_trace":
+            if cstatus in ("filled", "success", "completed", "triggered"):
+                filled_trailing = True
+        elif ctype == "loss_stop":
+            if cstatus in ("filled", "success", "completed", "triggered"):
                 filled_sl = True
+        elif ctype == "profit_stop":
+            ps = int(c.get("price_scale", "0"))
+            is_filled = cstatus in ("filled", "success", "completed", "triggered")
+            profit_stops.append((ps, {"filled": is_filled, "raw": c}))
+
+    # Identify TP1 (smallest price_scale) and TP2 (largest, if different)
+    filled_tp1 = False
+    filled_tp2 = False
+    if profit_stops:
+        profit_stops.sort(key=lambda x: x[0])
+        smallest_scale, smallest_info = profit_stops[0]
+        if smallest_info["filled"]:
+            filled_tp1 = True
+        if len(profit_stops) > 1:
+            largest_scale, largest_info = profit_stops[-1]
+            if largest_scale > smallest_scale and largest_info["filled"]:
+                filled_tp2 = True
 
     strategy_status = matching.get("status", "open")
     strategy_state = matching.get("strategy_status", "")
@@ -146,6 +168,20 @@ async def _check_one(pos: dict, position_manager: PositionManager, gmgn_cli: GMG
         updated = True
         logger.info(
             f"[STRATEGY-POLLER] TP1 filled: {pos.get('token_symbol','?')} "
+            f"({pos.get('token_address','')[:8]})"
+        )
+    if filled_tp2 and not pos.get("tp2_filled", 0):
+        pos["tp2_filled"] = 1
+        updated = True
+        logger.info(
+            f"[STRATEGY-POLLER] TP2 filled: {pos.get('token_symbol','?')} "
+            f"({pos.get('token_address','')[:8]})"
+        )
+    if filled_trailing and not pos.get("trailing_filled", 0):
+        pos["trailing_filled"] = 1
+        updated = True
+        logger.info(
+            f"[STRATEGY-POLLER] Trailing filled: {pos.get('token_symbol','?')} "
             f"({pos.get('token_address','')[:8]})"
         )
     if filled_sl and not pos.get("sl_filled", 0):
@@ -162,12 +198,20 @@ async def _check_one(pos: dict, position_manager: PositionManager, gmgn_cli: GMG
         except Exception as e:
             logger.warning(f"[STRATEGY-POLLER] update_position failed: {e}")
 
-    # If strategy is fully exited, close the position
-    fully_exited = filled_tp1 or filled_sl
+    # If strategy is fully exited, close the position.
+    # With hold_amount, TP1 (75%) + TP2 (100% remaining) = 100% exit.
+    # Trailing also exits 100% of remaining on drawdown.
+    # SL exits 100% of position.
+    fully_exited = (filled_tp1 and filled_tp2) or filled_trailing or filled_sl
     strategy_done = strategy_status in ("closed", "cancelled", "finished", "completed")
     if fully_exited or strategy_done or strategy_state in ("finished", "closed"):
-        if fully_exited:
-            exit_reason = "TP1" if filled_tp1 else "SL"
+        if (filled_tp1 and filled_tp2) or filled_trailing or filled_sl:
+            reasons = []
+            if filled_tp1: reasons.append("TP1")
+            if filled_tp2: reasons.append("TP2")
+            if filled_trailing: reasons.append("TRAIL")
+            if filled_sl: reasons.append("SL")
+            exit_reason = "+".join(reasons)
         else:
             exit_reason = f"GMGN:{strategy_status}"
         try:

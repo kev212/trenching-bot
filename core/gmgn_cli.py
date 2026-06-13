@@ -136,8 +136,15 @@ class GMGNCli:
                    anti_mev: bool = True,
                    condition_orders: Optional[str] = None,
                    priority_fee: Optional[float] = None,
-                   tip_fee: Optional[float] = None) -> dict:
-        """Submit a swap. Returns dict with order_id, hash, status."""
+                   tip_fee: Optional[float] = None,
+                   sell_ratio_type: Optional[str] = None) -> dict:
+        """Submit a swap. Returns dict with order_id, hash, status.
+
+        sell_ratio_type (swap-level flag, only with condition_orders):
+          - "buy_amount" (default): each condition sells % of ORIGINAL buy
+          - "hold_amount": each condition sells % of CURRENT position
+                             (TP2 100% after TP1 75% = sells remaining 25%)
+        """
         args = [
             "swap",
             "--chain", chain,
@@ -151,6 +158,8 @@ class GMGNCli:
             args.append("--anti-mev")
         if condition_orders:
             args.extend(["--condition-orders", condition_orders])
+            if sell_ratio_type:
+                args.extend(["--sell-ratio-type", sell_ratio_type])
         if priority_fee is not None:
             args.extend(["--priority-fee", str(priority_fee)])
         if tip_fee is not None:

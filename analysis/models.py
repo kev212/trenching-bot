@@ -205,6 +205,7 @@ class Position:
     strategy_order_id: str = ""
     tp1_filled: bool = False
     tp2_filled: bool = False
+    trailing_filled: bool = False
     sl_filled: bool = False
     id: int = 0
 

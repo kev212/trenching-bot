@@ -213,6 +213,7 @@ CREATE TABLE IF NOT EXISTS positions (
     strategy_order_id TEXT DEFAULT '',
     tp1_filled INTEGER DEFAULT 0,
     tp2_filled INTEGER DEFAULT 0,
+    trailing_filled INTEGER DEFAULT 0,
     sl_filled INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -301,6 +302,7 @@ class Database:
             ("positions", "strategy_order_id", "TEXT DEFAULT ''"),
             ("positions", "tp1_filled", "INTEGER DEFAULT 0"),
             ("positions", "tp2_filled", "INTEGER DEFAULT 0"),
+            ("positions", "trailing_filled", "INTEGER DEFAULT 0"),
             ("positions", "sl_filled", "INTEGER DEFAULT 0"),
         ]
         for table, column, typedef in migrations:
