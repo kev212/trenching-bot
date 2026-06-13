@@ -123,7 +123,7 @@ class TrenchingBot:
         self.state = SharedState()
         self.queue = asyncio.Queue(maxsize=settings.max_queue_size)
         self.state.queue = self.queue
-        self._live_paused = False  # /live_pause flag for live trading
+        self._live_paused = settings.live_paused_at_start  # /live_pause flag (set LIVE_PAUSED_AT_START=true for safe initial deploy)
         self.rate_limiter = RateLimiter(15, 60)  # GMGN: 15 req/min
         self.gmgn = GMGNClient(settings.gmgn_api_key, settings.http_proxy, rate_limiter=self.rate_limiter)
         logger.warning(f"GMGN init: proxy=[{self.gmgn.proxy[:50] if self.gmgn.proxy else 'NONE'}]")

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     paper_starting_balance_sol: float = 10.0
     confidence_auto_execute: float = 0.60  # DEPRECATED 2026-06-14: APE threshold (60) is now the gate; conf_auto_execute unused
     enable_trenches_poller: bool = True
+    live_paused_at_start: bool = False  # Start live bot in paused state (safer initial deploy)
 
     # June 2026 audit cycle 3 — anti-freeze tuning
     jupiter_retry_total_timeout_s: float = 8.0
