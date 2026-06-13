@@ -81,6 +81,14 @@ class SharedState:
         # In-flight set: addresses currently being processed by a worker.
         # {address: timestamp} — auto-purged after IN_FLIGHT_TTL to prevent leaks.
         self._in_flight: dict[str, float] = {}
+        # Live trading refs (set by TrenchingBot after init so that Telegram
+        # /live_* commands can read them through bot_data['state']). Defaults
+        # keep them safe to read even before TrenchingBot has wired them up.
+        self.position_manager = None
+        self.risk_manager = None
+        self.gmgn_cli = None
+        self.paper_mode: bool | None = None
+        self._live_paused: bool = False
 
     async def _purge_stale_in_flight(self):
         """Auto-release in-flight entries older than TTL. Called inside _lock."""

@@ -478,16 +478,20 @@ async def cmd_live_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             lines.append(f"GMGN balance: error ({e})")
 
     # Open positions
-    try:
-        positions = await state.position_manager.get_open_positions()
-        live_count = sum(1 for p in positions if not p.get("paper", 1))
-        paper_count = len(positions) - live_count
-        lines.append(
-            f"Open positions: {len(positions)} "
-            f"(live: {live_count}, paper: {paper_count})"
-        )
-    except Exception as e:
-        lines.append(f"Positions: error ({e})")
+    pm = getattr(state, "position_manager", None)
+    if pm:
+        try:
+            positions = await pm.get_open_positions()
+            live_count = sum(1 for p in positions if not p.get("paper", 1))
+            paper_count = len(positions) - live_count
+            lines.append(
+                f"Open positions: {len(positions)} "
+                f"(live: {live_count}, paper: {paper_count})"
+            )
+        except Exception as e:
+            lines.append(f"Positions: error ({e})")
+    else:
+        lines.append("Open positions: N/A (no position_manager on state)")
 
     # Risk state
     if hasattr(state, "risk_manager"):
@@ -508,7 +512,7 @@ async def cmd_live_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not state:
         await update.message.reply_text("Bot not ready yet.")
         return
-    if state.paper_mode:
+    if getattr(state, "paper_mode", True):
         await update.message.reply_text("Bot is in PAPER mode (no live trades).")
         return
     state._live_paused = True
@@ -523,7 +527,7 @@ async def cmd_live_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not state:
         await update.message.reply_text("Bot not ready yet.")
         return
-    if state.paper_mode:
+    if getattr(state, "paper_mode", True):
         await update.message.reply_text("Bot is in PAPER mode (no live trades).")
         return
     state._live_paused = False

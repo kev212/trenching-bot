@@ -124,6 +124,7 @@ class TrenchingBot:
         self.queue = asyncio.Queue(maxsize=settings.max_queue_size)
         self.state.queue = self.queue
         self._live_paused = settings.live_paused_at_start  # /live_pause flag (set LIVE_PAUSED_AT_START=true for safe initial deploy)
+        self.state._live_paused = self._live_paused
         self.rate_limiter = RateLimiter(15, 60)  # GMGN: 15 req/min
         self.gmgn = GMGNClient(settings.gmgn_api_key, settings.http_proxy, rate_limiter=self.rate_limiter)
         logger.warning(f"GMGN init: proxy=[{self.gmgn.proxy[:50] if self.gmgn.proxy else 'NONE'}]")
@@ -151,6 +152,7 @@ class TrenchingBot:
         self.risk_rules = load_risk_rules()
         # paper_mode from Settings (auto-reads PAPER_MODE env var). trading.json paper_mode kept for backward compat only.
         self.paper_mode = settings.paper_mode if hasattr(settings, "paper_mode") else self.trading_config.get("paper_mode", True)
+        self.state.paper_mode = self.paper_mode
         self.wallet = Wallet(
             paper=self.paper_mode,
             starting_balance_sol=settings.paper_starting_balance_sol,
@@ -163,12 +165,14 @@ class TrenchingBot:
             rate_limiter=self.rate_limiter,
         )
         self.position_manager = PositionManager(self.db)
+        self.state.position_manager = self.position_manager
         self.risk_manager = RiskManager(
             self.trading_config,
             db=self.db,
             risk_rules=self.risk_rules,
             position_manager=self.position_manager,
         )
+        self.state.risk_manager = self.risk_manager
         from core.price_oracle import PriceOracle
         self.price_oracle = PriceOracle(
             gmgn=self.gmgn,
@@ -193,6 +197,7 @@ class TrenchingBot:
                 self.gmgn_cli = None
         else:
             self.gmgn_cli = None
+        self.state.gmgn_cli = self.gmgn_cli
         self.executor = TradeExecutor(
             paper=self.paper_mode,
             wallet=self.wallet,
