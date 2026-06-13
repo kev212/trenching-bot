@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
-from analysis.models import CallRecord, LLMDecision, TokenData
+from typing import Optional
+
+from analysis.models import CallRecord, LLMDecision, Position, TokenData
 
 
 def _escape_markdown(text: str) -> str:
@@ -239,4 +241,67 @@ def format_trade_alert(position, side: str) -> str:
         pnl_emoji = "📈" if pnl_sol >= 0 else "📉"
         lines.append(f"  PnL: {pnl_emoji} {pnl_sol:+.4f} SOL (${pnl_usd:+.2f} USD, {pnl_pct:+.1f}%)")
 
+    return "\n".join(lines)
+
+
+def format_buy_executed_alert(token: TokenData, position: Position) -> str:
+    """Format alert for successful live buy execution.
+
+    Sent post-execution by main.py. User can see position details + strategy.
+    """
+    size_sol = getattr(position, "entry_amount_sol", 0.0) or 0.0
+    entry_price = getattr(position, "entry_price", 0.0) or 0.0
+    position_id = getattr(position, "id", 0)
+    entry_tx = getattr(position, "entry_tx_sig", "") or ""
+
+    lines = [
+        "✅ BUY EXECUTED",
+        "",
+        f"Token: {_escape_markdown(token.symbol)} ({token.address[:8]}...)",
+        f"Size: {size_sol:.4f} SOL",
+        f"Entry: ${entry_price:.10f}",
+        f"Position ID: {position_id}",
+        "",
+        "Strategy attached:",
+        "  • TP1: 1.50x sell 75%",
+        "  • TP2: 2.00x sell 100% remaining",
+        "  • Trailing: 1.50x activation, 30% drawdown",
+        "  • SL: -50% sell 100%",
+    ]
+
+    if entry_tx:
+        lines.append(f"\nTx: `{_escape_markdown(entry_tx[:16])}...`")
+
+    return "\n".join(lines)
+
+
+def format_buy_blocked_alert(
+    token: TokenData,
+    address: str,
+    verdict: str,
+    confidence: float,
+    block_reason: str,
+    active_position: Optional[dict] = None,
+) -> str:
+    """Format alert for blocked live buy attempt.
+
+    Sent post-execution by main.py when a gate fails. Includes reason
+    and context of currently active position (if any) so user knows
+    why the buy was blocked.
+    """
+    lines = [
+        "❌ BUY BLOCKED",
+        "",
+        f"Token: {_escape_markdown(token.symbol)} ({address[:8]}...)",
+        f"Verdict: {verdict} (conf: {confidence:.2f})",
+        f"Block reason: {block_reason}",
+    ]
+
+    if active_position:
+        sym = active_position.get("token_symbol", "?")
+        ts = active_position.get("entry_time", "?")
+        lines.append(f"Position active: {_escape_markdown(sym)} (since {ts})")
+
+    lines.append("")
+    lines.append("Will retry on next APE signal once gate clears.")
     return "\n".join(lines)

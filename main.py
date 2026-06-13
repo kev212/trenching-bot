@@ -5,6 +5,7 @@ import os
 import signal
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 logger = logging.getLogger("main")
 
@@ -1126,47 +1127,52 @@ class TrenchingBot:
             except Exception as e:
                 logger.warning(f"skip_decision save failed for {address[:8]}: {e}")
 
-        # Alert if APE or WATCH
-        if decision.verdict in (Verdict.APE, Verdict.WATCH):
-            call = CallRecord(
-                token_address=address,
-                token_name=token.name,
-                token_symbol=token.symbol,
-                call_time=datetime.now(timezone.utc),
-                entry_price=current_price,
-                market_cap_at_call=token.market_cap,
-                volume_1h=token.volume_1h,
-                liquidity=token.liquidity,
-                holders_count=token.holders_count,
-                llm_score=decision.score,
-                llm_verdict=decision.verdict.value,
-                llm_reasoning=decision.reasoning,
-                llm_confidence=decision.confidence,
-                llm_key_factors=json.dumps(decision.key_factors),
-                filter_params_version=await self.state.get_filter_version(),
-                feature_vector=json.dumps(fv_dict),
-                status=CallStatus.PENDING,
-            )
+            # Alert + CallRecord only for WATCH (APE alert is post-execution).
+            # APE verdict → _maybe_execute_live_buy sends ✅ EXECUTED or ❌ BLOCKED
+            if decision.verdict in (Verdict.APE, Verdict.WATCH):
+                call = CallRecord(
+                    token_address=address,
+                    token_name=token.name,
+                    token_symbol=token.symbol,
+                    call_time=datetime.now(timezone.utc),
+                    entry_price=current_price,
+                    market_cap_at_call=token.market_cap,
+                    volume_1h=token.volume_1h,
+                    liquidity=token.liquidity,
+                    holders_count=token.holders_count,
+                    llm_score=decision.score,
+                    llm_verdict=decision.verdict.value,
+                    llm_reasoning=decision.reasoning,
+                    llm_confidence=decision.confidence,
+                    llm_key_factors=json.dumps(decision.key_factors),
+                    filter_params_version=await self.state.get_filter_version(),
+                    feature_vector=json.dumps(fv_dict),
+                    status=CallStatus.PENDING,
+                )
 
-            call_id = await self.db.save_call(call)
-            call.id = call_id
-            await self.state.add_active_call(address, call)
+                call_id = await self.db.save_call(call)
+                call.id = call_id
+                await self.state.add_active_call(address, call)
 
-            alert_text = format_alert(token, decision, fv_dict,
-                                       social_score=social_score)
-            await dispatcher.send_alert(alert_text)
-            self.state.metrics.record_alert()
+                # WATCH verdict: pre-alert (no buy attempt). APE: skip pre-alert,
+                # post-execution alert sent by _maybe_execute_live_buy.
+                if decision.verdict == Verdict.WATCH:
+                    alert_text = format_alert(token, decision, fv_dict,
+                                               social_score=social_score)
+                    await dispatcher.send_alert(alert_text)
+                    self.state.metrics.record_alert()
+                    logger.info(
+                        f"[ALERT SENT] {token.symbol} ({address[:8]}) (WATCH)"
+                    )
 
-            logger.info(f"[ALERT SENT] {token.symbol} ({address[:8]}) ({decision.verdict.value})")
+                await self.db.save_llm_decision(
+                    call_id, decision.score, decision.verdict.value,
+                    decision.reasoning, decision.confidence,
+                    decision.key_factors, decision.processing_time_ms,
+                )
 
-            await self.db.save_llm_decision(
-                call_id, decision.score, decision.verdict.value,
-                decision.reasoning, decision.confidence,
-                decision.key_factors, decision.processing_time_ms,
-            )
-
-            # Live execution (Step 2): wire executor.execute_buy() for high-conviction
-            # calls. Alert-only is preserved for paper mode and low-confidence calls.
+            # Live execution (Step 2): for APE verdict, attempts buy and sends
+            # 1 post-execution alert (✅ EXECUTED or ❌ BLOCKED).
             await self._maybe_execute_live_buy(token, address, decision)
 
     async def get_open_positions_summary(self) -> list[dict]:
@@ -1185,109 +1191,169 @@ class TrenchingBot:
           4. gmgn_cli must be ready
           5. balance must cover position_size + reserve
           6. risk_manager.can_trade() must approve
+
+        After execution (success OR block), sends 1 Telegram alert:
+        - ✅ BUY EXECUTED (with position details + strategy)
+        - ❌ BUY BLOCKED (with reason + active position context)
+        WATCH verdict keeps its pre-alert (no buy attempt).
         """
         from analysis.models import Verdict
+        from alerts.formatter import format_buy_executed_alert, format_buy_blocked_alert
 
+        block_reason: Optional[str] = None
+        position = None
+
+        # Gate 0
         if self._live_paused:
+            block_reason = "Live trading paused via /live_pause"
+        # Gate 1
+        elif self.paper_mode:
             logger.info(
                 f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
-                f"verdict={decision.verdict.value}, conf={decision.confidence:.2f}, "
-                f"action=NO_TRADE (live paused via /live_pause)"
-            )
-            return
-
-        if self.paper_mode:
-            logger.info(
-                f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
-                f"verdict={decision.verdict.value}, conf={decision.confidence:.2f}, "
                 f"action=NO_TRADE (paper mode)"
             )
-            return
-
-        if decision.verdict != Verdict.APE:
+            return  # No alert in paper mode
+        # Gate 2 — WATCH/SKIP verdicts have pre-alert in _process_token.
+        # No post-exec alert here (WATCH = alert-only, never attempts buy).
+        elif decision.verdict != Verdict.APE:
             logger.info(
                 f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
-                f"verdict={decision.verdict.value}, conf={decision.confidence:.2f}, "
-                f"action=NO_TRADE (verdict != APE, alert-only)"
+                f"verdict={decision.verdict.value}, action=NO_TRADE (not APE)"
             )
             return
-
-        if decision.confidence < settings.confidence_auto_execute:
-            logger.info(
-                f"[BUY-DECISION] {token.symbol} ({address[:8]}): "
-                f"verdict=APE, conf={decision.confidence:.2f}, "
-                f"action=NO_TRADE (conf < {settings.confidence_auto_execute})"
+        # Gate 3
+        elif decision.confidence < settings.confidence_auto_execute:
+            block_reason = (
+                f"Confidence {decision.confidence:.2f} < "
+                f"{settings.confidence_auto_execute}"
             )
-            return
+        # Gate 4
+        elif not self.gmgn_cli or not self.gmgn_cli.is_ready():
+            block_reason = "GMGN CLI not ready"
+        else:
+            # All non-risk gates passed — check balance + risk + size
+            try:
+                open_positions = await self.position_manager.get_open_positions()
+                open_count = len(open_positions)
+            except Exception as e:
+                block_reason = f"Position count failed: {e}"
+                open_count = 0
 
-        if not self.gmgn_cli or not self.gmgn_cli.is_ready():
-            logger.warning(
-                f"[BUY-SKIP] {token.symbol} ({address[:8]}): "
-                f"action=NO_TRADE (gmgn_cli not ready)"
-            )
-            return
+            if block_reason is None:
+                try:
+                    balance = await self.gmgn_cli.get_sol_balance()
+                except Exception as e:
+                    block_reason = f"Balance check failed: {e}"
+                    balance = 0
 
-        # Risk check (daily loss limit, max positions, max trades, loss streak)
-        try:
-            open_positions = await self.position_manager.get_open_positions()
-            open_count = len(open_positions)
-        except Exception as e:
-            logger.warning(f"[BUY-SKIP] {token.symbol}: position count failed: {e}")
-            return
-        can_trade, reason = self.risk_manager.can_trade(open_position_count=open_count)
-        if not can_trade:
-            logger.warning(
-                f"[BUY-SKIP] {token.symbol} ({address[:8]}): "
-                f"action=NO_TRADE (risk: {reason})"
-            )
-            return
+            if block_reason is None and balance <= 0:
+                block_reason = "Insufficient GMGN balance (0 SOL)"
 
-        # Get GMGN balance for position sizing
-        try:
-            balance = await self.gmgn_cli.get_sol_balance()
-        except Exception as e:
-            logger.warning(f"[BUY-SKIP] {token.symbol}: balance check failed: {e}")
-            return
+            size_sol = 0.0
+            if block_reason is None:
+                size_sol = self.risk_manager.get_position_size(balance)
+                min_position = self.trading_config.get("min_position_sol", 0.02)
+                if size_sol < min_position:
+                    block_reason = (
+                        f"Position size {size_sol:.4f} SOL < min {min_position}"
+                    )
 
-        if balance <= 0:
-            logger.warning(
-                f"[BUY-SKIP] {token.symbol}: balance=0, cannot size position"
-            )
-            return
+            if block_reason is None:
+                can_trade, risk_reason = self.risk_manager.can_trade(
+                    open_position_count=open_count
+                )
+                if not can_trade:
+                    block_reason = f"Risk gate: {risk_reason}"
 
-        size_sol = self.risk_manager.get_position_size(balance)
-        min_position = self.trading_config.get("min_position_sol", 0.02)
-        if size_sol < min_position:
-            logger.info(
-                f"[BUY-SKIP] {token.symbol}: size {size_sol:.4f} SOL < min {min_position}"
-            )
-            return
-
-        # Execute
-        logger.info(
-            f"[BUY-EXECUTING] {token.symbol} ({address[:8]}): "
-            f"size={size_sol:.4f} SOL, balance={balance:.4f} SOL"
-        )
-        try:
-            position = await self.executor.execute_buy(
-                token, size_sol,
-                filter_params_version=await self.state.get_filter_version(),
-            )
-            if position:
+            # All gates passed — execute
+            if block_reason is None:
                 logger.info(
-                    f"[BUY-EXECUTED] {token.symbol} ({address[:8]}): "
-                    f"position_id={position.id}, size={size_sol:.4f} SOL"
+                    f"[BUY-EXECUTING] {token.symbol} ({address[:8]}): "
+                    f"size={size_sol:.4f} SOL, balance={balance:.4f} SOL"
                 )
+                try:
+                    position = await self.executor.execute_buy(
+                        token, size_sol,
+                        filter_params_version=await self.state.get_filter_version(),
+                    )
+                    if position is None:
+                        block_reason = "Executor returned None (swap failed)"
+                        logger.warning(
+                            f"[BUY-FAILED] {token.symbol} ({address[:8]}): "
+                            f"executor returned None"
+                        )
+                    else:
+                        logger.info(
+                            f"[BUY-EXECUTED] {token.symbol} ({address[:8]}): "
+                            f"position_id={position.id}, size={size_sol:.4f} SOL"
+                        )
+                except Exception as e:
+                    block_reason = f"Exception: {e}"
+                    logger.error(
+                        f"[BUY-ERROR] {token.symbol} ({address[:8]}): {e}",
+                        exc_info=True,
+                    )
+
+        # Send 1 post-execution alert
+        await self._send_post_execution_alert(
+            token, address, decision, position, block_reason
+        )
+
+    async def _send_post_execution_alert(
+        self,
+        token: TokenData,
+        address: str,
+        decision,
+        position,
+        block_reason: Optional[str],
+    ) -> None:
+        """Send 1 Telegram alert post-execution: ✅ EXECUTED or ❌ BLOCKED.
+
+        Skipped in paper mode (silent). Skipped on pause-blocked (no spam).
+        """
+        from alerts.formatter import format_buy_executed_alert, format_buy_blocked_alert
+
+        if self.paper_mode:
+            return
+        if block_reason is not None and self._live_paused:
+            # User explicitly paused — don't spam
+            return
+
+        try:
+            if position is not None:
+                # ✅ EXECUTED
+                msg = format_buy_executed_alert(token, position)
             else:
-                logger.warning(
-                    f"[BUY-FAILED] {token.symbol} ({address[:8]}): "
-                    f"executor returned None"
+                # ❌ BLOCKED — fetch active position for context
+                active_pos = None
+                try:
+                    open_positions = await self.position_manager.get_open_positions()
+                    live_positions = [
+                        p for p in open_positions if not p.get("paper", 1)
+                    ]
+                    if live_positions:
+                        p = live_positions[0]
+                        active_pos = {
+                            "token_symbol": p.get("token_symbol", "?"),
+                            "entry_time": p.get("entry_time", "?"),
+                        }
+                except Exception:
+                    pass
+                msg = format_buy_blocked_alert(
+                    token, address,
+                    verdict=decision.verdict.value,
+                    confidence=decision.confidence,
+                    block_reason=block_reason or "unknown",
+                    active_position=active_pos,
                 )
-        except Exception as e:
-            logger.error(
-                f"[BUY-ERROR] {token.symbol} ({address[:8]}): {e}",
-                exc_info=True,
+            await dispatcher.send_alert(msg)
+            self.state.metrics.record_alert()
+            logger.info(
+                f"[ALERT SENT] {'✅ EXECUTED' if position else '❌ BLOCKED'} "
+                f"{token.symbol} ({address[:8]})"
             )
+        except Exception as e:
+            logger.warning(f"[ALERT] Failed to send post-execution alert: {e}")
 
     async def _social_analysis(self, token: TokenData, info: dict):
         """Analyze social media presence for tokens that pass hard gate."""

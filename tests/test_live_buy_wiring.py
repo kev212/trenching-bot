@@ -2,6 +2,8 @@
 
 Verifies the full guard chain (paper_mode, verdict, confidence, gmgn_cli,
 risk_manager, balance, size) and executor.execute_buy() invocation.
+
+Also tests post-execution Telegram alerts (✅ EXECUTED / ❌ BLOCKED).
 """
 import asyncio
 import sys
@@ -11,7 +13,7 @@ sys.path.insert(0, "/Users/khezuma/workspace/trenching")
 
 import pytest
 
-from analysis.models import TokenData, Verdict
+from analysis.models import Position, TokenData, Verdict
 
 
 def make_decision(verdict=Verdict.APE, conf=0.85, score=0.7):
@@ -67,9 +69,10 @@ class FakeBot:
             gmgn_cli.is_ready = MagicMock(return_value=True)
             gmgn_cli.get_sol_balance = AsyncMock(return_value=balance)
 
-    # Bind the real method
+    # Bind the real methods
     from main import TrenchingBot
     _maybe_execute_live_buy = TrenchingBot._maybe_execute_live_buy
+    _send_post_execution_alert = TrenchingBot._send_post_execution_alert
 
     async def run(self, decision, address="Tok1111111111111111111111111111111111111111"):
         token = make_token(address=address)
@@ -259,3 +262,147 @@ class TestLivePausedGate:
 
         asyncio.run(go())
         bot.executor.execute_buy.assert_called_once()
+
+
+# ============ Post-Execution Telegram Alerts ============
+
+def make_position(position_id=42, size=0.1, entry_price=0.00012345,
+                 entry_tx="5xYzAbcDeFgHiJkLmNoPqRsTuVwXyZ"):
+    """Build a Position-like mock for alert tests."""
+    p = MagicMock(spec=Position)
+    p.id = position_id
+    p.entry_amount_sol = size
+    p.entry_price = entry_price
+    p.entry_tx_sig = entry_tx
+    return p
+
+
+class TestPostExecutionAlerts:
+    @patch("main.dispatcher")
+    def test_executed_alert_sent_on_buy_success(self, mock_dispatcher):
+        gmgn = MagicMock()
+        gmgn.is_ready = MagicMock(return_value=True)
+        gmgn.get_sol_balance = AsyncMock(return_value=0.5)
+        bot = FakeBot(paper_mode=False, gmgn_cli=gmgn, balance=0.5, fixed_size=0.1)
+        bot.executor.execute_buy = AsyncMock(
+            return_value=make_position(size=0.1)
+        )
+
+        async def go():
+            await bot.run(make_decision(), address="TokTest111")
+
+        asyncio.run(go())
+
+        # Buy happened
+        bot.executor.execute_buy.assert_called_once()
+        # Alert sent with EXECUTED
+        mock_dispatcher.send_alert.assert_called_once()
+        alert_text = mock_dispatcher.send_alert.call_args[0][0]
+        assert "✅ BUY EXECUTED" in alert_text
+        assert "TokTest1..." in alert_text  # address[:8] + "..."
+        assert "0.1000 SOL" in alert_text
+        assert "Position ID: 42" in alert_text
+        # Strategy details
+        assert "TP1: 1.50x sell 75%" in alert_text
+        assert "TP2: 2.00x sell 100% remaining" in alert_text
+        assert "Trailing: 1.50x activation, 30% drawdown" in alert_text
+        assert "SL: -50% sell 100%" in alert_text
+        # Tx hash (truncated)
+        assert "5xYzAbcDeFgHi" in alert_text
+
+    @patch("main.dispatcher")
+    def test_blocked_alert_sent_on_max_position(self, mock_dispatcher):
+        gmgn = MagicMock()
+        gmgn.is_ready = MagicMock(return_value=True)
+        gmgn.get_sol_balance = AsyncMock(return_value=0.5)
+        rm = MagicMock()
+        rm.can_trade = MagicMock(return_value=(False, "Max open positions (1/1)"))
+        rm.get_position_size = MagicMock(return_value=0.1)
+        bot = FakeBot(paper_mode=False, gmgn_cli=gmgn, risk_manager=rm)
+        # Active position for context
+        bot.position_manager.get_open_positions = AsyncMock(return_value=[
+            {"paper": 0, "token_symbol": "WIF", "entry_time": "2026-06-14T14:23:00Z"},
+        ])
+
+        async def go():
+            await bot.run(make_decision())
+
+        asyncio.run(go())
+
+        bot.executor.execute_buy.assert_not_called()
+        mock_dispatcher.send_alert.assert_called_once()
+        alert_text = mock_dispatcher.send_alert.call_args[0][0]
+        assert "❌ BUY BLOCKED" in alert_text
+        assert "Risk gate: Max open positions (1/1)" in alert_text
+        assert "Position active: WIF" in alert_text
+        assert "Will retry on next APE signal" in alert_text
+
+    @patch("main.dispatcher")
+    def test_no_alert_in_paper_mode(self, mock_dispatcher):
+        bot = FakeBot(paper_mode=True)
+
+        async def go():
+            await bot.run(make_decision())
+
+        asyncio.run(go())
+
+        bot.executor.execute_buy.assert_not_called()
+        mock_dispatcher.send_alert.assert_not_called()
+
+    @patch("main.dispatcher")
+    def test_no_alert_when_paused(self, mock_dispatcher):
+        gmgn = MagicMock()
+        gmgn.is_ready = MagicMock(return_value=True)
+        gmgn.get_sol_balance = AsyncMock(return_value=0.5)
+        bot = FakeBot(paper_mode=False, gmgn_cli=gmgn)
+        bot._live_paused = True
+
+        async def go():
+            await bot.run(make_decision())
+
+        asyncio.run(go())
+
+        bot.executor.execute_buy.assert_not_called()
+        # Paused → no spam alert
+        mock_dispatcher.send_alert.assert_not_called()
+
+    @patch("main.dispatcher")
+    def test_watch_verdict_skips_post_alert(self, mock_dispatcher):
+        gmgn = MagicMock()
+        gmgn.is_ready = MagicMock(return_value=True)
+        gmgn.get_sol_balance = AsyncMock(return_value=0.5)
+        bot = FakeBot(paper_mode=False, gmgn_cli=gmgn)
+
+        async def go():
+            await bot.run(make_decision(verdict=Verdict.WATCH))
+
+        asyncio.run(go())
+
+        # WATCH never attempts buy
+        bot.executor.execute_buy.assert_not_called()
+        # No post-exec alert (WATCH pre-alert is in _process_token, not here)
+        mock_dispatcher.send_alert.assert_not_called()
+
+    @patch("main.dispatcher")
+    def test_blocked_alert_includes_active_position_context(self, mock_dispatcher):
+        """When risk gate fails due to max positions, show WHICH token is blocking."""
+        gmgn = MagicMock()
+        gmgn.is_ready = MagicMock(return_value=True)
+        gmgn.get_sol_balance = AsyncMock(return_value=0.5)
+        rm = MagicMock()
+        rm.can_trade = MagicMock(return_value=(False, "Max open positions (1/1)"))
+        rm.get_position_size = MagicMock(return_value=0.1)
+        bot = FakeBot(paper_mode=False, gmgn_cli=gmgn, risk_manager=rm)
+        # No active position (edge case: race between position close and check)
+        bot.position_manager.get_open_positions = AsyncMock(return_value=[])
+
+        async def go():
+            await bot.run(make_decision())
+
+        asyncio.run(go())
+
+        alert_text = mock_dispatcher.send_alert.call_args[0][0]
+        assert "❌ BUY BLOCKED" in alert_text
+        assert "Risk gate: Max open positions (1/1)" in alert_text
+        # No "Position active" line when no active position
+        assert "Position active:" not in alert_text
