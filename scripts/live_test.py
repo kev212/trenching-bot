@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone E2E test: SOL → USDC → SOL round-trip via GMGN CLI.
+"""Standalone E2E test: SOL -> USDC -> SOL round-trip via GMGN CLI.
 
 Requires gmgn-cli (https://github.com/GMGNAI/gmgn-skills):
   sudo npm install -g gmgn-cli
@@ -27,7 +27,6 @@ load_dotenv(env_path)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.gmgn_cli import GMGNCli, SOL_MINT, USDC_MINT
-from core.wallet import Wallet
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,26 +38,12 @@ RESERVE_FLOOR_SOL = 0.01
 
 
 async def run_test(dry_run: bool = False, amount_sol: float = 0.001):
-    api_key = os.environ.get("GMGN_API_KEY", "")
-    wallet_pubkey = os.environ.get("WALLET_PUBKEY", "")
-    helius_key = os.environ.get("HELIUS_API_KEY", "")
-
-    if not all([api_key, wallet_pubkey, helius_key]):
-        logger.error(
-            "Missing env vars. Required: "
-            "GMGN_API_KEY, WALLET_PUBKEY, HELIUS_API_KEY"
-        )
-        return 1
+    shutil_which = __import__("shutil").which
 
     if not shutil_which("gmgn-cli"):
         logger.error("gmgn-cli not installed. Run: sudo npm install -g gmgn-cli")
         return 1
 
-    wallet = Wallet(
-        paper=False,
-        private_key_b58=os.environ.get("WALLET_PRIVATE_KEY", ""),
-        helius_api_key=helius_key,
-    )
     cli = GMGNCli()
 
     if not cli.is_ready():
@@ -68,14 +53,13 @@ async def run_test(dry_run: bool = False, amount_sol: float = 0.001):
         )
         return 1
 
-    logger.info("=" * 50)
-    logger.info("LIVE TEST: SOL → USDC → SOL")
-    logger.info(f"Wallet: {wallet_pubkey[:12]}...")
-    logger.info(f"Amount: {amount_sol} SOL")
-    logger.info(f"Dry-run: {dry_run}")
-    logger.info("=" * 50)
+    wallet_addr = await cli.get_wallet_address("sol")
+    if not wallet_addr:
+        logger.error("Failed to get GMGN wallet address")
+        return 1
+    logger.info(f"GMGN wallet: {wallet_addr[:12]}...")
 
-    balance_before = await wallet.get_sol_balance()
+    balance_before = await cli.get_sol_balance()
     logger.info(f"SOL balance before: {balance_before:.6f}")
 
     if balance_before < amount_sol + RESERVE_FLOOR_SOL:
@@ -85,29 +69,36 @@ async def run_test(dry_run: bool = False, amount_sol: float = 0.001):
         )
         return 1
 
+    logger.info("=" * 50)
+    logger.info("LIVE TEST: SOL -> USDC -> SOL")
+    logger.info(f"Wallet: {wallet_addr[:12]}...")
+    logger.info(f"Amount: {amount_sol} SOL")
+    logger.info(f"Dry-run: {dry_run}")
+    logger.info("=" * 50)
+
     if dry_run:
-        logger.info("[DRY-RUN] Get quote: SOL → USDC...")
+        logger.info("[DRY-RUN] Get quote: SOL -> USDC...")
         quote = await cli.quote(
             chain="sol",
-            from_addr=wallet_pubkey,
+            from_addr=wallet_addr,
             input_token=SOL_MINT,
             output_token=USDC_MINT,
             amount=int(amount_sol * 1e9),
             slippage=30,
         )
         if quote:
-            logger.info(f"[DRY-RUN] Quote: {quote}")
+            logger.info(f"[DRY-RUN] Quote: OK (out={quote.get('output_amount','?')})")
         else:
             logger.warning("[DRY-RUN] Quote failed (check API key + IP whitelist)")
 
         logger.info("[DRY-RUN] All checks passed. Ready for live test.")
         return 0
 
-    # Step 1: SOL → USDC
-    logger.info(f"\n--- Step 1: SOL → USDC ({amount_sol} SOL) ---")
+    # Step 1: SOL -> USDC
+    logger.info(f"\n--- Step 1: SOL -> USDC ({amount_sol} SOL) ---")
     result1 = await cli.swap(
         chain="sol",
-        from_addr=wallet_pubkey,
+        from_addr=wallet_addr,
         input_token=SOL_MINT,
         output_token=USDC_MINT,
         amount=int(amount_sol * 1e9),
@@ -136,12 +127,12 @@ async def run_test(dry_run: bool = False, amount_sol: float = 0.001):
         logger.error("Step 1: no USDC received")
         return 1
 
-    # Step 2: USDC → SOL
-    logger.info(f"\n--- Step 2: USDC → SOL ({usdc_received:.6f} USDC) ---")
+    # Step 2: USDC -> SOL
+    logger.info(f"\n--- Step 2: USDC -> SOL ({usdc_received:.6f} USDC) ---")
     usdc_lamports = int(usdc_received * (10 ** output_decimals))
     result2 = await cli.swap(
         chain="sol",
-        from_addr=wallet_pubkey,
+        from_addr=wallet_addr,
         input_token=USDC_MINT,
         output_token=SOL_MINT,
         amount=usdc_lamports,
@@ -165,7 +156,7 @@ async def run_test(dry_run: bool = False, amount_sol: float = 0.001):
     sol_received = sol_received_raw / 1e9
 
     # Summary
-    balance_after = await wallet.get_sol_balance()
+    balance_after = await cli.get_sol_balance()
     fee_estimate = amount_sol - sol_received
 
     logger.info("=" * 50)
@@ -185,11 +176,6 @@ async def run_test(dry_run: bool = False, amount_sol: float = 0.001):
         logger.info("Round-trip successful! Fees within normal range.")
 
     return 0
-
-
-def shutil_which(name: str) -> bool:
-    import shutil
-    return shutil.which(name) is not None
 
 
 def main():

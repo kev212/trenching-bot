@@ -192,6 +192,34 @@ class GMGNCli:
         state = status.get("status", "")
         return state in ("confirmed", "failed", "expired")
 
+    async def portfolio_info(self) -> dict:
+        """Get wallets and balances bound to the API key."""
+        return await self._run(["portfolio", "info"])
+
+    async def get_sol_balance(self) -> float:
+        """Get SOL balance of the GMGN hosted Solana wallet. Returns 0.0 on error."""
+        info = await self.portfolio_info()
+        try:
+            for w in info.get("wallets", []):
+                if w.get("chain") == "sol":
+                    for b in w.get("balances", []):
+                        if b.get("symbol") == "SOL":
+                            return float(b["balance"])
+        except (KeyError, ValueError, TypeError) as e:
+            logger.warning(f"[GMGN-CLI] failed to parse SOL balance: {e}")
+        return 0.0
+
+    async def get_wallet_address(self, chain: str = "sol") -> str:
+        """Get the GMGN hosted wallet address for the given chain."""
+        info = await self.portfolio_info()
+        try:
+            for w in info.get("wallets", []):
+                if w.get("chain") == chain:
+                    return w["address"]
+        except (KeyError, ValueError, TypeError) as e:
+            logger.warning(f"[GMGN-CLI] failed to get wallet address for {chain}: {e}")
+        return ""
+
     async def gas_price(self, chain: str) -> dict:
         """Get recommended gas price tiers (API-key-only, no signed auth)."""
         return await self._run(["gas-price", "--chain", chain])
