@@ -552,6 +552,7 @@ class TrenchingBot:
                 requeued = 0
                 skipped = 0
                 dead_letter = 0
+                processed_dedup = 0  # FIX B3: count silently-removed tokens
 
                 qsize = self.queue.qsize()
                 if qsize >= 300:
@@ -593,6 +594,7 @@ class TrenchingBot:
                         local_requeued = 0
                         local_skipped = 0
                         local_dead = 0
+                        local_processed = 0  # FIX B3: count deduped tokens
                         expired_local = []
                         for addr, info in items:
                             if info["retries"] >= MAX_RETRIES:
@@ -610,6 +612,11 @@ class TrenchingBot:
                                 continue
                             if addr in processed_snapshot:
                                 expired_local.append(addr)
+                                # FIX B3: count silent dedup so [RETRY-SCHED]
+                                # log reflects all removals. Previously these
+                                # tokens were popped from retry_queue without
+                                # any counter increment — invisible in logs.
+                                local_processed += 1
                                 continue
                             delay = get_retry_delay(info["retries"])
                             if now - info["timestamp"] < delay:
@@ -656,18 +663,33 @@ class TrenchingBot:
                         requeued += local_requeued
                         skipped += local_skipped
                         dead_letter += local_dead
+                        processed_dedup += local_processed  # FIX B3
                         # If we got less than a full budget, queue is done
                         # (or nearly so) for this scan.
                         if len(items) < lock_budget:
                             remaining = False
 
-                if requeued > 0 or dead_letter > 0 or skipped > 0:
+                if requeued > 0 or dead_letter > 0 or skipped > 0 or processed_dedup > 0 or cleanup_removed > 0:
+                    # FIX B1: re-read qsize AFTER re-queues so log shows the
+                    # true post-scan queue state instead of the stale start-of-
+                    # scan snapshot. Previously `queue={qsize}` always showed
+                    # the value from line 556 (start), which was usually 0 even
+                    # when we just re-queued 2 tokens. Now logs delta format
+                    # `queue:0→2` so the user can see both pre and post values.
+                    qsize_end = self.queue.qsize()
                     logger.info(
                         f"[RETRY-SCHED] requeued={requeued} skipped={skipped} "
-                        f"dead={dead_letter} queue={qsize}"
+                        f"dead={dead_letter} deduped={processed_dedup} "
+                        f"cleanup={cleanup_removed} queue:{qsize}→{qsize_end}"
                     )
 
-                await self.state.cleanup_retry_queue()
+                # FIX B2: capture count returned by cleanup_retry_queue so
+                # the [RETRY-SCHED] log reflects total removals (scheduler-
+                # loop dead-letter + cleanup-stale). Previously cleanup was
+                # completely silent — no count, no log. Note: cleanup only
+                # triggers after tokens sit > 10min stale (max_stale) or hit
+                # permanent failure, so cleanup_removed is usually 0.
+                cleanup_removed = await self.state.cleanup_retry_queue()
                 await asyncio.sleep(scan_interval)
 
             except asyncio.CancelledError:
@@ -729,9 +751,19 @@ class TrenchingBot:
 
                     processed += 1
                     retry_count = (await self.state.get_retry_info(addr)).get("retries", 0)
+                    # FIX A: align worker log with _process_token log [RETRY N/4].
+                    # Previously worker showed "(retry_count/3)" which counted
+                    # retries-done-so-far against MAX_RETRIES — different semantics
+                    # from _process_token's "RETRY N/4" which counts current
+                    # attempt against MAX_RETRIES+1=4. For SWALL on 3rd attempt
+                    # the two lines showed "(1/3)" vs "RETRY 3/4" — both correct
+                    # under their own formula but inconsistent to a reader.
+                    # Now both use attempt = (retries+1)+(1 if is_retry else 0)
+                    # and denominator MAX_RETRIES+1=4.
+                    attempt = (retry_count + 1) + (1 if is_retry else 0)
                     logger.info(
                         f"[W{worker_id}] #{processed} {symbol} ({addr[:8]}...) "
-                        f"retry:{is_retry} ({retry_count}/3) q:{self.queue.qsize()}"
+                        f"attempt:{attempt}/{MAX_RETRIES + 1} q:{self.queue.qsize()}"
                     )
 
                     self._update_activity()  # watchdog heartbeat

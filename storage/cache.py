@@ -1,7 +1,10 @@
 import time
 import asyncio
+import logging
 from collections import OrderedDict
 from typing import Optional
+
+logger = logging.getLogger("cache")
 
 
 class LRUCache:
@@ -204,13 +207,19 @@ class SharedState:
             if address in self.retry_queue:
                 self.retry_queue[address]["timestamp"] = time.time() + delay
 
-    async def cleanup_retry_queue(self):
+    async def cleanup_retry_queue(self) -> int:
         """Clean up stale retry entries. Holds lock briefly — expensive checks run outside lock.
 
         Bug #14 fix: Previously called is_permanent_failure() while holding
         self._lock, which could block all workers for seconds if the queue
         had thousands of entries. Now we snapshot the cheap checks under lock,
         process expensive is_permanent_failure() outside, then delete under lock.
+
+        FIX B2: now returns the count of removed entries so the caller
+        (retry_scheduler) can include it in the [RETRY-SCHED] log. Previously
+        cleanup was completely silent — no count, no log — so the user had
+        no visibility into tokens force-removed by age > 10min or permanent
+        failure. Also emits [CLEANUP] log when removals > 0.
         """
         from analysis.filters import is_permanent_failure
         # Phase 1: snapshot cheap checks under lock (timer-based expiry)
@@ -239,6 +248,13 @@ class SharedState:
                 self.retry_queue.pop(k, None)
             for k in expired_by_failure:
                 self.retry_queue.pop(k, None)
+        removed = len(expired_by_age) + len(expired_by_failure)
+        if removed > 0:
+            logger.info(
+                f"[CLEANUP] removed={removed} stale retry entries "
+                f"(age={len(expired_by_age)} permanent={len(expired_by_failure)})"
+            )
+        return removed
 
     async def add_active_call(self, address: str, call):
         async with self._lock:
