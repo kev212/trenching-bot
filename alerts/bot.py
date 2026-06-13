@@ -772,6 +772,10 @@ async def bot_handler(state, db):
 
     try:
         from telegram import BotCommand
+        # Keep this list in sync with add_handler(CommandHandler(...)) above.
+        # Telegram caches the command menu, so any new handler added without
+        # also adding it here will not appear in the / autocomplete menu
+        # until the next bot restart + a few minutes of cache propagation.
         commands = [
             BotCommand("start", "Show welcome + commands"),
             BotCommand("help", "Show command list"),
@@ -786,6 +790,10 @@ async def bot_handler(state, db):
             BotCommand("recent", "Last 10 calls"),
             BotCommand("best", "Best performing tokens"),
             BotCommand("ping", "Check bot alive"),
+            BotCommand("live_status", "Live trading status"),
+            BotCommand("live_pause", "Pause live trading"),
+            BotCommand("live_resume", "Resume live trading"),
+            BotCommand("close_all", "Close all live positions"),
         ]
         await _bot_app.bot.set_my_commands(commands)
         logger.info(f"[BOT] Registered {len(commands)} commands (use / to see)")
