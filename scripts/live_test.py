@@ -20,6 +20,13 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env file from project root
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(env_path)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
