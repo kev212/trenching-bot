@@ -675,64 +675,90 @@ async def bot_handler(state, db):
         else:
             webhook_url = f"http://127.0.0.1:{port}/telegram/webhook"
 
-    logger.warning(f"WEBHOOK URL: {webhook_url}")
+    # Detect polling mode: use when no public https URL is reachable.
+    # Webhook requires https + public domain (Telegram servers must reach us).
+    # Localhost http:// URLs are NOT reachable, so use polling.
+    use_polling = (
+        webhook_url.startswith("http://")
+        or "127.0.0.1" in webhook_url
+        or "localhost" in webhook_url
+        or os.environ.get("TELEGRAM_POLLING", "").lower() == "true"
+    )
 
-    async def handle_webhook(request: web.Request):
+    runner = None  # for cleanup in finally
+    if use_polling:
+        logger.warning(
+            f"TELEGRAM POLLING MODE (webhook URL '{webhook_url}' not usable from "
+            f"Telegram servers). No port 8080 needed."
+        )
         try:
-            data = await request.json()
-            update = Update.de_json(data, _bot_app.bot)
-            await _bot_app.process_update(update)
-        except Exception as e:
-            logger.error(f"Webhook error: {e}")
-        return web.Response(text="ok")
-
-    async def health_check(request: web.Request):
-        return web.Response(text="ok")
-
-    app = web.Application()
-    app.router.add_post("/telegram/webhook", handle_webhook)
-    app.router.add_get("/health", health_check)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
-    logger.info(f"Webhook server started on port {port}")
-
-    for attempt in range(5):
-        try:
-            result = await _bot_app.bot.set_webhook(
-                url=webhook_url,
+            await _bot_app.updater.start_polling(
                 drop_pending_updates=True,
                 allowed_updates=["message"],
             )
-            if result:
-                logger.info(f"Webhook registered: {webhook_url}")
-                break
-            else:
-                logger.warning(f"Webhook set failed (attempt {attempt+1}/5)")
+            logger.info("Telegram polling bot ready")
         except Exception as e:
-            logger.warning(f"Webhook set error (attempt {attempt+1}/5): {e}")
-        await asyncio.sleep(2)
+            logger.error(f"Failed to start Telegram polling: {e}")
+            raise
     else:
-        # D14 fix: if all 5 attempts failed, alert the user via Telegram
-        # (best-effort, swallow any error) and raise so the watcher restarts
-        # the bot. Previously the failure was silently logged — leaving the
-        # user with no idea their commands weren't working.
-        try:
-            from alerts.dispatcher import dispatcher
-            await dispatcher.send_message(
-                f"🚨 BOT STARTUP FAILED\n\n"
-                f"Could not register Telegram webhook at {webhook_url} "
-                f"after 5 attempts. Bot is running but /commands will not work.\n"
-                f"Check RAILWAY_PUBLIC_DOMAIN env var + Telegram bot permissions."
-            )
-        except Exception:
-            pass
-        raise RuntimeError(f"Webhook set failed after 5 attempts: {webhook_url}")
+        logger.warning(f"WEBHOOK URL: {webhook_url}")
 
-    logger.info("Telegram webhook bot ready")
+        async def handle_webhook(request: web.Request):
+            try:
+                data = await request.json()
+                update = Update.de_json(data, _bot_app.bot)
+                await _bot_app.process_update(update)
+            except Exception as e:
+                logger.error(f"Webhook error: {e}")
+            return web.Response(text="ok")
+
+        async def health_check(request: web.Request):
+            return web.Response(text="ok")
+
+        app = web.Application()
+        app.router.add_post("/telegram/webhook", handle_webhook)
+        app.router.add_get("/health", health_check)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+
+        logger.info(f"Webhook server started on port {port}")
+
+        for attempt in range(5):
+            try:
+                result = await _bot_app.bot.set_webhook(
+                    url=webhook_url,
+                    drop_pending_updates=True,
+                    allowed_updates=["message"],
+                )
+                if result:
+                    logger.info(f"Webhook registered: {webhook_url}")
+                    break
+                else:
+                    logger.warning(f"Webhook set failed (attempt {attempt+1}/5)")
+            except Exception as e:
+                logger.warning(f"Webhook set error (attempt {attempt+1}/5): {e}")
+            await asyncio.sleep(2)
+        else:
+            # D14 fix: if all 5 attempts failed, alert the user via Telegram
+            # (best-effort, swallow any error) and raise so the watcher restarts
+            # the bot. Previously the failure was silently logged — leaving the
+            # user with no idea their commands weren't working.
+            try:
+                from alerts.dispatcher import dispatcher
+                await dispatcher.send_message(
+                    f"🚨 BOT STARTUP FAILED\n\n"
+                    f"Could not register Telegram webhook at {webhook_url} "
+                    f"after 5 attempts. Bot is running but /commands will not work.\n"
+                    f"Check RAILWAY_PUBLIC_DOMAIN env var + Telegram bot permissions."
+                )
+            except Exception:
+                pass
+            raise RuntimeError(f"Webhook set failed after 5 attempts: {webhook_url}")
+
+        logger.info("Telegram webhook bot ready")
 
     try:
         from telegram import BotCommand
@@ -767,10 +793,11 @@ async def bot_handler(state, db):
                 await _bot_app.shutdown()
         except Exception as e:
             logger.warning(f"[BOT] shutdown error: {e}")
-        try:
-            await runner.cleanup()
-        except Exception as e:
-            logger.warning(f"[BOT] runner cleanup error: {e}")
+        if runner is not None:
+            try:
+                await runner.cleanup()
+            except Exception as e:
+                logger.warning(f"[BOT] runner cleanup error: {e}")
         # A3 fix: clear module-level ref so a future restart (via _run_forever)
         # doesn't see stale state and try to re-use a dead Application.
         _bot_app = None
