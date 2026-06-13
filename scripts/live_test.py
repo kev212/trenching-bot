@@ -63,11 +63,14 @@ async def run_test(dry_run: bool = False, amount_sol: float = 0.001):
         private_key_b58=wallet_b58,
         helius_api_key=helius_key,
     )
+
+    # Try direct connection first (no proxy) since the proxy gets Cloudflare.
+    # If GMGN blocks the VPS IP, add proxy back.
     gmgn_swap = GMGNSwapClient(
         api_key=api_key,
         private_key_pem=gmgn_pem,
         wallet_pubkey=wallet_pubkey,
-        proxy=proxy,
+        proxy="",  # direct connection
     )
     await gmgn_swap.start()
 

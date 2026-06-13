@@ -20,6 +20,7 @@ logger = logging.getLogger("gmgn_swap")
 
 SWAP_BASE_URL = "https://openapi.gmgn.ai"
 SWAP_TIMEOUT = 30
+SWAP_CLOUDFLARE_BACKOFF = 600  # 10 min backoff on Cloudflare
 
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -55,6 +56,7 @@ class GMGNSwapClient:
         self._session: Optional[aiohttp.ClientSession] = None
         self._session_lock = self._make_lock()
         self._private_key = None
+        self._backoff_until: float = 0.0
         if private_key_pem:
             self._private_key = self._load_ed25519(private_key_pem)
 
@@ -138,6 +140,22 @@ class GMGNSwapClient:
                 self._session = aiohttp.ClientSession(**kwargs)
             return self._session
 
+    def _in_backoff(self) -> bool:
+        return time.time() < self._backoff_until
+
+    def _is_cloudflare_response(self, text: str) -> bool:
+        return (
+            "challenge-platform" in text
+            or "cf_chl" in text
+            or "<title>Just a moment" in text
+        )
+
+    def _set_cloudflare_backoff(self):
+        self._backoff_until = time.time() + SWAP_CLOUDFLARE_BACKOFF
+        logger.warning(
+            f"[GMGN-SWAP] Cloudflare backoff for {SWAP_CLOUDFLARE_BACKOFF}s"
+        )
+
     async def swap(
         self,
         token_in: str,
@@ -158,6 +176,10 @@ class GMGNSwapClient:
         Returns:
             Dict with keys 'tx_id', 'out_amount', 'fee' on success, or {}.
         """
+        if self._in_backoff():
+            logger.warning("[GMGN-SWAP] swap skipped (Cloudflare backoff)")
+            return {}
+
         if not self.is_ready():
             logger.error("[GMGN-SWAP] cannot swap: Ed25519 key not loaded")
             return {}
@@ -186,7 +208,9 @@ class GMGNSwapClient:
             ) as resp:
                 if resp.status != 200:
                     text = (await resp.text() or "")[:500]
-                    logger.warning(f"[GMGN-SWAP] HTTP {resp.status}: {text}")
+                    logger.warning(f"[GMGN-SWAP] HTTP {resp.status}: {text[:200]}")
+                    if self._is_cloudflare_response(text):
+                        self._set_cloudflare_backoff()
                     return {}
                 data = await resp.json()
                 if data.get("code") != 0:
@@ -221,6 +245,9 @@ class GMGNSwapClient:
 
     async def get_swap_status(self, tx_id: str, chain: str = "sol") -> dict:
         """Check swap status by transaction ID."""
+        if self._in_backoff():
+            return {}
+
         session = await self._get_session()
         try:
             async with session.get(
@@ -229,6 +256,9 @@ class GMGNSwapClient:
                 headers={"X-APIKEY": self.api_key},
             ) as resp:
                 if resp.status != 200:
+                    text = (await resp.text() or "")[:500]
+                    if self._is_cloudflare_response(text):
+                        self._set_cloudflare_backoff()
                     return {}
                 data = await resp.json()
                 if data.get("code") != 0:
@@ -245,6 +275,9 @@ class GMGNSwapClient:
         Useful for estimating output before committing to a trade.
         Returns dict with 'out_amount' and 'price_impact_pct' on success.
         """
+        if self._in_backoff():
+            return {}
+
         body = {
             "chain": chain,
             "from": token_in,
@@ -267,6 +300,9 @@ class GMGNSwapClient:
                 headers=headers,
             ) as resp:
                 if resp.status != 200:
+                    text = (await resp.text() or "")[:500]
+                    if self._is_cloudflare_response(text):
+                        self._set_cloudflare_backoff()
                     return {}
                 data = await resp.json()
                 if data.get("code") != 0:
