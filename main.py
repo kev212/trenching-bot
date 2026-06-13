@@ -745,6 +745,7 @@ class TrenchingBot:
         return True
 
     async def _process_token(self, address: str, token_info: dict):
+        is_retry = bool(token_info.get("_retry"))
         symbol = (token_info.get("symbol") or token_info.get("name", "?")) or "?"
         # Rate limiting is handled internally by GMGNClient._get().
         # Stagger 0.3s prevents GMGN per-second burst (4 parallel calls).
