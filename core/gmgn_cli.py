@@ -196,6 +196,29 @@ class GMGNCli:
         """Get wallets and balances bound to the API key."""
         return await self._run(["portfolio", "info"])
 
+    async def list_strategies(self, chain: str, from_addr: str,
+                                base_token: str = "",
+                                group_tag: str = "STMix",
+                                strategy_type: str = "open") -> dict:
+        """List strategy orders for the wallet. Used to monitor TP/SL.
+
+        chain: sol/bsc/base/eth
+        from_addr: wallet address (must match API key binding)
+        base_token: filter by token address (optional)
+        group_tag: LimitOrder / STMix (default STMix — swap-attached strategies)
+        strategy_type: open / history
+        """
+        args = [
+            "order", "strategy", "list",
+            "--chain", chain,
+            "--from", from_addr,
+            "--group-tag", group_tag,
+            "--type", strategy_type,
+        ]
+        if base_token:
+            args.extend(["--base-token", base_token])
+        return await self._run(args)
+
     async def get_sol_balance(self) -> float:
         """Get SOL balance of the GMGN hosted Solana wallet. Returns 0.0 on error."""
         info = await self.portfolio_info()

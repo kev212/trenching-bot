@@ -96,7 +96,7 @@ class TradeExecutor:
         sell_ratio: % of current hold_amount to sell
         sell_ratio_type: hold_amount (handles partial sells naturally)
         """
-        tp1_mult = int(self.config.get("win_target_multiplier", 1.3) * 100)
+        tp1_mult = int(self.config.get("tp1_multiplier", 1.3) * 100)
         tp1_pct = int(self.config.get("tp1_sell_pct", 80))
         tp2_mult = int(self.config.get("tp2_multiplier", 2.0) * 100)
         tp2_pct = int(self.config.get("tp2_sell_pct", 100))
@@ -159,6 +159,8 @@ class TradeExecutor:
             amount=amount_lamports,
             slippage=max(1, self.slippage_bps // 100),
             condition_orders=condition_orders_json,
+            priority_fee=0.0001,
+            tip_fee=0.00001,
         )
         if not result or not result.get("order_id"):
             logger.warning(

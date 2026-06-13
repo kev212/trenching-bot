@@ -21,6 +21,7 @@ from llm.pioneer_client import PioneerLLMClient
 from llm.prompts import DECISION_SYSTEM, DECISION_USER, SOCIAL_ANALYSIS_SYSTEM, SOCIAL_ANALYSIS_USER
 from llm.parser import parse_decision
 from tracking.price_monitor import price_monitor
+from tracking.strategy_poller import strategy_poller
 from tracking.hourly_recap import hourly_recap
 from learning.daily_optimizer import daily_optimizer
 from learning.revert_monitor import revert_monitor
@@ -280,6 +281,10 @@ class TrenchingBot:
             **{f"worker_{i}": self._token_worker(i)
                for i in range(settings.min_workers)},
             "price_monitor": self._run_forever("price_monitor", price_monitor),
+            **({"strategy_poller": self._run_forever(
+                "strategy_poller", strategy_poller,
+                self.db, self.position_manager, self.gmgn_cli,
+            )} if not self.paper_mode and self.gmgn_cli else {}),
             "hourly_recap": self._run_forever("hourly_recap", hourly_recap),
             "daily_optimizer": self._run_forever("daily_optimizer", daily_optimizer),
             "revert_monitor": self._run_forever("revert_monitor", revert_monitor),

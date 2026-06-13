@@ -246,6 +246,31 @@ class TestGMGNCliGasPrice:
         assert result["gas_price"] == 1000
 
 
+class TestGMGNCliListStrategies:
+    @patch("core.gmgn_cli.GMGNCli._run")
+    async def test_list_strategies(self, mock_run, patch_env_file):
+        mock_run.return_value = {"list": [], "total": 0}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        await cli.list_strategies(
+            chain="sol", from_addr="WALLET", base_token="TOKEN",
+        )
+        args = mock_run.call_args[0][0]
+        assert "strategy" in args
+        assert "list" in args
+        assert "--group-tag" in args
+        idx = args.index("--group-tag")
+        assert args[idx + 1] == "STMix"
+        assert "--base-token" in args
+
+    @patch("core.gmgn_cli.GMGNCli._run")
+    async def test_list_strategies_no_base_token(self, mock_run, patch_env_file):
+        mock_run.return_value = {"list": []}
+        cli = GMGNCli(cli_path="gmgn-cli", config_dir=patch_env_file)
+        await cli.list_strategies(chain="sol", from_addr="WALLET")
+        args = mock_run.call_args[0][0]
+        assert "--base-token" not in args
+
+
 class TestGMGNCliRun:
     @patch("core.gmgn_cli.asyncio.create_subprocess_exec")
     async def test_run_returns_parsed_json(self, mock_exec, patch_env_file):
