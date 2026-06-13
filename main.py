@@ -149,7 +149,8 @@ class TrenchingBot:
         # Trading components (Phase 1 paper mode)
         self.trading_config = load_trading_config()
         self.risk_rules = load_risk_rules()
-        self.paper_mode = self.trading_config.get("paper_mode", True)
+        # paper_mode from Settings (auto-reads PAPER_MODE env var). trading.json paper_mode kept for backward compat only.
+        self.paper_mode = settings.paper_mode if hasattr(settings, "paper_mode") else self.trading_config.get("paper_mode", True)
         self.wallet = Wallet(
             paper=self.paper_mode,
             starting_balance_sol=settings.paper_starting_balance_sol,
