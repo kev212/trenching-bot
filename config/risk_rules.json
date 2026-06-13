@@ -1,6 +1,6 @@
 {
   "min_wallet_reserve_sol": 0.1,
-  "max_open_positions": 5,
+  "max_open_positions": 1,
   "max_daily_trades": 20,
   "max_single_position_sol": 0.5,
   "min_liquidity_usd": 5000,

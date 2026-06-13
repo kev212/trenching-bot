@@ -1,7 +1,7 @@
 {
   "paper_mode": true,
   "rpc_provider": "helius",
-  "position_size_sol": 0.05,
+  "position_size_sol": 0.1,
   "sizing_mode": "fixed",
   "position_size_pct": 0.02,
   "min_position_sol": 0.02,
