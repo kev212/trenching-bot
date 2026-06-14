@@ -121,7 +121,7 @@ def _filter_min_volume_5m(token: TokenData, params: dict) -> dict:
 
     Catches dead/dumped tokens. volume_5m = 0 (GMGN missing) → fail safe.
     """
-    min_vol = params.get("min_volume_usd", 100000)
+    min_vol = params.get("min_volume_usd", 50000)
     vol = token.volume_5m
     passed = vol >= min_vol
     return {

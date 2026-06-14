@@ -58,16 +58,16 @@
     },
     "min_volume_5m": {
       "enabled": true,
-      "min_volume_usd": 100000,
+      "min_volume_usd": 50000,
       "weight": 0.0,
-      "llm_hint": "5min volume < $100K = no recent activity, likely dead/dumped."
+      "llm_hint": "5min volume < $50K = no recent activity, likely dead/dumped."
     },
     "token_age": {
       "enabled": true,
-      "max_pre_migrate_minutes": 5,
-      "max_post_migrate_minutes": 5,
+      "max_pre_migrate_minutes": 10,
+      "max_post_migrate_minutes": 10,
       "weight": 0.0,
-      "llm_hint": "Pre/post-migrate max age 5min. Only very fresh tokens. Note: pre-check uses looser 120/45 to allow migration race recovery via retry."
+      "llm_hint": "Pre/post-migrate max age 10min. Only very fresh tokens. Note: pre-check uses looser 120/45 to allow migration race recovery via retry."
     }
   }
 }
