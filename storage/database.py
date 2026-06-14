@@ -767,12 +767,20 @@ class Database:
             return getattr(position, key, default)
         async with self._write_lock:
             exit_time = _g("exit_time")
+            # FIX C4: include 5 strategy fields (strategy_order_id, tp1_filled,
+            # tp2_filled, trailing_filled, sl_filled) in the UPDATE. Previously
+            # the SQL omitted them, so strategy_poller's in-memory updates
+            # (`pos["tp1_filled"] = 1` etc.) were never persisted. After bot
+            # restart, _row_to_position would return the OLD values (always 0),
+            # making the strategy tracking loop non-functional across restarts.
             await self.db.execute(
                 """UPDATE positions SET
                 peak_price = ?, current_amount_token = ?, total_sold_sol = ?, total_sold_usd = ?,
                 status = ?, exit_tx_sig = ?, exit_price = ?, exit_time = ?,
                 pnl_sol = ?, pnl_usd = ?, pnl_pct = ?, hold_seconds = ?, exit_reason = ?,
-                sol_usd_at_exit = ?
+                sol_usd_at_exit = ?,
+                strategy_order_id = ?, tp1_filled = ?, tp2_filled = ?,
+                trailing_filled = ?, sl_filled = ?
                 WHERE id = ?""",
                 (
                     _g("peak_price", 0), _g("current_amount_token", 0),
@@ -784,6 +792,12 @@ class Database:
                     _g("pnl_pct", 0), _g("hold_seconds", 0),
                     _g("exit_reason", ""),
                     _g("sol_usd_at_exit", 0),
+                    # FIX C4 (cont): 5 strategy fields
+                    _g("strategy_order_id", ""),
+                    int(_g("tp1_filled", 0) or 0),
+                    int(_g("tp2_filled", 0) or 0),
+                    int(_g("trailing_filled", 0) or 0),
+                    int(_g("sl_filled", 0) or 0),
                     _g("id"),
                 ),
             )
@@ -880,6 +894,20 @@ class Database:
 
     def _row_to_position(self, row) -> dict:
         from datetime import datetime
+        # FIX C5: extract 5 strategy fields (strategy_order_id, tp1_filled,
+        # tp2_filled, trailing_filled, sl_filled) from the DB row. Previously
+        # the dict didn't include these, so callers got `pos.get("tp1_filled",
+        # 0)` always returning 0. This meant:
+        #  - strategy_poller couldn't detect prior TP1 fills across restarts
+        #  - /close_all couldn't skip positions with active on-chain strategies
+        # The columns already exist in the schema (line 213-217) and migration
+        # list — just missing from this reader.
+        def _col(name, default=None):
+            try:
+                val = row[name]
+                return val if val is not None else default
+            except (KeyError, IndexError):
+                return default
         return {
             "id": row["id"],
             "token_address": row["token_address"],
@@ -908,6 +936,12 @@ class Database:
             "paper": bool(row["paper"]),
             "sol_usd_at_entry": row["sol_usd_at_entry"] if "sol_usd_at_entry" in row.keys() and row["sol_usd_at_entry"] is not None else 0.0,
             "sol_usd_at_exit": row["sol_usd_at_exit"] if "sol_usd_at_exit" in row.keys() and row["sol_usd_at_exit"] is not None else 0.0,
+            # FIX C5 (cont): 5 strategy fields
+            "strategy_order_id": _col("strategy_order_id", ""),
+            "tp1_filled": int(_col("tp1_filled", 0) or 0),
+            "tp2_filled": int(_col("tp2_filled", 0) or 0),
+            "trailing_filled": int(_col("trailing_filled", 0) or 0),
+            "sl_filled": int(_col("sl_filled", 0) or 0),
         }
 
     def _row_to_call(self, row) -> CallRecord:

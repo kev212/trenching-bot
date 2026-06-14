@@ -377,7 +377,12 @@ def test_cleanup_removes_exhausted():
         now = time_module.time()
         state.retry_queue["abc"] = {"timestamp": now, "retries": 3, "symbol": "T"}
         state.retry_queue["def"] = {"timestamp": now, "retries": 2, "symbol": "T2"}
-        await state.cleanup_retry_queue()
+        # FIX M3: assert return value matches actual removals. Previously
+        # cleanup_retry_queue returned None; now it returns the count of
+        # removed entries (used by [RETRY-SCHED] log). A bug in the count
+        # math would silently produce wrong log output.
+        removed = await state.cleanup_retry_queue()
+        assert removed == 1
         assert "abc" not in state.retry_queue
         assert "def" in state.retry_queue
     asyncio.run(go())
@@ -388,8 +393,19 @@ def test_cleanup_removes_stale():
         state = await _make_state()
         very_old = time_module.time() - 1200  # > max_stale (600)
         state.retry_queue["abc"] = {"timestamp": very_old, "retries": 0, "symbol": "T"}
-        await state.cleanup_retry_queue()
+        # FIX M3: assert return value
+        removed = await state.cleanup_retry_queue()
+        assert removed == 1
         assert "abc" not in state.retry_queue
+    asyncio.run(go())
+
+
+def test_cleanup_returns_zero_when_nothing_to_clean():
+    """FIX M3: explicit test that empty retry_queue returns 0 (not None)."""
+    async def go():
+        state = await _make_state()
+        removed = await state.cleanup_retry_queue()
+        assert removed == 0
     asyncio.run(go())
 
 

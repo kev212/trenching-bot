@@ -7,6 +7,7 @@ Also tests post-execution Telegram alerts (✅ EXECUTED / ❌ BLOCKED).
 """
 import asyncio
 import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, "/Users/khezuma/workspace/trenching")
@@ -45,11 +46,17 @@ class FakeBot:
                  executor=None, risk_manager=None, min_size=0.02, fixed_size=0.05,
                  confidence_threshold=0.60, open_positions=None):
         self.paper_mode = paper_mode
+        # FIX H3: keep self._live_paused for backward compat with older tests,
+        # but the production code now reads self.state._live_paused (FIX C1).
         self._live_paused = False
         self.gmgn_cli = gmgn_cli
         self.executor = executor or MagicMock()
         self.executor.execute_buy = AsyncMock(return_value=MagicMock(id=42))
-        self.state = MagicMock()
+        # Use a real dict-like object for state (not MagicMock) so that
+        # attribute access like state._live_paused returns a real bool,
+        # not a truthy MagicMock. Production code reads self.state._live_paused
+        # (FIX C1) and a truthy MagicMock would always block the buy gate.
+        self.state = SimpleNamespace(_live_paused=False)
         self.state.get_filter_version = AsyncMock(return_value=1)
         if risk_manager is None:
             risk_manager = MagicMock()
@@ -266,7 +273,12 @@ class TestLivePausedGate:
         gmgn.is_ready = MagicMock(return_value=True)
         gmgn.get_sol_balance = AsyncMock(return_value=0.5)
         bot = FakeBot(paper_mode=False, gmgn_cli=gmgn)
-        bot._live_paused = True
+        # FIX H3: set state._live_paused (SharedState) not bot._live_paused
+        # (TrenchingBot) to match production. main.py:_maybe_execute_live_buy
+        # now reads self.state._live_paused (FIX C1). Previously the test
+        # set bot._live_paused which only worked by accident because the
+        # production code was reading the wrong attribute too.
+        bot.state._live_paused = True
 
         async def go():
             await bot.run(make_decision())
@@ -279,7 +291,8 @@ class TestLivePausedGate:
         gmgn.is_ready = MagicMock(return_value=True)
         gmgn.get_sol_balance = AsyncMock(return_value=0.5)
         bot = FakeBot(paper_mode=False, gmgn_cli=gmgn)
-        bot._live_paused = False
+        # FIX H3: same as above — set state._live_paused to match production
+        bot.state._live_paused = False
 
         async def go():
             await bot.run(make_decision())
@@ -379,7 +392,9 @@ class TestPostExecutionAlerts:
         gmgn.is_ready = MagicMock(return_value=True)
         gmgn.get_sol_balance = AsyncMock(return_value=0.5)
         bot = FakeBot(paper_mode=False, gmgn_cli=gmgn)
-        bot._live_paused = True
+        # FIX H3: set state._live_paused (SharedState) to match production
+        # (FIX C1: production reads self.state._live_paused).
+        bot.state._live_paused = True
 
         async def go():
             await bot.run(make_decision())

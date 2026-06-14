@@ -209,6 +209,11 @@ class TrenchingBot:
             price_oracle=self.price_oracle,
             gmgn_cli=self.gmgn_cli,
         )
+        # FIX C3: expose executor on SharedState so /close_all (alerts/bot.py:548)
+        # can read `state.executor`. Previously only self.executor was set;
+        # getattr(state, "executor", None) always returned None, making
+        # /close_all reply "Live trading not initialized" forever.
+        self.state.executor = self.executor
         logger.warning(
             f"Trading: paper_mode={self.paper_mode}, "
             f"position_size={self.trading_config.get('position_size_sol')} SOL, "
@@ -580,6 +585,14 @@ class TrenchingBot:
                 # addresses per lock acquisition so other SharedState
                 # consumers (workers) don't starve while we sweep a
                 # large retry_queue.
+                # FIX H1: track visited addresses to prevent infinite loop
+                # when retry_queue has >= lock_budget items that are all
+                # skipped (delay not met, in_flight, etc.). Without this,
+                # the chunks re-process the same N oldest items every
+                # iteration and the inner while never exits (because
+                # len(items) stays == lock_budget, not less than). Now
+                # each address is processed at most once per scan.
+                visited = set()
                 remaining = True
                 while remaining:
                     async with self.state._lock:
@@ -590,8 +603,11 @@ class TrenchingBot:
                         # expired, the back 50+ wait indefinitely until the front
                         # clears. Sorting by oldest timestamp ensures fair retry
                         # distribution across all queued tokens.
+                        # FIX H1 (cont): filter out already-visited items so
+                        # each address is only acted on once per scan cycle.
                         items = sorted(
-                            self.state.retry_queue.items(),
+                            (item for item in self.state.retry_queue.items()
+                             if item[0] not in visited),
                             key=lambda x: x[1]["timestamp"],
                         )[:lock_budget]
                         if not items:
@@ -603,6 +619,13 @@ class TrenchingBot:
                         local_processed = 0  # FIX B3: count deduped tokens
                         expired_local = []
                         for addr, info in items:
+                            # FIX H1: mark as visited as soon as we consider
+                            # the address, so subsequent chunks within the
+                            # same scan don't re-process it. Even items that
+                            # are skipped (delay not met, in_flight) are
+                            # marked visited — they'll be re-evaluated in the
+                            # NEXT scan (30s later) when visited is reset.
+                            visited.add(addr)
                             if info["retries"] >= MAX_RETRIES:
                                 local_dead += 1
                                 expired_local.append(addr)
@@ -774,7 +797,9 @@ class TrenchingBot:
 
                     self._update_activity()  # watchdog heartbeat
                     try:
-                        await asyncio.wait_for(self._process_token(addr, token_info, is_retry), timeout=180.0)
+                        # FIX H2: no longer pass is_retry (signature is now
+                        # 2-arg, derives is_retry from token_info internally).
+                        await asyncio.wait_for(self._process_token(addr, token_info), timeout=180.0)
                     except asyncio.TimeoutError:
                         logger.warning(
                             f"[W{worker_id}] {symbol} ({addr[:8]}): "
@@ -821,7 +846,13 @@ class TrenchingBot:
             self.state.metrics.record_call("SKIP"); return False
         return True
 
-    async def _process_token(self, address: str, token_info: dict, is_retry: bool = False):
+    async def _process_token(self, address: str, token_info: dict):
+        # FIX H2: removed dead `is_retry` parameter. Previously the
+        # signature had `is_retry: bool = False` but it was immediately
+        # overwritten on the next line from token_info["_retry"]. A future
+        # caller passing is_retry=True would have it silently ignored.
+        # Now we derive is_retry once from token_info (the source of
+        # truth — the scheduler sets _retry=True when re-queueing).
         is_retry = bool(token_info.get("_retry"))
         symbol = (token_info.get("symbol") or token_info.get("name", "?")) or "?"
         # Rate limiting is handled internally by GMGNClient._get().
@@ -1294,8 +1325,14 @@ class TrenchingBot:
         block_reason: Optional[str] = None
         position = None
 
-        # Gate 0
-        if self._live_paused:
+        # Gate 0 — FIX C1: read from self.state._live_paused (SharedState) to
+        # match the /live_pause, /live_resume, /close_all commands which all
+        # WRITE to state._live_paused (alerts/bot.py:518,533,566). Previously
+        # this checked self._live_paused (TrenchingBot attribute) which is
+        # set once at __init__ from settings.live_paused_at_start and never
+        # updated — so /live_pause was a no-op in production (the gate never
+        # flipped). Now both writer and reader use state._live_paused.
+        if self.state._live_paused:
             block_reason = "Live trading paused via /live_pause"
         # Gate 1
         elif self.paper_mode:
@@ -1400,7 +1437,11 @@ class TrenchingBot:
 
         if self.paper_mode:
             return
-        if block_reason is not None and self._live_paused:
+        # FIX C1: read from self.state._live_paused (matching the write in
+        # alerts/bot.py:518 / 533 / 566) so /live_pause actually blocks
+        # the post-exec alert. Previously read self._live_paused which is
+        # never updated after init → /live_pause was a no-op.
+        if block_reason is not None and self.state._live_paused:
             # User explicitly paused — don't spam
             return
 

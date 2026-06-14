@@ -588,7 +588,15 @@ async def cmd_close_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         try:
             from core.jupiter_client import SOL_MINT
-            token_decimals = 9  # default; could fetch from token info
+            # FIX M5: infer decimals from position's raw_gmgn_json instead
+            # of hardcoding 9. SPL tokens on Solana commonly use 6 decimals
+            # (USDC, USDT) or 9 (SOL, native). Hardcoding 9 caused every
+            # non-9-decimal token to be sold with wrong amount (e.g., a
+            # 6-decimal token sold at 1000x intended quantity). Use the
+            # same helper as trade_executor._infer_decimals_from_position
+            # for consistency.
+            from core.trade_executor import TradeExecutor
+            token_decimals = TradeExecutor()._infer_decimals_from_position(pos)
             sell_lamports = int(current_amount * (10 ** token_decimals))
             result = await state.gmgn_cli.swap(
                 chain="sol",
@@ -603,7 +611,12 @@ async def cmd_close_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if result and result.get("order_id"):
                 # Wait for confirmation
                 status = await state.gmgn_cli.wait_for_order("sol", result["order_id"])
-                if status.get("status") == "confirmed":
+                # FIX C2: same status key fix as buy path
+                order_state = (
+                    status.get("confirmation", {}).get("state")
+                    or status.get("status", "")
+                )
+                if order_state == "confirmed":
                     await state.position_manager.close_position(
                         pos, exit_reason="MANUAL_CLOSE_ALL",
                         exit_price=0.0, pnl_sol=0.0, pnl_pct=0.0, pnl_usd=0.0,

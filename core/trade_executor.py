@@ -198,10 +198,22 @@ class TradeExecutor:
         order_id = result["order_id"]
         strategy_order_id_hint = result.get("strategy_order_id", "") or ""
         status = await self.gmgn_cli.wait_for_order("sol", order_id)
-        if status.get("status") != "confirmed":
+        # FIX C2: read state from confirmation.state (real GMGN CLI response
+        # shape), not top-level "status". Verified by core/gmgn_cli.py:194-202
+        # _is_terminal() which checks both paths. Real response:
+        #   {"confirmation": {"state": "confirmed", "detail": "success"},
+        #    "hash": "...", "report": {...}}
+        # Previously status.get("status") returned None for every response,
+        # making the buy always return None. The test mock used the wrong
+        # format too, masking the bug.
+        order_state = (
+            status.get("confirmation", {}).get("state")
+            or status.get("status", "")
+        )
+        if order_state != "confirmed":
             logger.warning(
                 f"[EXEC-LIVE] BUY {token.symbol}: order {order_id} not confirmed: "
-                f"{status.get('status')}"
+                f"{order_state}"
             )
             return None
 
@@ -529,9 +541,15 @@ class TradeExecutor:
 
         order_id = result["order_id"]
         status = await self.gmgn_cli.wait_for_order("sol", order_id)
-        if status.get("status") != "confirmed":
+        # FIX C2: same as buy path — read state from confirmation.state
+        # (real GMGN CLI response shape) instead of top-level "status".
+        order_state = (
+            status.get("confirmation", {}).get("state")
+            or status.get("status", "")
+        )
+        if order_state != "confirmed":
             logger.warning(
-                f"[EXEC-LIVE] SELL {position['token_symbol']}: order {order_id} not confirmed"
+                f"[EXEC-LIVE] SELL {position['token_symbol']}: order {order_id} not confirmed ({order_state})"
             )
             return None
 

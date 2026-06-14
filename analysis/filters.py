@@ -36,9 +36,14 @@ def is_compound_permanent_failure(
 ) -> bool:
     """Check if a token qualifies for compound permanent skip.
 
-    Rule: age > 30min AND fee < 0.1 SOL (pre or post migrate).
-    Such a token has had enough time to prove traction but hasn't.
-    Independent of hard gate min_total_fee — runs regardless of other failures.
+    Rule: age > COMPOUND_AGE_MINUTES (30min) AND fee < COMPOUND_FEE_MIN_SOL (1.0 SOL),
+    pre or post migrate. Such a token has had enough time to prove traction
+    but hasn't. Independent of hard gate min_total_fee — runs regardless
+    of other failures.
+
+    FIX M2: docstring previously said "fee < 0.1 SOL" which is stale — the
+    actual constant is COMPOUND_FEE_MIN_SOL = 1.0 (was bumped from 0.1
+    during audit cycle 2 but docstring was never updated).
     """
     age_seconds = time.time() - max(
         token.creation_timestamp or 0, token.open_timestamp or 0
@@ -129,11 +134,11 @@ def _filter_min_volume_5m(token: TokenData, params: dict) -> dict:
 
 
 def _filter_min_total_fee(token: TokenData, params: dict) -> dict:
-    min_fee = params.get("min_fee_sol", 0.5)
-    fee = token.fee_collected  # dalam SOL
-
-
-def _filter_min_total_fee(token: TokenData, params: dict) -> dict:
+    # FIX M1: removed duplicate first definition (was at lines 131-134,
+    # had no return statement so would return None — silent bug if anyone
+    # ever removed the second def). Python's last-wins for `def` made
+    # the second definition the one actually called, but the dead first
+    # def was a footgun.
     min_fee = params.get("min_fee_sol", 0.5)
     fee = token.fee_collected  # dalam SOL
 

@@ -144,8 +144,12 @@ class TestBuyLiveUsesConditionOrders:
             "order_id": "ord_test",
             "strategy_order_id": "strat_abc",
         })
+        # FIX H3: use real GMGN CLI response shape (confirmation.state)
+        # not the wrong top-level "status" key. core/trade_executor.py
+        # now reads from confirmation.state (FIX C2) — mock must match
+        # the real format or the test will pass but production will fail.
         gmgn_cli.wait_for_order = AsyncMock(return_value={
-            "status": "confirmed",
+            "confirmation": {"state": "confirmed", "detail": "success"},
             "hash": "tx_test",
             "report": {
                 "output_amount": "1000000",
