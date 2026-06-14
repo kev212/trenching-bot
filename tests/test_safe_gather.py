@@ -212,6 +212,6 @@ def test_main_uses_safe_gather():
     assert "asyncio.wait_for(" not in src.split(
         "# Phase B: fetch token data"
     )[1].split(
-        "if not security:"
-    )[0] if len(src.split("# Phase B: fetch token data")) > 1 else True, \
+        "if not info:"
+    )[0] if len(src.split("# Phase B: fetch token data")) > 1 and len(src.split("# Phase B: fetch token data")[1].split("if not info:")) > 1 else True, \
         "GMGN batches should use safe_gather, not raw wait_for"

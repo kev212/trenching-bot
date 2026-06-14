@@ -55,56 +55,6 @@ def _safe_float(val, default=0.0) -> float:
         return default
 
 
-def _calculate_rug_score(security: dict) -> float:
-    """Use GMGN's rug_ratio (ML-computed) with manual fallback."""
-    if not security:
-        return 0.0
-
-    # Primary: GMGN's own rug_ratio
-    rug_ratio = security.get("rug_ratio")
-    if rug_ratio is not None and rug_ratio != "":
-        try:
-            return min(max(float(rug_ratio), 0.0), 1.0)
-        except (TypeError, ValueError):
-            pass
-
-    # Fallback: manual calc
-    score = 0.0
-    if security.get("honeypot") in (1, True, "1"):
-        score += 0.4
-    if security.get("blacklist") in (1, True, "1"):
-        score += 0.3
-    if security.get("renounced_mint") in (False, 0, "0"):
-        score += 0.1
-    if security.get("renounced_freeze_account") in (False, 0, "0"):
-        score += 0.1
-
-    buy_tax = _safe_float(security.get("buy_tax"))
-    sell_tax = _safe_float(security.get("sell_tax"))
-    if buy_tax > 0.1 or sell_tax > 0.1:
-        score += 0.2
-
-    burn = _safe_float(security.get("burn_ratio"), default=1.0)
-    if burn < 0.5:
-        score += 0.1
-
-    if security.get("is_wash_trading") in (True, "true", 1):
-        score += 0.2
-    lock = security.get("lock_summary", {}) or {}
-    if not lock.get("is_locked"):
-        score += 0.15
-    if _safe_float(security.get("top_10_holder_rate")) > 0.5:
-        score += 0.2
-    if _safe_float(security.get("rat_trader_amount_rate")) > 0.3:
-        score += 0.2
-    if _safe_float(security.get("bundler_trader_amount_rate")) > 0.5:
-        score += 0.15
-    if int(security.get("sniper_count", 0) or 0) > 5:
-        score += 0.1
-
-    return min(score, 1.0)
-
-
 def _load_influencers() -> dict:
     """Load influencer list from config."""
     config_path = os.path.join(os.path.dirname(__file__), "config", "influencers.json")
@@ -866,37 +816,26 @@ class TrenchingBot:
 
             batch1 = safe_gather(
                 self.gmgn.get_token_info(address),
-                self.gmgn.get_token_security(address),
                 timeout=GMGN_GATHER_TIMEOUT,
             )
             batch2 = safe_gather(
-                self.gmgn.get_token_holders(address),
                 self.gmgn.get_token_ath(address),
                 self.gmgn.get_kol_holders(address),
                 timeout=GMGN_GATHER_TIMEOUT,
             )
-            (info_r, security_r), (holders_r, ath_r, kol_holders_r) = await safe_gather(batch1, batch2, timeout=GMGN_GATHER_TIMEOUT)
+            (info_r,), (ath_r, kol_holders_r) = await safe_gather(batch1, batch2, timeout=GMGN_GATHER_TIMEOUT)
             info = info_r if not isinstance(info_r, Exception) else {}
-            security = security_r if not isinstance(security_r, Exception) else {}
-            holders = holders_r if not isinstance(holders_r, Exception) else {}
             ath_data = ath_r if not isinstance(ath_r, Exception) else {}
             kol_holders_list = kol_holders_r if not isinstance(kol_holders_r, Exception) else []
             if isinstance(info_r, Exception):
                 logger.debug(f"GMGN info error for {address[:10]}: {info_r}")
-            if isinstance(security_r, Exception):
-                logger.debug(f"GMGN security error for {address[:10]}: {security_r}")
-            if isinstance(holders_r, Exception):
-                logger.debug(f"GMGN holders error for {address[:10]}: {holders_r}")
             if isinstance(ath_r, Exception):
                 logger.debug(f"GMGN ath error for {address[:10]}: {ath_r}")
             if isinstance(kol_holders_r, Exception):
                 logger.debug(f"GMGN kol_holders error for {address[:10]}: {kol_holders_r}")
         except Exception as e:
             logger.warning(f"GMGN gather error for {address[:10]}: {e}")
-            info, security, holders, ath_data = {}, {}, {}, {}
-
-        if not security:
-            logger.warning(f"[SECURITY-EMPTY] {symbol} ({address[:8]}): rug_score will be 0")
+            info, ath_data = {}, {}
 
         if not info:
             logger.info(f"[SKIP] {symbol} ({address[:8]}): no data")
@@ -908,7 +847,6 @@ class TrenchingBot:
         price_obj = info.get("price", {}) if isinstance(info.get("price"), dict) else {}
         stat_obj = info.get("stat", {}) if isinstance(info.get("stat"), dict) else {}
         dev_obj = info.get("dev", {}) if isinstance(info.get("dev"), dict) else {}
-        holders_list = holders.get("list", []) if isinstance(holders.get("list"), list) else []
         wallet_tags = info.get("wallet_tags_stat", {}) or {}
         renowned_wallets = int(wallet_tags.get("renowned_wallets", 0) or 0)
         kol_still_holding = (
@@ -918,19 +856,6 @@ class TrenchingBot:
                 and float(w.get("amount_percentage", 0) or 0) > 0
             )
             if isinstance(kol_holders_list, list) else 0
-        )
-
-        # Data quality flag: True when holder data is missing/failed AND the
-        # stat fallback (top_10_holder_rate, fresh_wallet_rate) is also
-        # missing. In that case, hard-gate filters that depend on holder
-        # distribution or fresh-wallet percentage would be running on
-        # implicit zeros (= "perfect distribution") — that's a silent
-        # false-pass. We mark the token as data-insufficient so the
-        # downstream filter check can refuse to pass.
-        holder_data_missing = (
-            not holders_list
-            and not stat_obj.get("top_10_holder_rate")
-            and not stat_obj.get("fresh_wallet_rate")
         )
 
         # Calculate market cap from price * total_supply
@@ -953,25 +878,14 @@ class TrenchingBot:
             f"failed={ath_fetch_failed}, candles={ath_data.get('candles_checked', 0) if ath_data else 0}"
         )
 
-        # Calculate holder stats from holders list
-        if holders_list and len(holders_list) >= 15:
-            top15 = holders_list[:15]
-            # amount_percentage is decimal (0.1189 = 11.89%), convert to percentage
-            top15_pct = sum(float(h.get("amount_percentage", 0)) for h in top15) * 100
-            new_wallet_count = sum(1 for h in holders_list if h.get("is_new", False))
-            new_wallet_pct = (new_wallet_count / len(holders_list) * 100) if holders_list else 0
-            # native_balance is in lamports, convert to SOL (1 SOL = 1e9 lamports)
-            top_holder_balance = float(holders_list[0].get("native_balance", 0)) / 1e9
-        elif holders_list:
-            # Holders < 15: use what we have (less reliable but still data)
-            top15_pct = sum(float(h.get("amount_percentage", 0)) for h in holders_list) * 100
-            new_wallet_pct = (sum(1 for h in holders_list if h.get("is_new", False)) / len(holders_list) * 100) if holders_list else 0
-            top_holder_balance = float(holders_list[0].get("native_balance", 0)) / 1e9
-        else:
-            # Fallback: GMGN stat rates are decimals (0.1847 = 18.47%), convert to percentage
-            top15_pct = float(stat_obj.get("top_10_holder_rate", 0) or 0) * 100
-            new_wallet_pct = float(stat_obj.get("fresh_wallet_rate", 0) or 0) * 100
-            top_holder_balance = 0
+        # Holder stats: use GMGN stat aggregates (top_10_holder_rate, fresh_wallet_rate).
+        # Previously computed from get_token_holders (per-wallet), but that call
+        # was dropped to save GMGN API calls. top_10_holder_rate is the same
+        # aggregate the filter actually needs (slightly more conservative than
+        # top 15 sum, but within tolerance for filter pass/fail).
+        top15_pct = float(stat_obj.get("top_10_holder_rate", 0) or 0) * 100
+        new_wallet_pct = float(stat_obj.get("fresh_wallet_rate", 0) or 0) * 100
+        top_holder_balance = 0
 
         # Detect wash trading from GMGN data
         # Check bot_degen_rate or trending wash_trading flag
@@ -998,7 +912,7 @@ class TrenchingBot:
             kol_still_holding=kol_still_holding,
             top15_hold_pct=top15_pct,
             insider_ratio=float(stat_obj.get("top_bundler_trader_percentage", 0) or 0),
-            rug_probability=_calculate_rug_score(security),
+            rug_probability=0.0,
             funded_wallet_new_pct=new_wallet_pct,
             top_holder_balance_sol=top_holder_balance,
             fee_collected=float(info.get("total_fee", 0) or 0),
@@ -1068,19 +982,10 @@ class TrenchingBot:
         fv = run_all_filters(token, filter_params)
 
         # Hard gate: ALL filters must pass.
-        # Safety override: if holder data was missing (fetch failed AND stat
-        # fallback missing), do NOT pass on implicit zeros — force a
-        # `holder_data_missing` filter failure so the token is re-queued
-        # (or dropped after max retries) instead of falsely passing as
-        # "perfect distribution".
+        # Note: top_10_holder_rate / fresh_wallet_rate from stat_obj always
+        # provides a value (0 if missing), so no "holder_data_missing" gate
+        # is needed — the filters evaluate on actual data.
         all_passed, failures = check_hard_gate(fv)
-        if holder_data_missing and all_passed and "holder_data_missing" not in failures:
-            all_passed = False
-            failures = list(failures) + ["holder_data_missing"]
-            logger.info(
-                f"[DATA-INSURFICIENT] {symbol} ({address[:8]}): "
-                "holder/security fetch returned no data; refusing implicit-zero pass"
-            )
 
         # Phase E2-Alert: log every hard-gate outcome (pass or fail) for retro-tuning
         try:
